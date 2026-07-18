@@ -1,0 +1,1505 @@
+{
+  "schemaVersion": 4,
+  "generatedAt": "2026-07-18T22:08:11.369Z",
+  "provenance": {
+    "packageVersion": "0.1.0",
+    "sourceCommit": "6ea5890bd32dc8dccd29ceffc62eaf1a364d2677",
+    "sourceDirty": false,
+    "sourceStatusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lockfileSha256": "704f96f65ec50630826b69847f65b3d895570853813bc9ddf9ae721389ea41a3",
+    "corpusSha256": "e988e863322b976208bd16ad7685aa8a2bf67f568e67c27eb6b8ee143e611959",
+    "implementationSha256": "977607b92cddf16ddb567858824dd2a16b334eb5631523b4188979ffa9aec405",
+    "command": [
+      "bun",
+      "run",
+      "bench",
+      "--output=benchmarks/results/2026-07-19-windows-x64.json"
+    ]
+  },
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "bun": "1.3.14",
+    "cpu": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD"
+  },
+  "methodology": {
+    "deterministic": "In-memory protocol mechanics only; no model, OpenCode baseline, or semantic-code claim.",
+    "staticSize": "Exact UTF-8 bytes for one generated 1,000-line fixture; not token estimates.",
+    "renderingWireSize": "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",
+    "micro": "Five warmups, 100 measured runs below 10k lines and 30 otherwise; wall-clock timings are non-gating."
+  },
+  "deterministic": {
+    "corpus": [
+      {
+        "id": "exact-single-line",
+        "category": "exact",
+        "base": "one\ntwo\nthree\n",
+        "current": "one\ntwo\nthree\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 2,
+            "endLine": 2,
+            "lines": [
+              "TWO"
+            ]
+          }
+        ],
+        "expectedText": "one\nTWO\nthree\n"
+      },
+      {
+        "id": "exact-batch",
+        "category": "exact",
+        "base": "one\ntwo\nthree",
+        "current": "one\ntwo\nthree",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 1,
+            "endLine": 1,
+            "lines": [
+              "ONE"
+            ]
+          },
+          {
+            "op": "insert",
+            "afterLine": 3,
+            "lines": [
+              "four"
+            ]
+          }
+        ],
+        "expectedText": "ONE\ntwo\nthree\nfour"
+      },
+      {
+        "id": "stale-prefix-insertion",
+        "category": "relocation",
+        "base": "one\ntwo\nthree\n",
+        "current": "prefix\none\ntwo\nthree\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 2,
+            "endLine": 2,
+            "lines": [
+              "TWO"
+            ]
+          }
+        ],
+        "expectedText": "prefix\none\nTWO\nthree\n"
+      },
+      {
+        "id": "stale-target-changed",
+        "category": "stale",
+        "base": "one\ntwo\nthree\n",
+        "current": "one\nchanged\nthree\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 2,
+            "endLine": 2,
+            "lines": [
+              "TWO"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "range-interior-changed",
+        "category": "stale",
+        "base": "start\ninside\nend\n",
+        "current": "start\nconcurrent\nend\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 1,
+            "endLine": 3,
+            "lines": [
+              "replacement"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "duplicate-target-with-context",
+        "category": "ambiguity",
+        "base": "left\ntarget\nright\nother\ntarget\nend\n",
+        "current": "prefix\nleft\ntarget\nright\nother\ntarget\nend\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 2,
+            "endLine": 2,
+            "lines": [
+              "changed"
+            ]
+          }
+        ],
+        "expectedText": "prefix\nleft\nchanged\nright\nother\ntarget\nend\n"
+      },
+      {
+        "id": "contradictory-range-context",
+        "category": "ambiguity",
+        "base": "L\nT\nR\n",
+        "current": "L\nT\nmid\nT\nR\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 2,
+            "endLine": 2,
+            "lines": [
+              "changed"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "contradictory-boundary-context",
+        "category": "ambiguity",
+        "base": "A\nL\nR\nB\n",
+        "current": "A\nL\nR\nmid\nL\nR\nB\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 2,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "selected-duplicate-changed",
+        "category": "ambiguity",
+        "base": "left\ntarget\nright\nother\ntarget\nend\n",
+        "current": "left\nchanged\nright\nother\ntarget\nend\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 2,
+            "endLine": 2,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "selected-boundary-pair-changed",
+        "category": "ambiguity",
+        "base": "A\nL\nR\nB\nL\nR\nC\n",
+        "current": "A\nL\nchanged\nR\nB\nL\nR\nC\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 2,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "bof-copied-boundary",
+        "category": "boundary",
+        "base": "one\ntwo\n",
+        "current": "one\ntwo\none\ntwo\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 0,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "eof-copied-boundary",
+        "category": "boundary",
+        "base": "one\ntwo\n",
+        "current": "one\ntwo\none\ntwo\none\ntwo\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 2,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "concurrent-boundary-insertion",
+        "category": "boundary",
+        "base": "one\ntwo\nthree\n",
+        "current": "one\ntwo\nconcurrent\nthree\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 2,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "changed-target-eol",
+        "category": "encoding",
+        "base": "one\r\ntwo\r\n",
+        "current": "one\r\ntwo\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 2,
+            "endLine": 2,
+            "lines": [
+              "TWO"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "same-boundary-batch",
+        "category": "overlap",
+        "base": "one\ntwo\n",
+        "current": "one\ntwo\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 1,
+            "lines": [
+              "first"
+            ]
+          },
+          {
+            "op": "insert",
+            "afterLine": 1,
+            "lines": [
+              "second"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "bof-changed",
+        "category": "boundary",
+        "base": "one\ntwo\n",
+        "current": "concurrent\none\ntwo\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 0,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "eof-changed",
+        "category": "boundary",
+        "base": "one\ntwo\n",
+        "current": "one\ntwo\nconcurrent\n",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 2,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "short-hash-8-collision",
+        "category": "collision",
+        "base": "collision-8-3\n",
+        "current": "collision-8-19\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 1,
+            "endLine": 1,
+            "lines": [
+              "safe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "short-hash-16-collision",
+        "category": "collision",
+        "base": "collision-16-224\n",
+        "current": "collision-16-343\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 1,
+            "endLine": 1,
+            "lines": [
+              "safe"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "unrelated-suffix-change",
+        "category": "relocation",
+        "base": "one\ntwo\nthree\n",
+        "current": "one\ntwo\nthree\nextra\n",
+        "operations": [
+          {
+            "op": "replace",
+            "startLine": 1,
+            "endLine": 1,
+            "lines": [
+              "ONE"
+            ]
+          }
+        ],
+        "expectedText": "ONE\ntwo\nthree\nextra\n"
+      },
+      {
+        "id": "empty-file-boundary-changed",
+        "category": "boundary",
+        "base": "",
+        "current": "concurrent",
+        "operations": [
+          {
+            "op": "insert",
+            "afterLine": 0,
+            "lines": [
+              "ours"
+            ]
+          }
+        ]
+      }
+    ],
+    "outcomes": [
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "exact-single-line",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "exact-batch",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "stale-prefix-insertion",
+        "category": "relocation",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "stale-target-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "range-interior-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "duplicate-target-with-context",
+        "category": "ambiguity",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "contradictory-range-context",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "contradictory-boundary-context",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "selected-duplicate-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "selected-boundary-pair-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "bof-copied-boundary",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "eof-copied-boundary",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "concurrent-boundary-insertion",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "changed-target-eol",
+        "category": "encoding",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "same-boundary-batch",
+        "category": "overlap",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "bof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "eof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "short-hash-8-collision",
+        "category": "collision",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "short-hash-16-collision",
+        "category": "collision",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "unrelated-suffix-change",
+        "category": "relocation",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-strict",
+        "scenario": "empty-file-boundary-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: The file changed since hashline_read. Reread before editing."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "exact-single-line",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "exact-batch",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "stale-prefix-insertion",
+        "category": "relocation",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "stale-target-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: Lines 2-2 are no longer unchanged."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "range-interior-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: Lines 1-3 are no longer unchanged."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "duplicate-target-with-context",
+        "category": "ambiguity",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "contradictory-range-context",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "AMBIGUOUS_RELOCATION: Lines 2-2 have contradictory unique relocation evidence."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "contradictory-boundary-context",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "AMBIGUOUS_RELOCATION: Boundary 2 has contradictory unique relocation evidence."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "selected-duplicate-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "AMBIGUOUS_RELOCATION: Lines 2-2 cannot be uniquely relocated."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "selected-boundary-pair-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "AMBIGUOUS_RELOCATION: The insertion boundary is not unique."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "bof-copied-boundary",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "AMBIGUOUS_RELOCATION: The beginning-of-file boundary is ambiguous."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "eof-copied-boundary",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "AMBIGUOUS_RELOCATION: The end-of-file boundary is ambiguous."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "concurrent-boundary-insertion",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "BOUNDARY_CHANGED: The insertion boundary is no longer adjacent."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "changed-target-eol",
+        "category": "encoding",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: Lines 2-2 are no longer unchanged."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "same-boundary-batch",
+        "category": "overlap",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "bof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "BOUNDARY_CHANGED: The beginning-of-file boundary changed."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "eof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "BOUNDARY_CHANGED: The end-of-file boundary changed."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "short-hash-8-collision",
+        "category": "collision",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: Lines 1-1 are no longer unchanged."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "short-hash-16-collision",
+        "category": "collision",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "TARGET_CHANGED: Lines 1-1 are no longer unchanged."
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "unrelated-suffix-change",
+        "category": "relocation",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "scenario": "empty-file-boundary-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "BOUNDARY_CHANGED: The empty-file insertion boundary changed."
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "exact-single-line",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "exact-batch",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "stale-prefix-insertion",
+        "category": "relocation",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "stale-target-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "old text is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "range-interior-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "old text is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "duplicate-target-with-context",
+        "category": "ambiguity",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "old text is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "contradictory-range-context",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "old text is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "contradictory-boundary-context",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "insertion boundary is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "selected-duplicate-changed",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "selected-boundary-pair-changed",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "bof-copied-boundary",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "eof-copied-boundary",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "concurrent-boundary-insertion",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "insertion boundary is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "changed-target-eol",
+        "category": "encoding",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "old text is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "same-boundary-batch",
+        "category": "overlap",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary."
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "bof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "BOF boundary changed"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "eof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "EOF boundary changed"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "short-hash-8-collision",
+        "category": "collision",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "old text is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "short-hash-16-collision",
+        "category": "collision",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "old text is missing or ambiguous"
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "unrelated-suffix-change",
+        "category": "relocation",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "exact-search-replace",
+        "scenario": "empty-file-boundary-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "BOF boundary changed"
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "exact-single-line",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "exact-batch",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "stale-prefix-insertion",
+        "category": "relocation",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "stale-target-changed",
+        "category": "stale",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "range-interior-changed",
+        "category": "stale",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "duplicate-target-with-context",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "contradictory-range-context",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "contradictory-boundary-context",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "selected-duplicate-changed",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "selected-boundary-pair-changed",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "bof-copied-boundary",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "eof-copied-boundary",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "concurrent-boundary-insertion",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "changed-target-eol",
+        "category": "encoding",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "same-boundary-batch",
+        "category": "overlap",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary."
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "bof-changed",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "eof-changed",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "short-hash-8-collision",
+        "category": "collision",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "short-hash-16-collision",
+        "category": "collision",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "unrelated-suffix-change",
+        "category": "relocation",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "line-number-only",
+        "scenario": "empty-file-boundary-changed",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "exact-single-line",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "exact-batch",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "stale-prefix-insertion",
+        "category": "relocation",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "stale-target-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "range-interior-changed",
+        "category": "stale",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "duplicate-target-with-context",
+        "category": "ambiguity",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "contradictory-range-context",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "contradictory-boundary-context",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "selected-duplicate-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "selected-boundary-pair-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "bof-copied-boundary",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "eof-copied-boundary",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "concurrent-boundary-insertion",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "changed-target-eol",
+        "category": "encoding",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "same-boundary-batch",
+        "category": "overlap",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary."
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "bof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "eof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "short-hash-8-collision",
+        "category": "collision",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "short-hash-16-collision",
+        "category": "collision",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "unrelated-suffix-change",
+        "category": "relocation",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "scenario": "empty-file-boundary-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "exact-single-line",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "exact-batch",
+        "category": "exact",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "stale-prefix-insertion",
+        "category": "relocation",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "stale-target-changed",
+        "category": "stale",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "range-interior-changed",
+        "category": "stale",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "duplicate-target-with-context",
+        "category": "ambiguity",
+        "classification": "false_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "contradictory-range-context",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "contradictory-boundary-context",
+        "category": "ambiguity",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "selected-duplicate-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "selected-boundary-pair-changed",
+        "category": "ambiguity",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "bof-copied-boundary",
+        "category": "boundary",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "eof-copied-boundary",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "concurrent-boundary-insertion",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "changed-target-eol",
+        "category": "encoding",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "same-boundary-batch",
+        "category": "overlap",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary."
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "bof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "eof-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "short-hash-8-collision",
+        "category": "collision",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "endpoint hash mismatch"
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "short-hash-16-collision",
+        "category": "collision",
+        "classification": "unsafe_accept",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "unrelated-suffix-change",
+        "category": "relocation",
+        "classification": "exact_apply",
+        "accepted": true
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "scenario": "empty-file-boundary-changed",
+        "category": "boundary",
+        "classification": "safe_reject",
+        "accepted": false,
+        "error": "boundary hash mismatch"
+      }
+    ],
+    "summary": [
+      {
+        "adapter": "better-hashline-strict",
+        "description": "Exact retained snapshot; stale files reject.",
+        "exact_apply": 2,
+        "safe_reject": 16,
+        "false_reject": 3,
+        "unsafe_accept": 0
+      },
+      {
+        "adapter": "better-hashline-unique",
+        "description": "Exact snapshot plus explicit conservative unique relocation.",
+        "exact_apply": 5,
+        "safe_reject": 16,
+        "false_reject": 0,
+        "unsafe_accept": 0
+      },
+      {
+        "adapter": "exact-search-replace",
+        "description": "Target-only exact old-text/boundary matching without fuzzy fallback.",
+        "exact_apply": 4,
+        "safe_reject": 12,
+        "false_reject": 1,
+        "unsafe_accept": 4
+      },
+      {
+        "adapter": "line-number-only",
+        "description": "Original line numbers applied directly to the live file.",
+        "exact_apply": 3,
+        "safe_reject": 1,
+        "false_reject": 0,
+        "unsafe_accept": 17
+      },
+      {
+        "adapter": "endpoint-hash-8",
+        "description": "8-bit hashes validate range endpoints at original line numbers.",
+        "exact_apply": 3,
+        "safe_reject": 10,
+        "false_reject": 2,
+        "unsafe_accept": 6
+      },
+      {
+        "adapter": "endpoint-hash-16",
+        "description": "16-bit hashes validate range endpoints at original line numbers.",
+        "exact_apply": 3,
+        "safe_reject": 11,
+        "false_reject": 2,
+        "unsafe_accept": 5
+      }
+    ]
+  },
+  "staticSize": [
+    {
+      "format": "native",
+      "bytes": 26678,
+      "overheadBytes": 0,
+      "overheadPercent": 0
+    },
+    {
+      "format": "betterHashline",
+      "bytes": 25758,
+      "overheadBytes": -920,
+      "overheadPercent": -3.45
+    },
+    {
+      "format": "endpointHash8",
+      "bytes": 28678,
+      "overheadBytes": 2000,
+      "overheadPercent": 7.5
+    },
+    {
+      "format": "endpointHash16",
+      "bytes": 30678,
+      "overheadBytes": 4000,
+      "overheadPercent": 14.99
+    }
+  ],
+  "renderingWireSize": {
+    "scenario": "one 3,000-character ASCII line with a 4,096-byte output budget",
+    "legacyPreviewBytes": 2171,
+    "legacyIssued": false,
+    "currentIssuedBytes": 3079,
+    "currentIssued": true,
+    "deltaBytes": 908
+  },
+  "micro": [
+    {
+      "lineCount": 10,
+      "bytes": 270,
+      "sha256": {
+        "medianMs": 0.0006,
+        "p95Ms": 0.0056
+      },
+      "decode": {
+        "medianMs": 0.0042,
+        "p95Ms": 0.0065
+      },
+      "strictEditPlan": {
+        "medianMs": 0.0062,
+        "p95Ms": 0.0106
+      }
+    },
+    {
+      "lineCount": 100,
+      "bytes": 2790,
+      "sha256": {
+        "medianMs": 0.0015,
+        "p95Ms": 0.0024
+      },
+      "decode": {
+        "medianMs": 0.0257,
+        "p95Ms": 0.0379
+      },
+      "strictEditPlan": {
+        "medianMs": 0.0327,
+        "p95Ms": 0.0389
+      }
+    },
+    {
+      "lineCount": 1000,
+      "bytes": 28890,
+      "sha256": {
+        "medianMs": 0.0114,
+        "p95Ms": 0.0125
+      },
+      "decode": {
+        "medianMs": 0.1421,
+        "p95Ms": 0.1782
+      },
+      "strictEditPlan": {
+        "medianMs": 0.3173,
+        "p95Ms": 0.3742
+      }
+    },
+    {
+      "lineCount": 10000,
+      "bytes": 298890,
+      "sha256": {
+        "medianMs": 0.1139,
+        "p95Ms": 0.1187
+      },
+      "decode": {
+        "medianMs": 1.407,
+        "p95Ms": 3.4029
+      },
+      "strictEditPlan": {
+        "medianMs": 3.2356,
+        "p95Ms": 3.5702
+      }
+    },
+    {
+      "lineCount": 20000,
+      "bytes": 608890,
+      "sha256": {
+        "medianMs": 0.2411,
+        "p95Ms": 0.2445
+      },
+      "decode": {
+        "medianMs": 2.7762,
+        "p95Ms": 4.9531
+      },
+      "strictEditPlan": {
+        "medianMs": 6.7962,
+        "p95Ms": 7.6569
+      }
+    }
+  ]
+}
