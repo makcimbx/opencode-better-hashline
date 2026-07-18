@@ -175,6 +175,15 @@ export class SnapshotStore {
   }
 
   assertRangeIssued(snapshot: Snapshot, start: number, end: number): void {
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      start < 1 ||
+      end < start ||
+      end > snapshot.document.lines.length
+    ) {
+      fail("INVALID_ARGUMENT", `Lines ${start}-${end} are outside the snapshot.`);
+    }
     const covered = snapshot.issued.some((range) => range.start <= start && range.end >= end);
     if (!covered) {
       fail(

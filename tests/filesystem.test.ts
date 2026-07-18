@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import * as fsPromises from "node:fs/promises";
 import {
   chmod,
   link,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   stat,
@@ -106,6 +109,21 @@ describe("filesystem resolution and permissions", () => {
     } finally {
       await rm(outsideRoot, { recursive: true, force: true });
     }
+
+    if (process.platform !== "win32") {
+      const wildcardRoot = join(tmpdir(), `better-hashline-external-${randomUUID()}-*?`);
+      try {
+        await mkdir(wildcardRoot);
+        await writeFile(join(wildcardRoot, "outside"), "outside");
+        const outside = await resolveExistingFile(join(wildcardRoot, "outside"), root);
+        await authorizeExternal(context, outside);
+        const external = asks.at(-1) as { patterns: string[]; always: string[] };
+        expect(external.patterns).toHaveLength(1);
+        expect(external.always).toEqual([]);
+      } finally {
+        await rm(wildcardRoot, { recursive: true, force: true });
+      }
+    }
   });
 
   test("rejects aborted reads and hard-linked edit targets", async () => {
@@ -135,16 +153,29 @@ describe("filesystem resolution and permissions", () => {
     await expect(readStableFile(resolved, 1024, false)).rejects.toThrow("PATH_MISMATCH:");
   });
 
-  test("rejects unsafe paths reached only through canonical symlink resolution", async () => {
-    if (process.platform === "win32") return;
-    const unsafeDirectory = join(root, "unsafe*parent");
-    await mkdir(unsafeDirectory);
-    await writeFile(join(unsafeDirectory, "file"), "content");
-    await symlink(unsafeDirectory, join(root, "clean-parent"));
-    await expect(resolveExistingFile("clean-parent/file", root)).rejects.toThrow(
-      "UNSUPPORTED_FILE:",
-    );
-    await expect(resolveNewFile("clean-parent/new", root)).rejects.toThrow("UNSUPPORTED_FILE:");
+  test("accepts literal permission characters and rejects unsafe canonical normalization", async () => {
+    const literalDirectory = join(root, "literal[slug]{value}!");
+    await mkdir(literalDirectory);
+    await writeFile(join(literalDirectory, "file"), "content");
+    await expect(resolveExistingFile(join(literalDirectory, "file"), root)).resolves.toBeDefined();
+    await expect(resolveNewFile(join(literalDirectory, "new"), root)).resolves.toBeDefined();
+
+    if (process.platform === "win32") {
+      await expect(resolveNewFile("bad?.txt", root)).rejects.toThrow("INVALID_ARGUMENT:");
+      await expect(resolveNewFile("bad*.txt", root)).rejects.toThrow("INVALID_ARGUMENT:");
+      return;
+    }
+    const wildcardDirectory = join(root, "wild*?parent");
+    await mkdir(wildcardDirectory);
+    await writeFile(join(wildcardDirectory, "file"), "content");
+    await symlink(wildcardDirectory, join(root, "clean-parent"));
+    await expect(resolveExistingFile("clean-parent/file", root)).resolves.toBeDefined();
+    await expect(resolveNewFile("clean-parent/new", root)).resolves.toBeDefined();
+
+    const backslashDirectory = join(root, "unsafe\\parent");
+    await mkdir(backslashDirectory);
+    await symlink(backslashDirectory, join(root, "backslash-parent"));
+    await expect(resolveNewFile("backslash-parent/new", root)).rejects.toThrow("UNSUPPORTED_FILE:");
 
     await writeFile(join(root, "unsafe\nname"), "content");
     await symlink("unsafe\nname", join(root, "clean-file"));
@@ -260,6 +291,7 @@ describe("filesystem publication", () => {
       signal: new AbortController().signal,
     });
     expect(await readFile(resolved.canonicalPath, "utf8")).toBe("created");
+    expect((await stat(resolved.canonicalPath)).nlink).toBe(1);
     await expect(assertTargetAbsent(resolved)).rejects.toThrow("TARGET_EXISTS:");
     await expect(
       publishNewFile({
@@ -284,6 +316,166 @@ describe("filesystem publication", () => {
     ]);
     expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    expect(
+      String(
+        (outcomes.find(({ status }) => status === "rejected") as PromiseRejectedResult).reason,
+      ),
+    ).toContain("TARGET_EXISTS:");
+    expect(["one", "two"]).toContain(await readFile(concurrent.canonicalPath, "utf8"));
+  });
+
+  test("maps unsupported replacement and create publication errors", async () => {
+    for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+      const path = join(root, `replace-${code}`);
+      await writeFile(path, "old");
+      const resolved = await resolveExistingFile(path, root);
+      const expected = await readStableFile(resolved, 1024, true);
+      const mock = spyOn(fsPromises, "rename").mockImplementation(async () => {
+        throw Object.assign(new Error(`raw ${code}`), { code });
+      });
+      try {
+        await expect(
+          publishReplacement({
+            resolved,
+            expected,
+            replacement: encoder.encode("new"),
+            maxBytes: 1024,
+            signal: new AbortController().signal,
+            consume() {},
+          }),
+        ).rejects.toThrow("UNSUPPORTED_FILE:");
+      } finally {
+        mock.mockRestore();
+      }
+      expect(await readFile(path, "utf8")).toBe("old");
+    }
+
+    for (const code of ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM"]) {
+      const resolved = await resolveNewFile(`create-${code}`, root);
+      const mock = spyOn(fsPromises, "link").mockImplementation(async () => {
+        throw Object.assign(new Error(`raw ${code}`), { code });
+      });
+      try {
+        await expect(
+          publishNewFile({
+            resolved,
+            bytes: encoder.encode("new"),
+            signal: new AbortController().signal,
+          }),
+        ).rejects.toThrow("UNSUPPORTED_FILE:");
+      } finally {
+        mock.mockRestore();
+      }
+      await expect(assertTargetAbsent(resolved)).resolves.toBeUndefined();
+    }
+    expect((await readdir(root)).some((entry) => entry.includes(".hashline-"))).toBe(false);
+  });
+
+  test("detects post-link byte, identity, and hardlink changes without rollback", async () => {
+    const realLink = fsPromises.link;
+
+    const changed = await resolveNewFile("changed-after-link", root);
+    const linkMock = spyOn(fsPromises, "link").mockImplementation(async (source, destination) => {
+      await realLink(source, destination);
+      await writeFile(destination, "changed");
+    });
+    try {
+      await expect(
+        publishNewFile({
+          resolved: changed,
+          bytes: encoder.encode("created"),
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow("RACE_AFTER_WRITE:");
+    } finally {
+      linkMock.mockRestore();
+    }
+    expect(await readFile(changed.canonicalPath, "utf8")).toBe("changed");
+
+    const replaced = await resolveNewFile("replaced-after-link", root);
+    const replacedMock = spyOn(fsPromises, "link").mockImplementation(
+      async (source, destination) => {
+        await realLink(source, destination);
+        await rm(destination);
+        await writeFile(destination, "created");
+      },
+    );
+    try {
+      await expect(
+        publishNewFile({
+          resolved: replaced,
+          bytes: encoder.encode("created"),
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow("RACE_AFTER_WRITE:");
+    } finally {
+      replacedMock.mockRestore();
+    }
+    expect(await readFile(replaced.canonicalPath, "utf8")).toBe("created");
+
+    const aliased = await resolveNewFile("aliased-after-link", root);
+    const alias = join(root, "external-alias");
+    const aliasMock = spyOn(fsPromises, "link").mockImplementation(async (source, destination) => {
+      await realLink(source, destination);
+      await realLink(destination, alias);
+    });
+    try {
+      await expect(
+        publishNewFile({
+          resolved: aliased,
+          bytes: encoder.encode("created"),
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow("RACE_AFTER_WRITE:");
+    } finally {
+      aliasMock.mockRestore();
+    }
+    expect((await stat(aliased.canonicalPath)).nlink).toBe(2);
+  });
+
+  test("reports cancellation and cleanup failures after create commit", async () => {
+    const realLink = fsPromises.link;
+    const cancelled = await resolveNewFile("cancelled-after-link", root);
+    const controller = new AbortController();
+    const linkMock = spyOn(fsPromises, "link").mockImplementation(async (source, destination) => {
+      await realLink(source, destination);
+      controller.abort(new Error("cancelled after link"));
+    });
+    try {
+      await expect(
+        publishNewFile({
+          resolved: cancelled,
+          bytes: encoder.encode("committed"),
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow("RACE_AFTER_WRITE:");
+    } finally {
+      linkMock.mockRestore();
+    }
+    expect(await readFile(cancelled.canonicalPath, "utf8")).toBe("committed");
+
+    const cleanupFailure = await resolveNewFile("cleanup-failed-after-link", root);
+    const realRm = fsPromises.rm;
+    let injected = false;
+    const rmMock = spyOn(fsPromises, "rm").mockImplementation(async (path, options) => {
+      if (!injected && String(path).includes(".hashline-")) {
+        injected = true;
+        throw Object.assign(new Error("raw EBUSY"), { code: "EBUSY" });
+      }
+      return realRm(path, options);
+    });
+    try {
+      await expect(
+        publishNewFile({
+          resolved: cleanupFailure,
+          bytes: encoder.encode("committed"),
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow("RACE_AFTER_WRITE:");
+    } finally {
+      rmMock.mockRestore();
+    }
+    expect(await readFile(cleanupFailure.canonicalPath, "utf8")).toBe("committed");
   });
 
   test("does not create a file after cancellation", async () => {

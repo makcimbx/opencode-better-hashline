@@ -4,7 +4,7 @@ import { relative } from "node:path";
 import { type Plugin, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
 import type { EditOperation, RebaseMode } from "./edits.js";
-import { planEdits } from "./edits.js";
+import { planEdits, validateEditOperations } from "./edits.js";
 import { fail, HashlineError } from "./errors.js";
 import {
   assertTargetAbsent,
@@ -32,19 +32,53 @@ import { assertLineLimit, decodeTextDocument, encodeNewText } from "./text.js";
 
 const NATIVE_MUTATORS = new Set(["edit", "write", "apply_patch"]);
 
-const editOperation = tool.schema.object({
+const editOperationShape = {
   op: tool.schema.enum(["replace", "insert", "replace_file"]),
   startLine: tool.schema.number().int().min(1).optional(),
   endLine: tool.schema.number().int().min(1).optional(),
   afterLine: tool.schema.number().int().min(0).optional(),
   lines: tool.schema.array(tool.schema.string().max(16 * 1024 * 1024)).max(100_000),
   finalNewline: tool.schema.boolean().optional(),
-});
+};
+const editOperation = tool.schema.object(editOperationShape).strict();
+
+const readArgumentShape = {
+  filePath: tool.schema.string().min(1).describe("Path relative to the session directory"),
+  offset: tool.schema.number().int().min(1).optional().describe("One-based first line"),
+  limit: tool.schema
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .optional()
+    .describe("Maximum rendered lines; defaults to 1000"),
+};
+const readArguments = tool.schema.object(readArgumentShape).strict();
+
+const editArgumentShape = {
+  filePath: tool.schema.string().min(1),
+  snapshotId: tool.schema.string().regex(/^s_[A-Za-z0-9_-]{22}$/),
+  rebase: tool.schema.enum(["none", "unique"]).default("none"),
+  allowHashlinePrefixes: tool.schema
+    .boolean()
+    .optional()
+    .describe("Set true only to write an intentional N| or @hashline-style source line"),
+  operations: tool.schema.array(editOperation).min(1).max(100),
+};
+const editArguments = tool.schema.object(editArgumentShape).strict();
+
+const writeArgumentShape = {
+  filePath: tool.schema.string().min(1),
+  content: tool.schema
+    .string()
+    .max(16 * 1024 * 1024)
+    .describe("Complete file content"),
+};
+const writeArguments = tool.schema.object(writeArgumentShape).strict();
 
 type PendingRead = {
   snapshotId: string;
   scope: SnapshotScope;
-  canonicalPath: string;
   page: IssuedPage;
   outputDigest: string;
   createdAt: number;
@@ -73,6 +107,10 @@ function displayPath(worktree: string, canonicalPath: string): string {
 
 function unifiedDiff(path: string, before: string, after: string): string {
   return createTwoFilesPatch(path, path, before, after, "before", "after", { context: 3 });
+}
+
+function invalidArguments(toolName: string): never {
+  fail("INVALID_ARGUMENT", `Invalid ${toolName} arguments.`);
 }
 
 function assertNoDisplayPrefixes(operations: readonly EditOperation[]): void {
@@ -210,7 +248,6 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
     for (const [id, value] of pendingReads) {
       if (value.createdAt >= expiredBefore && pendingReads.size < options.maxSnapshots) break;
       pendingReads.delete(id);
-      snapshots.invalidatePath(value.scope, value.canonicalPath);
     }
     pendingReads.set(pendingId, pending);
   }
@@ -218,20 +255,13 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
   const hashlineRead = tool({
     description:
       "Read a UTF-8 text file and issue an exact snapshot for hashline_edit. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited.",
-    args: {
-      filePath: tool.schema.string().min(1).describe("Path relative to the session directory"),
-      offset: tool.schema.number().int().min(1).optional().describe("One-based first line"),
-      limit: tool.schema
-        .number()
-        .int()
-        .min(1)
-        .max(1000)
-        .optional()
-        .describe("Maximum rendered lines; defaults to 1000"),
-    },
-    async execute(args, context) {
+    args: readArgumentShape,
+    async execute(rawArgs, context) {
       assertConfigured();
       throwIfAborted(context.abort);
+      const parsed = readArguments.safeParse(rawArgs);
+      if (!parsed.success) invalidArguments("hashline_read");
+      const args = parsed.data;
       const resolved = await resolveExistingFile(args.filePath, context.directory);
       await authorizeExternal(context, resolved);
       await authorizeRead(context, resolved);
@@ -248,7 +278,6 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
       rememberPending(pendingId, {
         snapshotId: snapshot.id,
         scope: snapshot.scope,
-        canonicalPath: snapshot.canonicalPath,
         page: rendered.page,
         outputDigest: sha256(new TextEncoder().encode(rendered.output)),
         createdAt: Date.now(),
@@ -274,19 +303,19 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
   const hashlineEdit = tool({
     description:
       'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. rebase defaults to none; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.',
-    args: {
-      filePath: tool.schema.string().min(1),
-      snapshotId: tool.schema.string().regex(/^s_[A-Za-z0-9_-]{22}$/),
-      rebase: tool.schema.enum(["none", "unique"]).default("none"),
-      allowHashlinePrefixes: tool.schema
-        .boolean()
-        .optional()
-        .describe("Set true only to write an intentional N| or @hashline-style source line"),
-      operations: tool.schema.array(editOperation).min(1).max(100),
-    },
-    async execute(args, context) {
+    args: editArgumentShape,
+    async execute(rawArgs, context) {
       assertConfigured();
       throwIfAborted(context.abort);
+      const parsed = editArguments.safeParse(rawArgs);
+      if (!parsed.success) invalidArguments("hashline_edit");
+      const args = parsed.data;
+      const operations = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
+      const rebase = args.rebase ?? "none";
+      if (rebase !== "none" && rebase !== "unique") {
+        fail("INVALID_ARGUMENT", "rebase must be none or unique.");
+      }
+      if (!args.allowHashlinePrefixes) assertNoDisplayPrefixes(operations);
       const resolved = await resolveExistingFile(args.filePath, context.directory);
       const scope = scopeFor(context);
       const snapshot = snapshots.pin(scope, args.snapshotId);
@@ -294,14 +323,9 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
         if (!sameCanonicalPath(snapshot.canonicalPath, resolved.canonicalPath)) {
           fail("PATH_MISMATCH", "The snapshot belongs to a different canonical path.");
         }
-        await authorizeExternal(context, resolved);
-        const operations = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
-        const rebase = args.rebase ?? "none";
-        if (rebase !== "none" && rebase !== "unique") {
-          fail("INVALID_ARGUMENT", "rebase must be none or unique.");
-        }
-        if (!args.allowHashlinePrefixes) assertNoDisplayPrefixes(operations);
+        validateEditOperations(snapshot.document, operations);
         assertIssued(snapshots, snapshot, operations, rebase);
+        await authorizeExternal(context, resolved);
 
         return await withPathLock(resolved.canonicalPath, async () => {
           const stable = await readStableFile(resolved, options.maxFileBytes, true, context.abort);
@@ -349,16 +373,13 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
   const hashlineWrite = tool({
     description:
       "Create a new UTF-8 file. This tool is create-only and fails if any file, directory, or symlink already exists at the target. Use hashline_edit for existing files.",
-    args: {
-      filePath: tool.schema.string().min(1),
-      content: tool.schema
-        .string()
-        .max(16 * 1024 * 1024)
-        .describe("Complete file content"),
-    },
-    async execute(args, context) {
+    args: writeArgumentShape,
+    async execute(rawArgs, context) {
       assertConfigured();
       throwIfAborted(context.abort);
+      const parsed = writeArguments.safeParse(rawArgs);
+      if (!parsed.success) invalidArguments("hashline_write");
+      const args = parsed.data;
       if (Buffer.byteLength(args.content, "utf8") > options.maxFileBytes) {
         fail("UNSUPPORTED_FILE", "The new file exceeds maxFileBytes.");
       }
@@ -409,14 +430,6 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
       if (input.tool !== "hashline_read") return;
       const pendingId = output.metadata?.hashlinePending;
       if (typeof pendingId !== "string") {
-        const snapshotId = output.metadata?.snapshotId;
-        if (typeof snapshotId === "string") {
-          for (const [id, pending] of pendingReads) {
-            if (pending.snapshotId !== snapshotId) continue;
-            pendingReads.delete(id);
-            snapshots.invalidatePath(pending.scope, pending.canonicalPath);
-          }
-        }
         output.metadata = withoutPendingMetadata(output.metadata);
         delete output.metadata.snapshotId;
         output.output =
@@ -432,14 +445,12 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
         return;
       }
       if (output.metadata.truncated === true) {
-        snapshots.invalidatePath(pending.scope, pending.canonicalPath);
         output.output =
           "SNAPSHOT_REQUIRED: OpenCode truncated this result, so no editable lines were issued. Use a smaller limit.";
         delete output.metadata.snapshotId;
         return;
       }
       if (sha256(new TextEncoder().encode(output.output)) !== pending.outputDigest) {
-        snapshots.invalidatePath(pending.scope, pending.canonicalPath);
         output.output =
           "SNAPSHOT_REQUIRED: Another hook changed this result, so no editable lines were issued. Rerun hashline_read.";
         delete output.metadata.snapshotId;

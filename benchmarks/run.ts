@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { runDeterministicSuite, runMicroSuite, runStaticSizeSuite } from "./suite.js";
+import {
+  runDeterministicSuite,
+  runMicroSuite,
+  runRenderingWireSuite,
+  runStaticSizeSuite,
+} from "./suite.js";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -38,7 +43,11 @@ const implementationSources = await Promise.all(
 
 const deterministic = runDeterministicSuite();
 const staticSize = runStaticSizeSuite();
+const renderingWireSize = runRenderingWireSuite();
 const micro = runMicroSuite();
+if (renderingWireSize.legacyIssued || !renderingWireSize.currentIssued) {
+  throw new Error("Long-line rendering wire-size assertions failed.");
+}
 const summary = new Map(deterministic.summary.map((row) => [row.adapter, row]));
 if (
   summary.get("better-hashline-strict")?.unsafe_accept !== 0 ||
@@ -50,7 +59,7 @@ if (
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -72,11 +81,14 @@ const result = {
     deterministic:
       "In-memory protocol mechanics only; no model, OpenCode baseline, or semantic-code claim.",
     staticSize: "Exact UTF-8 bytes for one generated 1,000-line fixture; not token estimates.",
+    renderingWireSize:
+      "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",
     micro:
       "Five warmups, 100 measured runs below 10k lines and 30 otherwise; wall-clock timings are non-gating.",
   },
   deterministic,
   staticSize,
+  renderingWireSize,
   micro,
 };
 
@@ -84,6 +96,8 @@ console.log("\nDeterministic adversarial corpus\n");
 console.table(deterministic.summary);
 console.log("\nStatic model-visible size\n");
 console.table(staticSize);
+console.log("\nLong-line rendering wire-size change\n");
+console.table([renderingWireSize]);
 console.log("\nCore microbenchmarks (milliseconds)\n");
 console.table(
   micro.map(({ lineCount, bytes, sha256, decode, strictEditPlan }) => ({

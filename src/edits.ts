@@ -169,34 +169,18 @@ function renderWholeFile(
   return { text, bytes: encodeTextDocument(text, base.bom) };
 }
 
-export function planEdits(input: {
-  base: TextDocument;
-  current: TextDocument;
-  operations: readonly EditOperation[];
-  rebase: RebaseMode;
-  maxContextLines: number;
-}): EditPlan {
-  const { base, current, operations, rebase, maxContextLines } = input;
+export function validateEditOperations(
+  base: TextDocument,
+  operations: readonly EditOperation[],
+): void {
   if (operations.length === 0) fail("INVALID_ARGUMENT", "At least one operation is required.");
-  const unchanged = bytesEqual(base.bytes, current.bytes);
-  if (!unchanged && rebase === "none") {
-    fail("TARGET_CHANGED", "The file changed since hashline_read. Reread before editing.");
-  }
-  if (!unchanged && base.bom !== current.bom) {
-    fail("TARGET_CHANGED", "The file byte-order mark changed since hashline_read.");
-  }
-
   const wholeFile = operations.find((operation) => operation.op === "replace_file");
   if (wholeFile) {
     if (operations.length !== 1) {
       fail("OPERATIONS_OVERLAP", "replace_file must be the only operation.");
     }
-    if (rebase !== "none" || !unchanged) {
-      fail("TARGET_CHANGED", "replace_file requires an exact, current snapshot.");
-    }
-    const result = renderWholeFile(base, wholeFile);
-    if (bytesEqual(result.bytes, current.bytes)) fail("NO_CHANGE", "The edit changes no bytes.");
-    return { ...result, operationCount: 1, rebased: false };
+    renderWholeFile(base, wholeFile);
+    return;
   }
 
   for (const operation of operations) {
@@ -219,6 +203,34 @@ export function planEdits(input: {
     }
   }
   assertBaseOperationsCompatible(operations);
+}
+
+export function planEdits(input: {
+  base: TextDocument;
+  current: TextDocument;
+  operations: readonly EditOperation[];
+  rebase: RebaseMode;
+  maxContextLines: number;
+}): EditPlan {
+  const { base, current, operations, rebase, maxContextLines } = input;
+  validateEditOperations(base, operations);
+  const unchanged = bytesEqual(base.bytes, current.bytes);
+  if (!unchanged && rebase === "none") {
+    fail("TARGET_CHANGED", "The file changed since hashline_read. Reread before editing.");
+  }
+  if (!unchanged && base.bom !== current.bom) {
+    fail("TARGET_CHANGED", "The file byte-order mark changed since hashline_read.");
+  }
+
+  const wholeFile = operations.find((operation) => operation.op === "replace_file");
+  if (wholeFile) {
+    if (rebase !== "none" || !unchanged) {
+      fail("TARGET_CHANGED", "replace_file requires an exact, current snapshot.");
+    }
+    const result = renderWholeFile(base, wholeFile);
+    if (bytesEqual(result.bytes, current.bytes)) fail("NO_CHANGE", "The edit changes no bytes.");
+    return { ...result, operationCount: 1, rebased: false };
+  }
 
   const changes: MappedChange[] = [];
   const mapper = unchanged ? undefined : createUniqueMapper(base.lines, current.lines);

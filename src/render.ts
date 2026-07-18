@@ -63,15 +63,10 @@ export function renderSnapshotPage(input: {
     const line = snapshot.document.lines[cursor];
     if (!line) break;
     const full = `${line.number}|${line.text}`;
-    const complete = line.text.length <= 2000;
     const suffix = "... [preview only; line not issued]";
-    const candidate = complete
-      ? full
-      : `${line.number}!|${line.text.slice(0, safeSliceEnd(line.text, 2000))}${suffix}`;
     const nextCursor = cursor + 1;
     const footer = nextCursor >= total ? "@eof" : `@more offset=${nextCursor + 1}`;
-    const note = complete ? "" : "\n@note lines marked ! cannot be edited by line reference";
-    const proposed = `${[...rendered, candidate, footer].join("\n")}${note}`;
+    const proposed = [...rendered, full, footer].join("\n");
 
     if (byteLength(proposed) > maxOutputBytes) {
       if (displayedLines > 0) break;
@@ -85,9 +80,8 @@ export function renderSnapshotPage(input: {
       break;
     }
 
-    rendered.push(candidate);
-    if (complete) addIssuedLine(ranges, line.number);
-    else hasPreviewOnlyLine = true;
+    rendered.push(full);
+    addIssuedLine(ranges, line.number);
     cursor = nextCursor;
     displayedLines += 1;
   }
