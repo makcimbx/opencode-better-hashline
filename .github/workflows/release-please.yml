@@ -91,7 +91,7 @@ jobs:
         id: pack
         shell: bash
         run: |
-          PACKAGE_SMOKE_KEEP_TARBALL=1 bun ./scripts/package-smoke.ts
+          bun run release:pack
           tarball="$(node -p "require('./package.json').name + '-' + require('./package.json').version + '.tgz'")"
           test -f "${tarball}"
           echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"

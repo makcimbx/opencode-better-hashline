@@ -17,11 +17,19 @@ npm may require the package to exist before a trusted publisher can be attached.
 
 1. Verify `npm whoami` under the maintainer account with two-factor authentication.
 2. Run `bun run ci` from the clean public commit selected for `v0.1.0`.
-3. Install the documented pinned npm CLI, then run `PACKAGE_SMOKE_KEEP_TARBALL=1 bun scripts/package-smoke.ts`.
-4. Inspect that retained `opencode-better-hashline-0.1.0.tgz` and publish the exact tested file with `npm publish ./opencode-better-hashline-0.1.0.tgz --access public`. Local publication cannot create GitHub Actions provenance.
-5. Create the matching `v0.1.0` Git tag and GitHub release at that exact revision. The checked-in Release Please manifest already records this bootstrap version.
-6. Configure the exact trusted publisher on npmjs.com.
-7. Remove or revoke any temporary automation token; future releases use OIDC only.
+3. Install and verify the pinned npm CLI:
+
+   ```sh
+   npm install --global npm@11.18.0
+   npm --version
+   ```
+
+   The reported version must be `11.18.0` or newer.
+4. Build, verify, and retain the exact release tarball with the cross-platform command `bun run release:pack`. Do not replace it with shell-specific environment-variable syntax.
+5. Inspect that retained `opencode-better-hashline-0.1.0.tgz` and publish the exact tested file with `npm publish ./opencode-better-hashline-0.1.0.tgz --access public`. Local publication cannot create GitHub Actions provenance.
+6. Create the matching `v0.1.0` Git tag and GitHub release at that exact revision. The checked-in Release Please manifest already records this bootstrap version.
+7. Configure the exact trusted publisher on npmjs.com.
+8. Remove or revoke any temporary automation token; future releases use OIDC only.
 
 Do not merge a Release Please pull request for the bootstrap version. The manual package publication and matching GitHub release establish the initial `0.1.0` baseline; Release Please handles only later versions.
 
