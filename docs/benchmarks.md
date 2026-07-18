@@ -14,22 +14,27 @@ Better Hashline separates mechanical protocol evidence from model-quality eviden
 
 ## Recorded Deterministic Run
 
-Raw result: [`benchmarks/results/2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json)
+Latest raw result: [`benchmarks/results/2026-07-19-windows-x64.json`](../benchmarks/results/2026-07-19-windows-x64.json)
+
+The initial 15-scenario result remains available as immutable historical evidence in
+[`2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json). The
+expanded result adds contradictory-context, surviving-duplicate, and copied-edge-boundary
+regressions without rewriting the original record.
 
 Environment: Windows x64, Bun 1.3.14, AMD64 Family 25 Model 97. Five microbenchmark warmups; 100 measured runs below 10,000 lines and 30 runs at or above it.
 
-The adversarial corpus contains 15 generated cases spanning exact edits, shifted targets, changed targets, interior range mutation, duplicate content, concurrent boundary insertion, EOL change, overlapping insertions, BOF/EOF change, generated 8/16-bit collisions, unrelated cooperative changes, and empty-file boundaries.
+The adversarial corpus contains 21 generated cases spanning exact edits, shifted targets, changed targets, interior range mutation, duplicate content, contradictory relocation evidence, copied boundaries, concurrent boundary insertion, EOL change, overlapping insertions, BOF/EOF change, generated 8/16-bit collisions, unrelated cooperative changes, and empty-file boundaries.
 
 | Adapter | Exact applies | Safe rejects | False rejects | Unsafe accepts |
 | --- | ---: | ---: | ---: | ---: |
-| Better Hashline strict | 2 | 10 | 3 | 0 |
-| Better Hashline unique | 5 | 10 | 0 | 0 |
-| Target-only exact search/replace | 4 | 10 | 1 | 0 |
-| Original line numbers | 3 | 1 | 0 | 11 |
-| 8-bit endpoint hashes | 3 | 7 | 2 | 3 |
-| 16-bit endpoint hashes | 3 | 8 | 2 | 2 |
+| Better Hashline strict | 2 | 16 | 3 | 0 |
+| Better Hashline unique | 5 | 16 | 0 | 0 |
+| Target-only exact search/replace | 4 | 12 | 1 | 4 |
+| Original line numbers | 3 | 1 | 0 | 17 |
+| 8-bit endpoint hashes | 3 | 10 | 2 | 6 |
+| 16-bit endpoint hashes | 3 | 11 | 2 | 5 |
 
-The expected outcomes encode this project's conservative relocation contract. This is useful for finding violations of that contract, not ranking arbitrary production tools. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; the row does not establish an advantage for line-number addressing.
+The expected outcomes encode this project's conservative relocation contract. This is useful for finding violations of that contract, not ranking arbitrary production tools. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The row does not establish an advantage for line-number addressing.
 
 ## Static Size
 
