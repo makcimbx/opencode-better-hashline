@@ -72,7 +72,7 @@ Output grammar:
 @eof
 ```
 
-`N|` lines become editable only after `tool.execute.after` confirms that OpenCode did not generically truncate the custom-tool result. Preview-only `N!|` lines never become issued. A missing private marker, host truncation, cache eviction, or publication failure invalidates the visible snapshot rather than guessing what the model received.
+`N|` lines become editable only after `tool.execute.after` confirms that OpenCode did not generically truncate the custom-tool result. A line is rendered as preview-only `N!|` only when its complete annotated form cannot fit in one configured output page; preview-only lines never become issued. Marker loss, host truncation, or output mutation issues no new refs; previously issued refs on a reused snapshot remain valid. Cache eviction and publication still invalidate affected snapshots rather than guessing what the model received.
 
 ## Edit
 
@@ -121,11 +121,13 @@ Default. The current bytes must equal the snapshot bytes. Any byte change return
 Explicit recovery for cooperative edits. A replacement range relocates only when:
 
 - the exact target line tokens, including delimiters, remain unchanged;
-- bounded exact left and right context select one candidate in both base and current files;
+- the exact target alone is decisive only when it occurs once at the selected base range and once in the current file;
+- every successful bounded exact left/right signature selects the same candidate in the current file;
+- contradictory unique signatures reject as `AMBIGUOUS_RELOCATION`, regardless of search order or context size;
 - all relocated operations preserve their original order;
 - relocated operations do not overlap.
 
-An insertion relocates only when both original neighboring line tokens remain adjacent and unique. BOF/EOF use exact bounded prefix/suffix signatures. A concurrent insertion at the same boundary invalidates the boundary.
+An insertion relocates only when both original neighboring line tokens remain adjacent at the selected base boundary and all successful bounded signatures agree on one boundary. BOF/EOF require a bounded prefix/suffix that occurs only at the corresponding current edge; copied edge evidence is ambiguous. A concurrent insertion at the same boundary invalidates the boundary.
 
 There is no fuzzy normalization, whitespace tolerance, nearest candidate, conflict marker, or fallback from strict to unique.
 
@@ -134,8 +136,8 @@ There is no fuzzy normalization, whitespace tolerance, nearest candidate, confli
 For an existing file:
 
 1. Resolve the lexical path and canonical target.
-2. Request `external_directory` when the canonical target is outside the allowed roots.
-3. Pin and validate snapshot scope, path, and issued provenance.
+2. Pin and validate snapshot scope, path, and issued provenance.
+3. Request `external_directory` when the canonical target is outside the allowed roots. On POSIX, parents containing literal `*` or `?` can be approved once but are not persisted as wildcard rules; Windows rejects those invalid filename characters before permission.
 4. Acquire the process-global canonical-path lock.
 5. Reread bytes and file identity; revalidate symlink target and supported metadata.
 6. Plan every operation against one immutable current document.
@@ -149,7 +151,7 @@ For an existing file:
 
 No rebase or diff change occurs after permission approval. If state changed while approval was pending, publication rejects.
 
-For a new file, `hashline_write` requests the same path permissions, writes and flushes an exclusive same-directory temporary file, then publishes it with a no-replace hard link. It never overwrites a file, directory, or symlink. Filesystems that cannot provide these local hard-link semantics reject the operation.
+For a new file, `hashline_write` requests the same path permissions, writes and flushes an exclusive same-directory temporary file, then publishes it with a no-replace hard link. It verifies staged and published identity, link count, exact bytes, and parent identity before returning success. It never overwrites a file, directory, or symlink. Filesystems that cannot provide these local hard-link semantics reject the operation. A failure after the hard link succeeds can leave the new file committed; the plugin reports `RACE_AFTER_WRITE` and does not risk deleting a newer writer's file.
 
 ## Batch Semantics
 
@@ -176,7 +178,7 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `DISPLAY_PREFIX_REJECTED` | Payload appears copied with model-facing annotations |
 | `PERMISSION_DENIED` | OpenCode rejected a required permission |
 | `RACE_BEFORE_WRITE` | Identity or bytes changed before publication |
-| `RACE_AFTER_WRITE` | Result bytes did not remain equal after publication |
+| `RACE_AFTER_WRITE` | Published bytes, identity, link count, or parent did not remain equal to the plan |
 | `UNSUPPORTED_FILE` | File type, metadata, encoding, size, or policy is unsupported |
 
 Consumers should treat all errors as failures. There are no successful-looking error strings.

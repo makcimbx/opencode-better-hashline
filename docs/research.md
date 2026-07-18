@@ -51,7 +51,7 @@ Stripping copied prefixes, normalizing whitespace, auto-indenting, applying the 
 
 ### Provider-incompatible schemas
 
-Large unions, optional discriminator combinations, and wrapper-specific argument rewriting have failed on some model providers. Better Hashline uses one discriminated operation array with bounded primitive fields and tests the actual OpenCode tool definitions.
+Large unions, optional discriminator combinations, and wrapper-specific argument rewriting have failed on some model providers. Better Hashline uses one flat operation shape with bounded primitive fields, validates operation-specific combinations at runtime, and tests the actual OpenCode tool definitions.
 
 ### Partial mutation
 

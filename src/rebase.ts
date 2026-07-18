@@ -9,8 +9,7 @@ function findSubsequences(
   if (needle.length === 0) return [];
   const prefix = new Array<number>(needle.length).fill(0);
   for (let index = 1, matched = 0; index < needle.length; ) {
-    budget.consume();
-    if (needle[index] === needle[matched]) {
+    if (tokensEqual(needle[index], needle[matched], budget)) {
       matched += 1;
       prefix[index] = matched;
       index += 1;
@@ -23,8 +22,7 @@ function findSubsequences(
 
   const matches: number[] = [];
   for (let index = 0, matched = 0; index < haystack.length; ) {
-    budget.consume();
-    if (haystack[index] === needle[matched]) {
+    if (tokensEqual(haystack[index], needle[matched], budget)) {
       index += 1;
       matched += 1;
       if (matched === needle.length) {
@@ -44,14 +42,14 @@ function findSubsequences(
 type ComparableLine = { text: string; eol?: string };
 
 type SearchBudget = {
-  consume(): void;
+  consume(work: number): void;
 };
 
-function createSearchBudget(maxComparisons: number): SearchBudget {
-  let remaining = maxComparisons;
+function createSearchBudget(maxWork: number): SearchBudget {
+  let remaining = maxWork;
   return {
-    consume() {
-      remaining -= 1;
+    consume(work) {
+      remaining -= work;
       if (remaining < 0) {
         fail(
           "UNSUPPORTED_FILE",
@@ -62,8 +60,41 @@ function createSearchBudget(maxComparisons: number): SearchBudget {
   };
 }
 
+function tokensEqual(
+  left: string | undefined,
+  right: string | undefined,
+  budget: SearchBudget,
+): boolean {
+  if (left === undefined || right === undefined || left.length !== right.length) {
+    budget.consume(1);
+    return left === right;
+  }
+  budget.consume(Math.max(left.length, 1));
+  return left === right;
+}
+
+function matchesAt(
+  haystack: readonly string[],
+  needle: readonly string[],
+  start: number,
+  budget: SearchBudget,
+): boolean {
+  if (start < 0 || start + needle.length > haystack.length) return false;
+  for (let offset = 0; offset < needle.length; offset += 1) {
+    if (!tokensEqual(haystack[start + offset], needle[offset], budget)) return false;
+  }
+  return true;
+}
+
 function lineTokens(lines: readonly ComparableLine[]): string[] {
   return lines.map((line) => JSON.stringify([line.text, line.eol ?? ""]));
+}
+
+function agree(candidate: number | undefined, next: number, message: string): number {
+  if (candidate !== undefined && candidate !== next) {
+    fail("AMBIGUOUS_RELOCATION", message);
+  }
+  return next;
 }
 
 export interface MappedRange {
@@ -88,10 +119,21 @@ function mapRange(
   const start = startLine - 1;
   const end = endLine - 1;
   const target = base.slice(start, end + 1);
-  if (findSubsequences(current, target, budget, 1).length === 0) {
+  const baseTargetMatches = findSubsequences(base, target, budget);
+  const targetMatches = findSubsequences(current, target, budget);
+  if (targetMatches.length === 0) {
     fail("TARGET_CHANGED", `Lines ${startLine}-${endLine} are no longer unchanged.`);
   }
+  if (
+    baseTargetMatches.length === 1 &&
+    baseTargetMatches[0] === start &&
+    targetMatches.length === 1
+  ) {
+    const mappedStart = targetMatches[0] ?? 0;
+    return { start: mappedStart, end: mappedStart + target.length - 1 };
+  }
 
+  let candidate: number | undefined;
   for (let total = 0; total <= maxContextLines * 2; total += 1) {
     for (let left = 0; left <= total; left += 1) {
       const right = total - left;
@@ -105,11 +147,49 @@ function mapRange(
       const currentMatches = findSubsequences(current, signature, budget);
       if (currentMatches.length !== 1) continue;
       const mappedStart = (currentMatches[0] ?? 0) + left;
-      return { start: mappedStart, end: mappedStart + target.length - 1 };
+      candidate = agree(
+        candidate,
+        mappedStart,
+        `Lines ${startLine}-${endLine} have contradictory unique relocation evidence.`,
+      );
     }
   }
 
+  if (candidate !== undefined) {
+    return { start: candidate, end: candidate + target.length - 1 };
+  }
   fail("AMBIGUOUS_RELOCATION", `Lines ${startLine}-${endLine} cannot be uniquely relocated.`);
+}
+
+function mapEdgeBoundary(
+  base: readonly string[],
+  current: readonly string[],
+  atStart: boolean,
+  maxContextLines: number,
+  budget: SearchBudget,
+): number {
+  const maximumLength = Math.min(base.length, maxContextLines + 1);
+  let foundAtAnchor = false;
+  for (let length = maximumLength; length >= 1; length -= 1) {
+    const signature = atStart ? base.slice(0, length) : base.slice(base.length - length);
+    const expected = atStart ? 0 : current.length - length;
+    if (!matchesAt(current, signature, expected, budget)) continue;
+    foundAtAnchor = true;
+    const matches = findSubsequences(current, signature, budget);
+    if (matches.length === 1 && matches[0] === expected) return atStart ? 0 : current.length;
+  }
+  if (!foundAtAnchor) {
+    fail(
+      "BOUNDARY_CHANGED",
+      atStart ? "The beginning-of-file boundary changed." : "The end-of-file boundary changed.",
+    );
+  }
+  fail(
+    "AMBIGUOUS_RELOCATION",
+    atStart
+      ? "The beginning-of-file boundary is ambiguous."
+      : "The end-of-file boundary is ambiguous.",
+  );
 }
 
 function mapBoundary(
@@ -128,30 +208,29 @@ function mapBoundary(
     fail("BOUNDARY_CHANGED", "The empty-file insertion boundary changed.");
   }
   if (position === 0) {
-    const signature = base.slice(0, maxContextLines + 1);
-    const baseMatches = findSubsequences(base, signature, budget);
-    const currentMatches = findSubsequences(current, signature, budget);
-    if (baseMatches.length === 1 && currentMatches.length === 1) {
-      if (currentMatches[0] === 0) return 0;
-      fail("BOUNDARY_CHANGED", "The beginning-of-file boundary changed.");
-    }
-    fail("AMBIGUOUS_RELOCATION", "The beginning-of-file boundary is ambiguous.");
+    return mapEdgeBoundary(base, current, true, maxContextLines, budget);
   }
   if (position === base.length) {
-    const signatureStart = Math.max(0, base.length - maxContextLines - 1);
-    const signature = base.slice(signatureStart);
-    const baseMatches = findSubsequences(base, signature, budget);
-    const currentMatches = findSubsequences(current, signature, budget);
-    if (baseMatches.length === 1 && currentMatches.length === 1) {
-      const currentStart = currentMatches[0] ?? 0;
-      if (currentStart + signature.length === current.length) return current.length;
-      fail("BOUNDARY_CHANGED", "The end-of-file boundary changed.");
-    }
-    fail("AMBIGUOUS_RELOCATION", "The end-of-file boundary is ambiguous.");
+    return mapEdgeBoundary(base, current, false, maxContextLines, budget);
+  }
+
+  const boundaryPair = base.slice(position - 1, position + 1);
+  const basePairMatches = findSubsequences(base, boundaryPair, budget);
+  const pairMatches = findSubsequences(current, boundaryPair, budget);
+  if (pairMatches.length === 0) {
+    fail("BOUNDARY_CHANGED", "The insertion boundary is no longer adjacent.");
+  }
+  if (
+    basePairMatches.length === 1 &&
+    basePairMatches[0] === position - 1 &&
+    pairMatches.length === 1
+  ) {
+    return (pairMatches[0] ?? 0) + 1;
   }
 
   const maximumLeft = Math.min(position, maxContextLines + 1);
   const maximumRight = Math.min(base.length - position, maxContextLines + 1);
+  let candidate: number | undefined;
   for (let total = 2; total <= maximumLeft + maximumRight; total += 1) {
     for (let left = 1; left <= maximumLeft; left += 1) {
       const right = total - left;
@@ -162,25 +241,26 @@ function mapBoundary(
       if (baseMatches.length !== 1 || baseMatches[0] !== signatureStart) continue;
       const currentMatches = findSubsequences(current, signature, budget);
       if (currentMatches.length !== 1) continue;
-      return (currentMatches[0] ?? 0) + left;
+      candidate = agree(
+        candidate,
+        (currentMatches[0] ?? 0) + left,
+        `Boundary ${position} has contradictory unique relocation evidence.`,
+      );
     }
   }
 
-  const boundaryPair = base.slice(position - 1, position + 1);
-  if (findSubsequences(current, boundaryPair, budget, 1).length === 0) {
-    fail("BOUNDARY_CHANGED", "The insertion boundary is no longer adjacent.");
-  }
+  if (candidate !== undefined) return candidate;
   fail("AMBIGUOUS_RELOCATION", "The insertion boundary is not unique.");
 }
 
 export function createUniqueMapper(
   baseLines: readonly ComparableLine[],
   currentLines: readonly ComparableLine[],
-  maxComparisons = 50_000_000,
+  maxWork = 50_000_000,
 ): UniqueMapper {
   const base = lineTokens(baseLines);
   const current = lineTokens(currentLines);
-  const budget = createSearchBudget(maxComparisons);
+  const budget = createSearchBudget(maxWork);
   return {
     mapRange(startLine, endLine, maxContextLines) {
       return mapRange(base, current, startLine, endLine, maxContextLines, budget);

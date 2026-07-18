@@ -35,9 +35,9 @@ function errorCode(error: unknown): string | undefined {
 
 function assertSafePath(path: string, source: "requested" | "canonical"): void {
   const hasControl = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(path);
-  const hasGlobSyntax = [...path].some((character) => "*?[]{}!".includes(character));
   const hasPosixBackslash = process.platform !== "win32" && path.includes("\\");
-  if (path.length === 0 || hasControl || hasGlobSyntax || hasPosixBackslash) {
+  const hasWindowsWildcard = process.platform === "win32" && /[*?]/u.test(path);
+  if (path.length === 0 || hasControl || hasPosixBackslash || hasWindowsWildcard) {
     fail(
       source === "requested" ? "INVALID_ARGUMENT" : "UNSUPPORTED_FILE",
       `${source === "requested" ? "filePath" : "The canonical path"} contains characters that cannot be represented safely in permission patterns.`,
@@ -174,16 +174,40 @@ export async function authorizeExternal(
   resolved: ResolvedFile,
 ): Promise<void> {
   if (!(await isExternal(context, resolved.canonicalPath))) return;
-  const pattern = join(dirname(resolved.canonicalPath), "*");
+  const parent = dirname(resolved.canonicalPath);
+  const pattern = join(parent, "*");
+  const canPersist = !/[*?]/u.test(parent);
   await ask(context, {
     permission: "external_directory",
     patterns: [pattern],
-    always: [pattern],
+    always: canPersist ? [pattern] : [],
     metadata: {
       filepath: resolved.canonicalPath,
       parentDir: dirname(resolved.canonicalPath),
     },
   });
+}
+
+async function assertNewParentStable(
+  resolved: ResolvedNewFile,
+  error: "PATH_MISMATCH" | "RACE_AFTER_WRITE",
+): Promise<void> {
+  let currentParent: string;
+  let currentParentStats: Stats;
+  try {
+    [currentParent, currentParentStats] = await Promise.all([
+      realpath(resolved.requestedParent),
+      stat(resolved.canonicalParent),
+    ]);
+  } catch {
+    fail(error, "The target parent directory could not be verified.");
+  }
+  if (
+    !samePath(currentParent, resolved.canonicalParent) ||
+    !sameIdentity(currentParentStats, resolved.parentStats)
+  ) {
+    fail(error, "The target parent directory was retargeted.");
+  }
 }
 
 export async function authorizeRead(context: ToolContext, resolved: ResolvedFile): Promise<void> {
@@ -361,7 +385,14 @@ export async function publishReplacement(input: {
     }
 
     consume();
-    await rename(temporaryPath, resolved.canonicalPath);
+    try {
+      await rename(temporaryPath, resolved.canonicalPath);
+    } catch (error) {
+      if (["EPERM", "EACCES", "EBUSY"].includes(errorCode(error) ?? "")) {
+        fail("UNSUPPORTED_FILE", "The filesystem could not atomically replace the target.");
+      }
+      throw error;
+    }
     temporaryExists = false;
     await syncDirectory(dirname(resolved.canonicalPath));
 
@@ -381,47 +412,94 @@ export async function publishNewFile(input: {
 }): Promise<void> {
   const { resolved, bytes, signal } = input;
   throwIfAborted(signal);
-  const currentParent = await realpath(resolved.requestedParent);
-  const currentParentStats = await stat(resolved.canonicalParent);
-  if (
-    !samePath(currentParent, resolved.canonicalParent) ||
-    !sameIdentity(currentParentStats, resolved.parentStats)
-  ) {
-    fail("PATH_MISMATCH", "The target parent directory was retargeted.");
-  }
+  await assertNewParentStable(resolved, "PATH_MISMATCH");
 
   const temporaryPath = join(
     resolved.canonicalParent,
     `.${basename(resolved.canonicalPath)}.hashline-${process.pid}-${randomUUID()}.tmp`,
   );
   let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let stagedStats: Stats | undefined;
   try {
     handle = await open(temporaryPath, "wx", 0o666);
     await handle.writeFile(bytes);
     throwIfAborted(signal);
     await handle.sync();
-    await handle.close();
-
-    const verifiedParent = await realpath(resolved.requestedParent);
-    const verifiedParentStats = await stat(resolved.canonicalParent);
-    if (
-      !samePath(verifiedParent, resolved.canonicalParent) ||
-      !sameIdentity(verifiedParentStats, resolved.parentStats)
-    ) {
-      fail("PATH_MISMATCH", "The target parent directory was retargeted.");
+    stagedStats = await handle.stat();
+    assertRegular(stagedStats);
+    if (stagedStats.size !== bytes.byteLength || stagedStats.nlink !== 1) {
+      fail("RACE_BEFORE_WRITE", "The staged file changed before publication.");
     }
+    await handle.close();
+    handle = undefined;
+
+    const stagedPathStats = await stat(temporaryPath);
+    if (
+      !sameIdentity(stagedStats, stagedPathStats) ||
+      stagedPathStats.size !== bytes.byteLength ||
+      stagedPathStats.nlink !== 1
+    ) {
+      fail("RACE_BEFORE_WRITE", "The staged file changed before publication.");
+    }
+    await assertNewParentStable(resolved, "PATH_MISMATCH");
     throwIfAborted(signal);
     try {
       await link(temporaryPath, resolved.canonicalPath);
     } catch (error) {
       if (errorCode(error) === "EEXIST") fail("TARGET_EXISTS", "The target already exists.");
+      if (
+        ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EXDEV", "EMLINK"].includes(
+          errorCode(error) ?? "",
+        )
+      ) {
+        fail("UNSUPPORTED_FILE", "The filesystem cannot publish a no-replace hard link.");
+      }
       throw error;
     }
-    await rm(temporaryPath);
+
+    let linkedStats: Stats;
+    let stagedAfterLink: Stats;
+    try {
+      [linkedStats, stagedAfterLink] = await Promise.all([
+        lstat(resolved.canonicalPath),
+        stat(temporaryPath),
+      ]);
+    } catch {
+      fail("RACE_AFTER_WRITE", "The created file changed before it could be verified.");
+    }
+    if (
+      !sameIdentity(stagedStats, linkedStats) ||
+      !sameIdentity(stagedStats, stagedAfterLink) ||
+      linkedStats.nlink !== 2 ||
+      stagedAfterLink.nlink !== 2
+    ) {
+      fail("RACE_AFTER_WRITE", "The created file identity changed during publication.");
+    }
+
+    try {
+      await rm(temporaryPath);
+    } catch {
+      fail("RACE_AFTER_WRITE", "The created file was committed but staging cleanup failed.");
+    }
     await syncDirectory(resolved.canonicalParent);
+
+    let verified: StableFile;
+    try {
+      verified = await readStableFile(resolved, bytes.byteLength, false, signal);
+    } catch {
+      fail("RACE_AFTER_WRITE", "The created file could not be verified after publication.");
+    }
+    if (
+      !sameIdentity(stagedStats, verified.stats) ||
+      verified.stats.nlink !== 1 ||
+      !bytesEqual(verified.bytes, bytes)
+    ) {
+      fail("RACE_AFTER_WRITE", "The created file changed after publication.");
+    }
+    await assertNewParentStable(resolved, "RACE_AFTER_WRITE");
   } finally {
     await handle?.close().catch(() => {});
-    await rm(temporaryPath, { force: true });
+    await rm(temporaryPath, { force: true }).catch(() => {});
   }
 }
 

@@ -8,7 +8,7 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | --- | --- |
 | `src/text.ts` | Fatal UTF-8 decoding, BOM/EOL model, byte-preserving encode, payload validation |
 | `src/snapshots.ts` | Opaque IDs, exact bytes/SHA-256, scope, issued provenance, TTL/LRU limits |
-| `src/render.ts` | Byte-bounded `N|content` pages and preview-only overlong lines |
+| `src/render.ts` | Byte-bounded `N|content` pages and preview-only oversized lines |
 | `src/rebase.ts` | Exact unique range and insertion-boundary relocation |
 | `src/edits.ts` | Operation validation, immutable planning, overlap/order checks, final bytes |
 | `src/filesystem.ts` | Canonicalization, OpenCode permissions, stable reads, locks, publication |
@@ -73,7 +73,7 @@ The test suite has separate layers:
 - renderer truncation and UTF-8 budget tests;
 - real temporary-filesystem tests for symlinks, hardlinks, races, modes, and no-replace creation;
 - plugin contract tests with fake OpenCode contexts and real tool/hook definitions;
-- packed-tarball installation and modern entrypoint smoke tests;
+- packed-tarball installation, modern entrypoint checks, and a deterministic local OpenCode session that exercises real before/after hooks;
 - deterministic non-gating benchmarks and an opt-in model harness.
 
 Timing benchmarks never gate shared CI. Safety regressions do.

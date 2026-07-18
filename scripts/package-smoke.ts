@@ -151,6 +151,16 @@ try {
   if (!`${invalidProbe.stdout}\n${invalidProbe.stderr}`.includes("CONFIG_INVALID")) {
     throw new Error("Invalid plugin options did not produce a fail-closed OpenCode diagnostic");
   }
+  run(
+    [
+      process.execPath,
+      join(root, "scripts", "session-smoke.ts"),
+      opencode,
+      join(sandbox, "node_modules", "opencode-better-hashline"),
+      join(sandbox, "session-smoke"),
+    ],
+    root,
+  );
   console.log(`Verified ${basename(result.filename)} (v${packageJson.version ?? "unknown"})`);
 } finally {
   await rm(sandbox, { force: true, recursive: true });

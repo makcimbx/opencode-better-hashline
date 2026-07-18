@@ -48,11 +48,11 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | --- | --- |
 | Snapshot freshness | Exact byte equality in strict mode |
 | Target identity | Canonical path plus stable file metadata checks |
-| Relocation | Exact non-normalized text/EOL and unique bounded context |
+| Relocation | Exact selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges |
 | Batch validation | One file, all operations before mutation |
 | Permission binding | Exact planned unified diff before approval |
 | Publication visibility | At most one final replacement attempt where rename supports it |
-| New file safety | Staged exclusive temporary file plus no-replace hard-link publication |
+| New file safety | Staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
 | Memory bounds | Global, session, path, byte, and TTL limits |
 
 ## Metadata

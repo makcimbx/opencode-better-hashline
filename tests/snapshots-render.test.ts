@@ -122,9 +122,18 @@ describe("snapshot rendering", () => {
     expect(second.nextOffset).toBeUndefined();
   });
 
-  test("never issues overlong or output-truncated lines", () => {
+  test("issues long lines that fit and previews lines that exceed the byte budget", () => {
     const store = new SnapshotStore(options());
     const snapshot = store.remember(scope, "/worktree/file", document("x".repeat(3000)));
+    const complete = renderSnapshotPage({
+      snapshot,
+      offset: 1,
+      limit: 1,
+      maxOutputBytes: 4096,
+    });
+    expect(complete.output).toContain(`1|${"x".repeat(3000)}`);
+    expect(complete.page.ranges).toEqual([{ start: 1, end: 1 }]);
+
     const rendered = renderSnapshotPage({
       snapshot,
       offset: 1,

@@ -257,39 +257,38 @@ describe("OpenCode plugin protocol", () => {
     ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
   });
 
-  test("invalidates a read when host truncation or marker loss prevents publication", async () => {
+  test("failed page delivery preserves older issued refs without issuing new ones", async () => {
     const file = join(root, "file.txt");
-    await writeFile(file, "one\n");
+    await writeFile(file, "one\ntwo\n");
     const value = await hooks();
     const { hashlineRead, hashlineEdit } = registry(value);
     const toolContext = context();
 
-    const truncated = structured(await hashlineRead.execute({ filePath: "file.txt" }, toolContext));
-    const truncatedId = String(truncated.metadata.snapshotId);
+    const issued = structured(
+      await hashlineRead.execute({ filePath: "file.txt", limit: 1 }, toolContext),
+    );
+    await activateRead(value, issued);
+    const snapshotId = String(issued.metadata.snapshotId);
+
+    const truncated = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 2, limit: 1 }, toolContext),
+    );
     truncated.metadata.truncated = true;
     await activateRead(value, truncated);
     expect(truncated.output).toContain("OpenCode truncated this result");
     expect(truncated.metadata.snapshotId).toBeUndefined();
-    await expect(
-      hashlineEdit.execute(
-        {
-          filePath: "file.txt",
-          snapshotId: truncatedId,
-          rebase: "none",
-          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
-        },
-        toolContext,
-      ),
-    ).rejects.toThrow("SNAPSHOT_UNKNOWN:");
 
-    const missing = structured(await hashlineRead.execute({ filePath: "file.txt" }, toolContext));
+    const missing = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 2, limit: 1 }, toolContext),
+    );
     delete missing.metadata.hashlinePending;
     await activateRead(value, missing);
     expect(missing.output).toContain("did not preserve the snapshot marker");
     expect(missing.metadata.snapshotId).toBeUndefined();
 
-    const changed = structured(await hashlineRead.execute({ filePath: "file.txt" }, toolContext));
-    const changedId = String(changed.metadata.snapshotId);
+    const changed = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 2, limit: 1 }, toolContext),
+    );
     changed.output += "\nchanged by another hook";
     await activateRead(value, changed);
     expect(changed.output).toContain("Another hook changed this result");
@@ -297,12 +296,127 @@ describe("OpenCode plugin protocol", () => {
       hashlineEdit.execute(
         {
           filePath: "file.txt",
-          snapshotId: changedId,
-          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
+          snapshotId,
+          operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["TWO"] }],
         },
         toolContext,
       ),
-    ).rejects.toThrow("SNAPSHOT_UNKNOWN:");
+    ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId,
+        operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toBe("ONE\ntwo\n");
+  });
+
+  test("pending-read eviction never revokes issued snapshots", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "one\n");
+    const value = await hooks({
+      maxFileBytes: 1024,
+      maxLines: 10,
+      maxCacheBytes: 3072,
+      maxSnapshots: 1,
+      maxSnapshotsPerPath: 1,
+      maxSnapshotsPerSession: 1,
+    });
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const issued = structured(await hashlineRead.execute({ filePath: "file.txt" }, toolContext));
+    await activateRead(value, issued);
+    const snapshotId = String(issued.metadata.snapshotId);
+
+    const evictedPending = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    const latestPending = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, evictedPending);
+    expect(evictedPending.output).toContain("Rerun hashline_read");
+    await activateRead(value, latestPending);
+
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId,
+        operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toBe("ONE\n");
+  });
+
+  test("marker loss does not revoke another pending page for the same snapshot", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "one\ntwo\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const lost = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 1, limit: 1 }, toolContext),
+    );
+    const delivered = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 2, limit: 1 }, toolContext),
+    );
+    expect(lost.metadata.snapshotId).toBe(delivered.metadata.snapshotId);
+
+    delete lost.metadata.hashlinePending;
+    await activateRead(value, lost);
+    expect(lost.output).toContain("did not preserve the snapshot marker");
+    await activateRead(value, delivered);
+
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId: String(delivered.metadata.snapshotId),
+        operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["TWO"] }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toBe("one\nTWO\n");
+  });
+
+  test("pending cleanup preserves distinct issued revisions on the same path", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "one\n");
+    const value = await hooks({
+      maxFileBytes: 1024,
+      maxLines: 10,
+      maxCacheBytes: 4096,
+      maxSnapshots: 2,
+      maxSnapshotsPerPath: 2,
+      maxSnapshotsPerSession: 2,
+    });
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const issued = structured(await hashlineRead.execute({ filePath: "file.txt" }, toolContext));
+    await activateRead(value, issued);
+    const issuedId = String(issued.metadata.snapshotId);
+
+    await writeFile(file, "prefix\none\n");
+    const evictedPending = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await hashlineRead.execute({ filePath: "file.txt" }, toolContext);
+    await hashlineRead.execute({ filePath: "file.txt" }, toolContext);
+    await activateRead(value, evictedPending);
+    expect(evictedPending.output).toContain("Rerun hashline_read");
+
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId: issuedId,
+        rebase: "unique",
+        operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toBe("prefix\nONE\n");
   });
 
   test("permission denial writes nothing and leaves the snapshot retryable", async () => {
@@ -413,6 +527,72 @@ describe("OpenCode plugin protocol", () => {
     expect(await readFile(file, "utf8")).toBe("old\n");
   });
 
+  test("validates complete tool arguments before permissions or filesystem access", async () => {
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit, hashlineWrite } = registry(value);
+    const toolContext = context({ asks });
+
+    await expect(
+      hashlineRead.execute({ filePath: "missing.txt", unexpected: true } as never, toolContext),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "missing.txt",
+          snapshotId: "s_0000000000000000000000",
+          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: [], unexpected: true }],
+        } as never,
+        toolContext,
+      ),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "missing.txt",
+          snapshotId: "s_0000000000000000000000",
+          operations: [{ op: "replace", startLine: 1, lines: ["new"] }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
+    await expect(
+      hashlineWrite.execute({ filePath: "new.txt", content: 1 } as never, toolContext),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
+    expect(asks).toEqual([]);
+    await expect(readFile(join(root, "new.txt"))).rejects.toThrow();
+  });
+
+  test("rejects semantic edit errors before external authorization", async () => {
+    const externalRoot = await mkdtemp(join(tmpdir(), "better-hashline-plugin-external-"));
+    try {
+      const file = join(externalRoot, "file.txt");
+      await writeFile(file, "one\ntwo\n");
+      const asks: AskRecord[] = [];
+      const value = await hooks();
+      const { hashlineRead, hashlineEdit } = registry(value);
+      const toolContext = context({ asks });
+      const readResult = structured(await hashlineRead.execute({ filePath: file }, toolContext));
+      await activateRead(value, readResult);
+      asks.length = 0;
+
+      await expect(
+        hashlineEdit.execute(
+          {
+            filePath: file,
+            snapshotId: String(readResult.metadata.snapshotId),
+            operations: [{ op: "replace", startLine: 2, endLine: 1, lines: ["invalid"] }],
+          },
+          toolContext,
+        ),
+      ).rejects.toThrow("INVALID_ARGUMENT:");
+      expect(asks).toEqual([]);
+      expect(await readFile(file, "utf8")).toBe("one\ntwo\n");
+    } finally {
+      await rm(externalRoot, { recursive: true, force: true });
+    }
+  });
+
   test("creates new files exclusively through hashline_write", async () => {
     const asks: AskRecord[] = [];
     const value = await hooks({ maxFileBytes: 1024, maxCacheBytes: 3072 });
@@ -430,6 +610,13 @@ describe("OpenCode plugin protocol", () => {
     await expect(
       hashlineWrite.execute({ filePath: "large.txt", content: "x".repeat(1025) }, toolContext),
     ).rejects.toThrow("UNSUPPORTED_FILE:");
+    if (process.platform === "win32") {
+      const askCount = asks.length;
+      await expect(
+        hashlineWrite.execute({ filePath: "bad?.txt", content: "invalid" }, toolContext),
+      ).rejects.toThrow("INVALID_ARGUMENT:");
+      expect(asks).toHaveLength(askCount);
+    }
   });
 });
 

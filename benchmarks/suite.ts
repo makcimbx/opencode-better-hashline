@@ -233,6 +233,48 @@ export function scenarios(): Scenario[] {
       expectedText: "prefix\nleft\nchanged\nright\nother\ntarget\nend\n",
     },
     {
+      id: "contradictory-range-context",
+      category: "ambiguity",
+      base: "L\nT\nR\n",
+      current: "L\nT\nmid\nT\nR\n",
+      operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["changed"] }],
+    },
+    {
+      id: "contradictory-boundary-context",
+      category: "ambiguity",
+      base: "A\nL\nR\nB\n",
+      current: "A\nL\nR\nmid\nL\nR\nB\n",
+      operations: [{ op: "insert", afterLine: 2, lines: ["ours"] }],
+    },
+    {
+      id: "selected-duplicate-changed",
+      category: "ambiguity",
+      base: "left\ntarget\nright\nother\ntarget\nend\n",
+      current: "left\nchanged\nright\nother\ntarget\nend\n",
+      operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["ours"] }],
+    },
+    {
+      id: "selected-boundary-pair-changed",
+      category: "ambiguity",
+      base: "A\nL\nR\nB\nL\nR\nC\n",
+      current: "A\nL\nchanged\nR\nB\nL\nR\nC\n",
+      operations: [{ op: "insert", afterLine: 2, lines: ["ours"] }],
+    },
+    {
+      id: "bof-copied-boundary",
+      category: "boundary",
+      base: "one\ntwo\n",
+      current: "one\ntwo\none\ntwo\n",
+      operations: [{ op: "insert", afterLine: 0, lines: ["ours"] }],
+    },
+    {
+      id: "eof-copied-boundary",
+      category: "boundary",
+      base: "one\ntwo\n",
+      current: "one\ntwo\none\ntwo\none\ntwo\n",
+      operations: [{ op: "insert", afterLine: 2, lines: ["ours"] }],
+    },
+    {
       id: "concurrent-boundary-insertion",
       category: "boundary",
       base: "one\ntwo\nthree\n",
@@ -316,7 +358,7 @@ export function adapters(): Adapter[] {
     },
     {
       id: "exact-search-replace",
-      description: "Unique exact old-text/boundary matching without fuzzy fallback.",
+      description: "Target-only exact old-text/boundary matching without fuzzy fallback.",
       run: (scenario) =>
         attempt(() => {
           const current = document(scenario.current);
@@ -445,6 +487,35 @@ export function runStaticSizeSuite() {
       overheadPercent: Number((((bytes - nativeBytes) / nativeBytes) * 100).toFixed(2)),
     };
   });
+}
+
+export function runRenderingWireSuite() {
+  const line = "x".repeat(3000);
+  const snapshot = new SnapshotStore({
+    maxCacheBytes: 64 * 1024,
+    maxSnapshots: 1,
+    maxSnapshotsPerPath: 1,
+    maxSnapshotsPerSession: 1,
+    snapshotTtlMs: 60_000,
+  }).remember(
+    { sessionId: "benchmark", worktree: "/benchmark" },
+    "/benchmark/long.txt",
+    document(line),
+  );
+  const maxOutputBytes = 4096;
+  const current = renderSnapshotPage({ snapshot, offset: 1, limit: 1, maxOutputBytes });
+  const header = current.output.split("\n", 1)[0] ?? "";
+  const legacyPreview = `${header}\n1!|${line.slice(0, 2000)}... [preview only; line not issued]\n@eof\n@note lines marked ! cannot be edited by line reference`;
+  const legacyPreviewBytes = encoder.encode(legacyPreview).byteLength;
+  const currentIssuedBytes = encoder.encode(current.output).byteLength;
+  return {
+    scenario: "one 3,000-character ASCII line with a 4,096-byte output budget",
+    legacyPreviewBytes,
+    legacyIssued: false,
+    currentIssuedBytes,
+    currentIssued: current.page.ranges.some(({ start, end }) => start === 1 && end === 1),
+    deltaBytes: currentIssuedBytes - legacyPreviewBytes,
+  };
 }
 
 export function runMicroSuite() {

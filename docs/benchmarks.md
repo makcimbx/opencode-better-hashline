@@ -24,12 +24,12 @@ The adversarial corpus contains 15 generated cases spanning exact edits, shifted
 | --- | ---: | ---: | ---: | ---: |
 | Better Hashline strict | 2 | 10 | 3 | 0 |
 | Better Hashline unique | 5 | 10 | 0 | 0 |
-| Exact unique search/replace | 4 | 10 | 1 | 0 |
+| Target-only exact search/replace | 4 | 10 | 1 | 0 |
 | Original line numbers | 3 | 1 | 0 | 11 |
 | 8-bit endpoint hashes | 3 | 7 | 2 | 3 |
 | 16-bit endpoint hashes | 3 | 8 | 2 | 2 |
 
-The expected outcomes encode this project's conservative relocation contract. This is useful for finding violations of that contract, not ranking arbitrary production tools.
+The expected outcomes encode this project's conservative relocation contract. This is useful for finding violations of that contract, not ranking arbitrary production tools. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; the row does not establish an advantage for line-number addressing.
 
 ## Static Size
 
@@ -44,9 +44,20 @@ One generated 1,000-line TypeScript fixture was rendered in each model-facing fo
 
 Better Hashline happens to be smaller in this fixture because `N|` is one byte shorter than `N: ` and the fixed header/footer cost amortizes over 1,000 lines. Different pagination and escaping can change the result. Do not translate byte deltas into token or cost claims without provider-specific tokenization and full traces.
 
+## Long-Line Rendering Change
+
+The renderer previously marked every line over 2,000 UTF-16 units as preview-only even when its complete annotation fit the configured byte budget. The deterministic wire fixture uses one 3,000-character ASCII line and a 4,096-byte output budget:
+
+| Behavior | UTF-8 bytes | Line reference issued |
+| --- | ---: | --- |
+| Legacy fixed character cutoff | 2,171 | No |
+| Byte-budget rendering | 3,079 | Yes |
+
+The change spends 908 additional visible bytes in this fixture to make the complete line editable. Lines that cannot fit one page remain preview-only. These are exact serialized bytes, not token or model-quality claims.
+
 ## Core Timings
 
-The raw result contains median, p95, and p99 timings for SHA-256, strict UTF-8 decoding, and one-line edit planning from 10 through 20,000 lines. These are non-gating wall-clock measurements from one named machine. They do not establish cross-platform performance and should be rerun after material protocol changes.
+The raw result contains median and p95 timings for SHA-256, strict UTF-8 decoding, and one-line edit planning from 10 through 20,000 lines. These are non-gating wall-clock measurements from one named machine. They do not establish cross-platform performance and should be rerun after material protocol changes.
 
 Timing values are intentionally not duplicated here: the immutable JSON is the source of truth and includes the exact implementation, corpus, lockfile, source revision, and dirty-state provenance.
 
