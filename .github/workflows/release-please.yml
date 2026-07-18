@@ -1,0 +1,87 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      created: ${{ steps.release.outputs.release_created }}
+      sha: ${{ steps.release.outputs.sha }}
+      tag: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Create or update release pull request
+        id: release
+        uses: googleapis/release-please-action@0dfd8538845b8e92600d271a895a5372865d4062 # v5
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    name: Publish npm package
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out released revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify release source
+        run: bun run ci
+
+      - name: Verify release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          test "${RELEASE_TAG}" = "v${package_version}"
+          test "${RELEASE_VERSION}" = "${package_version}"
+
+      - name: Install pinned npm CLI
+        run: npm install --global npm@11.18.0
+
+      - name: Verify and retain release artifact
+        id: pack
+        shell: bash
+        run: |
+          PACKAGE_SMOKE_KEEP_TARBALL=1 bun ./scripts/package-smoke.ts
+          tarball="$(node -p "require('./package.json').name + '-' + require('./package.json').version + '.tgz'")"
+          test -f "${tarball}"
+          echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish with OIDC provenance
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --provenance

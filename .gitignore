@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+*.log
+
+benchmarks/results/model/
+benchmarks/results/local/
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

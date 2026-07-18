@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Better Hashline for OpenCode</title>
+  <desc id="desc">A technical diagram showing an exact snapshot flowing through compact line references into a guarded file edit.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="0.55" stop-color="#0b1728"/>
+      <stop offset="1" stop-color="#111b30"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#72f1b8"/>
+      <stop offset="1" stop-color="#5ac8fa"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#27405f" stroke-width="1" opacity="0.24"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="630" rx="28" fill="url(#grid)"/>
+  <circle cx="1025" cy="88" r="160" fill="#5ac8fa" opacity="0.06"/>
+  <circle cx="145" cy="565" r="210" fill="#72f1b8" opacity="0.05"/>
+
+  <g transform="translate(76 74)">
+    <rect width="44" height="44" rx="11" fill="none" stroke="url(#accent)" stroke-width="3"/>
+    <path d="M12 14h20M12 22h13M12 30h17" stroke="#72f1b8" stroke-width="3" stroke-linecap="round"/>
+    <text x="62" y="33" fill="#dcecff" font-family="Inter,Segoe UI,sans-serif" font-size="24" font-weight="700" letter-spacing="3">OPENCODE PLUGIN</text>
+  </g>
+
+  <text x="76" y="208" fill="#f4f8ff" font-family="Inter,Segoe UI,sans-serif" font-size="74" font-weight="800" letter-spacing="-2">BETTER HASHLINE</text>
+  <text x="79" y="258" fill="#9db2cc" font-family="Inter,Segoe UI,sans-serif" font-size="25">Exact snapshots. Compact line refs. Fail-closed edits.</text>
+
+  <g transform="translate(78 328)" font-family="JetBrains Mono,Cascadia Code,monospace">
+    <rect width="506" height="224" rx="18" fill="#08121f" stroke="#263c57" stroke-width="2"/>
+    <rect width="506" height="42" rx="18" fill="#101f33"/>
+    <path d="M0 42h506" stroke="#263c57"/>
+    <circle cx="24" cy="21" r="5" fill="#ff6b6b"/><circle cx="43" cy="21" r="5" fill="#ffd166"/><circle cx="62" cy="21" r="5" fill="#72f1b8"/>
+    <text x="88" y="27" fill="#8fa8c4" font-size="14">hashline_read</text>
+    <text x="22" y="75" fill="#5ac8fa" font-size="14">@hashline</text>
+    <text x="111" y="75" fill="#8fa8c4" font-size="14">snapshot=s_J7y... sha256=6d09c2...</text>
+    <text x="22" y="111" fill="#72f1b8" font-size="18">41|</text><text x="62" y="111" fill="#dcecff" font-size="18">const retries = 2;</text>
+    <text x="22" y="145" fill="#72f1b8" font-size="18">42|</text><text x="62" y="145" fill="#dcecff" font-size="18">await connect();</text>
+    <text x="22" y="179" fill="#72f1b8" font-size="18">43|</text><text x="62" y="179" fill="#dcecff" font-size="18">return client;</text>
+    <text x="22" y="207" fill="#5ac8fa" font-size="14">@eof</text>
+  </g>
+
+  <g transform="translate(650 342)">
+    <path d="M0 92h74" stroke="#5ac8fa" stroke-width="3" stroke-dasharray="7 8"/>
+    <path d="M68 84l12 8-12 8" fill="none" stroke="#5ac8fa" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <g transform="translate(748 327)" font-family="Inter,Segoe UI,sans-serif">
+    <rect width="374" height="226" rx="22" fill="#0d1b2c" stroke="#34506c" stroke-width="2"/>
+    <path d="M30 63h314" stroke="#2a4059"/>
+    <text x="30" y="40" fill="#9db2cc" font-size="16" font-weight="700" letter-spacing="2">GUARDED COMMIT</text>
+    <g transform="translate(30 84)">
+      <circle cx="15" cy="15" r="15" fill="#72f1b8" opacity="0.16"/><path d="M8 15l5 5 9-11" fill="none" stroke="#72f1b8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="44" y="21" fill="#dcecff" font-size="18">Exact bytes rechecked</text>
+    </g>
+    <g transform="translate(30 132)">
+      <circle cx="15" cy="15" r="15" fill="#72f1b8" opacity="0.16"/><path d="M8 15l5 5 9-11" fill="none" stroke="#72f1b8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="44" y="21" fill="#dcecff" font-size="18">Ambiguity rejected</text>
+    </g>
+    <g transform="translate(30 180)">
+      <circle cx="15" cy="15" r="15" fill="#72f1b8" opacity="0.16"/><path d="M8 15l5 5 9-11" fill="none" stroke="#72f1b8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="44" y="21" fill="#dcecff" font-size="18">One replacement attempt</text>
+    </g>
+  </g>
+
+  <rect x="1008" y="62" width="112" height="34" rx="17" fill="#72f1b8" opacity="0.13" stroke="#72f1b8"/>
+  <text x="1064" y="85" text-anchor="middle" fill="#72f1b8" font-family="Inter,Segoe UI,sans-serif" font-size="14" font-weight="700">FAIL CLOSED</text>
+</svg>

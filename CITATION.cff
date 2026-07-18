@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use Better Hashline in published editing-protocol research, please cite this repository."
+title: "OpenCode Better Hashline"
+type: software
+authors:
+  - family-names: Ivanov
+    given-names: Maksim
+    alias: makcimbx
+repository-code: "https://github.com/makcimbx/opencode-better-hashline"
+url: "https://github.com/makcimbx/opencode-better-hashline"
+license: MIT
+keywords:
+  - OpenCode
+  - coding agents
+  - text editing
+  - hashline

@@ -1,0 +1,78 @@
+{
+  "name": "opencode-better-hashline",
+  "version": "0.1.0",
+  "description": "Fail-closed, snapshot-bound line editing for OpenCode",
+  "type": "module",
+  "main": "./dist/server.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js",
+      "default": "./dist/server.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "bun": ">=1.3.0",
+    "opencode": ">=1.18.3 <2"
+  },
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "build": "bun run clean && bun build ./src/index.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun build ./src/server.ts --outdir ./dist --target bun --format esm --packages external --sourcemap=external && bun run build:types",
+    "build:types": "tsc --project tsconfig.build.json",
+    "clean": "bun ./scripts/clean.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && biome ci . && bun run docs:check",
+    "docs:check": "bun ./scripts/check-doc-links.ts",
+    "format": "biome check --write .",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "bench": "bun ./benchmarks/run.ts",
+    "bench:model": "bun ./benchmarks/model/run.ts",
+    "pack:check": "bun run build && bun ./scripts/package-smoke.ts",
+    "ci": "bun run check && bun run test:coverage && bun run build",
+    "prepack": "bun run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/makcimbx/opencode-better-hashline.git"
+  },
+  "bugs": {
+    "url": "https://github.com/makcimbx/opencode-better-hashline/issues"
+  },
+  "homepage": "https://github.com/makcimbx/opencode-better-hashline#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "hashline",
+    "coding-agent",
+    "editing",
+    "developer-tools",
+    "typescript"
+  ],
+  "author": "Maksim Ivanov",
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.3",
+    "diff": "9.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.4",
+    "@types/bun": "1.3.14",
+    "opencode-ai": "1.18.3",
+    "typescript": "7.0.2"
+  }
+}

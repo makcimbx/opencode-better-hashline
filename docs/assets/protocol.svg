@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
+  <title id="title">Better Hashline edit protocol</title>
+  <desc id="desc">Five stages from canonical file read through exact snapshot, edit planning, permission approval, byte recheck and replacement publication.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#081321"/><stop offset="1" stop-color="#101d31"/></linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#72f1b8"/><stop offset="1" stop-color="#5ac8fa"/></linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#5ac8fa"/></marker>
+  </defs>
+  <rect width="1200" height="650" rx="24" fill="url(#bg)"/>
+  <text x="64" y="76" fill="#f4f8ff" font-family="Inter,Segoe UI,sans-serif" font-size="34" font-weight="800">One-file edit lifecycle</text>
+  <text x="64" y="110" fill="#8fa8c4" font-family="Inter,Segoe UI,sans-serif" font-size="17">Authorization, freshness, and publication are separate checks.</text>
+
+  <path d="M160 240 H1040" stroke="url(#line)" stroke-width="4" opacity="0.45"/>
+  <g font-family="Inter,Segoe UI,sans-serif">
+    <g transform="translate(70 168)">
+      <rect width="180" height="145" rx="18" fill="#0d1c2d" stroke="#2d4965" stroke-width="2"/>
+      <circle cx="90" cy="0" r="26" fill="#72f1b8"/><text x="90" y="8" text-anchor="middle" fill="#07111f" font-size="22" font-weight="800">1</text>
+      <text x="90" y="60" text-anchor="middle" fill="#f2f7ff" font-size="19" font-weight="700">Resolve + read</text>
+      <text x="90" y="91" text-anchor="middle" fill="#8fa8c4" font-size="14">canonical target</text>
+      <text x="90" y="114" text-anchor="middle" fill="#8fa8c4" font-size="14">standard permission</text>
+    </g>
+    <g transform="translate(290 168)">
+      <rect width="180" height="145" rx="18" fill="#0d1c2d" stroke="#2d4965" stroke-width="2"/>
+      <circle cx="90" cy="0" r="26" fill="#72f1b8"/><text x="90" y="8" text-anchor="middle" fill="#07111f" font-size="22" font-weight="800">2</text>
+      <text x="90" y="60" text-anchor="middle" fill="#f2f7ff" font-size="19" font-weight="700">Issue snapshot</text>
+      <text x="90" y="91" text-anchor="middle" fill="#8fa8c4" font-size="14">exact bytes + SHA-256</text>
+      <text x="90" y="114" text-anchor="middle" fill="#8fa8c4" font-size="14">opaque 128-bit ID</text>
+    </g>
+    <g transform="translate(510 168)">
+      <rect width="180" height="145" rx="18" fill="#0d1c2d" stroke="#2d4965" stroke-width="2"/>
+      <circle cx="90" cy="0" r="26" fill="#5ac8fa"/><text x="90" y="8" text-anchor="middle" fill="#07111f" font-size="22" font-weight="800">3</text>
+      <text x="90" y="60" text-anchor="middle" fill="#f2f7ff" font-size="19" font-weight="700">Plan in memory</text>
+      <text x="90" y="91" text-anchor="middle" fill="#8fa8c4" font-size="14">validate all ranges</text>
+      <text x="90" y="114" text-anchor="middle" fill="#8fa8c4" font-size="14">reject overlap</text>
+    </g>
+    <g transform="translate(730 168)">
+      <rect width="180" height="145" rx="18" fill="#0d1c2d" stroke="#2d4965" stroke-width="2"/>
+      <circle cx="90" cy="0" r="26" fill="#5ac8fa"/><text x="90" y="8" text-anchor="middle" fill="#07111f" font-size="22" font-weight="800">4</text>
+      <text x="90" y="60" text-anchor="middle" fill="#f2f7ff" font-size="19" font-weight="700">Approve diff</text>
+      <text x="90" y="91" text-anchor="middle" fill="#8fa8c4" font-size="14">native edit permission</text>
+      <text x="90" y="114" text-anchor="middle" fill="#8fa8c4" font-size="14">exact planned bytes</text>
+    </g>
+    <g transform="translate(950 168)">
+      <rect width="180" height="145" rx="18" fill="#0d1c2d" stroke="#2d4965" stroke-width="2"/>
+      <circle cx="90" cy="0" r="26" fill="#5ac8fa"/><text x="90" y="8" text-anchor="middle" fill="#07111f" font-size="22" font-weight="800">5</text>
+      <text x="90" y="60" text-anchor="middle" fill="#f2f7ff" font-size="19" font-weight="700">Recheck + write</text>
+      <text x="90" y="91" text-anchor="middle" fill="#8fa8c4" font-size="14">identity + exact bytes</text>
+      <text x="90" y="114" text-anchor="middle" fill="#8fa8c4" font-size="14">temp, fsync, rename</text>
+    </g>
+  </g>
+
+  <g transform="translate(70 382)" font-family="Inter,Segoe UI,sans-serif">
+    <rect width="1060" height="190" rx="20" fill="#091624" stroke="#263f59"/>
+    <text x="30" y="45" fill="#72f1b8" font-size="15" font-weight="800" letter-spacing="2">FAIL-CLOSED OUTCOMES</text>
+    <g transform="translate(30 72)">
+      <rect width="235" height="82" rx="13" fill="#111f31"/><text x="18" y="32" fill="#f0f6ff" font-size="16" font-weight="700">STALE SNAPSHOT</text><text x="18" y="58" fill="#8fa8c4" font-size="14">reread, never guess</text>
+    </g>
+    <g transform="translate(285 72)">
+      <rect width="235" height="82" rx="13" fill="#111f31"/><text x="18" y="32" fill="#f0f6ff" font-size="16" font-weight="700">AMBIGUOUS TARGET</text><text x="18" y="58" fill="#8fa8c4" font-size="14">reject, no nearest match</text>
+    </g>
+    <g transform="translate(540 72)">
+      <rect width="235" height="82" rx="13" fill="#111f31"/><text x="18" y="32" fill="#f0f6ff" font-size="16" font-weight="700">PERMISSION DENIED</text><text x="18" y="58" fill="#8fa8c4" font-size="14">zero file mutation</text>
+    </g>
+    <g transform="translate(795 72)">
+      <rect width="235" height="82" rx="13" fill="#111f31"/><text x="18" y="32" fill="#f0f6ff" font-size="16" font-weight="700">RACE DETECTED</text><text x="18" y="58" fill="#8fa8c4" font-size="14">consume ref, report error</text>
+    </g>
+  </g>
+</svg>

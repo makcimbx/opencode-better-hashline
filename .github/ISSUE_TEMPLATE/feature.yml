@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a protocol, compatibility, or workflow improvement
+title: "feat: "
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete editing failure or friction, not only the desired API.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include an example read or edit exchange when relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility
+      description: Explain stale-read, ambiguity, token, platform, or migration tradeoffs.
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link reproducible cases, prior art, issues, benchmarks, or traces.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and documentation.
+          required: true
