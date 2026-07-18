@@ -7,6 +7,7 @@ Maintainers use one GitHub release path and one npm publication path.
 - CI is green on `main`.
 - The release pull request updates `package.json`, `CHANGELOG.md`, and `.release-please-manifest.json` consistently.
 - The `npm-release` GitHub environment is protected.
+- Repository Actions settings allow the scoped Release Please workflow to create pull requests; default workflow permissions remain read-only.
 - npm trusted publishing is configured for owner `makcimbx`, repository `opencode-better-hashline`, workflow `release-please.yml`, and environment `npm-release`.
 - Node 24 and npm 11.18.0 or newer are used for publishing.
 
