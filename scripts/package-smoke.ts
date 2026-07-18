@@ -38,7 +38,8 @@ function run(command: string[], cwd: string, env?: Record<string, string | undef
 }
 
 const root = resolve(import.meta.dir, "..");
-const keepTarball = process.env.PACKAGE_SMOKE_KEEP_TARBALL === "1";
+const keepTarball =
+  process.argv.includes("--keep-tarball") || process.env.PACKAGE_SMOKE_KEEP_TARBALL === "1";
 const packed = JSON.parse(run(["npm", "pack", "--json", "--ignore-scripts"], root)) as PackResult[];
 const result = packed[0];
 
