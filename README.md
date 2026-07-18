@@ -168,18 +168,18 @@ Better Hashline therefore separates model-facing addressing from server-side aut
 
 ## Evidence
 
-The initial checked-in 2026-07-18 corpus has 15 exact, stale, collision, ambiguity, boundary, overlap, and encoding scenarios. The live suite now has 21 cases, including contradictory evidence, surviving duplicates, and copied BOF/EOF boundaries; new results are recorded separately instead of rewriting the initial evidence. Its comparison arms are deliberately small protocol simulations, not complete implementations of third-party tools. On the initial recorded Windows x64 run:
+The latest checked-in 2026-07-19 corpus has 21 exact, stale, collision, ambiguity, boundary, overlap, and encoding scenarios, including contradictory evidence, surviving duplicates, and copied BOF/EOF boundaries. The initial 15-case result remains immutable historical evidence. Comparison arms are deliberately small protocol simulations, not complete implementations of third-party tools. On the latest recorded Windows x64 run:
 
 | Adapter | Unsafe accepts | False rejects |
 | --- | ---: | ---: |
 | Better Hashline, strict | 0 | 3 |
 | Better Hashline, explicit unique rebase | 0 | 0 |
-| Target-only exact search/replace | 0 | 1 |
-| Line numbers only | 11 | 0 |
-| 8-bit endpoint hashes | 3 | 2 |
-| 16-bit endpoint hashes | 2 | 2 |
+| Target-only exact search/replace | 4 | 1 |
+| Line numbers only | 17 | 0 |
+| 8-bit endpoint hashes | 6 | 2 |
+| 16-bit endpoint hashes | 5 | 2 |
 
-This corpus tests in-memory protocol mechanics only; it does not exercise OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve, so the table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; no model-comparison result is claimed yet. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
+This corpus tests in-memory protocol mechanics only; it does not exercise OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; no model-comparison result is claimed yet. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
 
 ```sh
 bun run bench

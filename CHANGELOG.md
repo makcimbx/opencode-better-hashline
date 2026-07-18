@@ -10,6 +10,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Exercise packed-package snapshot issuance and editing through a deterministic local OpenCode session with no external model call.
+- Record an immutable 21-scenario adversarial corpus and reproducible long-line rendering wire-size evidence.
 
 ### Fixed
 
