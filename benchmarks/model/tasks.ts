@@ -155,3 +155,122 @@ export const modelTasks: ModelTask[] = [
     },
   },
 ];
+
+const copyBlock = Array.from(
+  { length: 100 },
+  (_, index) => `entry-${String(index + 1).padStart(3, "0")}`,
+).join("\n");
+const longCorridor = Array.from(
+  { length: 5_000 },
+  (_, index) => `unchanged-${String(index + 1).padStart(4, "0")}`,
+).join("\n");
+
+export const transferModelTasks: ModelTask[] = [
+  {
+    id: "transfer-long-copy",
+    category: "copy",
+    prompt:
+      "In data.txt, copy all 100 entry lines from between BEGIN SOURCE and END SOURCE to immediately after BEGIN COPY. Keep the source and all markers unchanged.",
+    files: {
+      "data.txt": `BEGIN SOURCE\n${copyBlock}\nEND SOURCE\nBEGIN COPY\nEND COPY\n`,
+    },
+    expectedFiles: {
+      "data.txt": `BEGIN SOURCE\n${copyBlock}\nEND SOURCE\nBEGIN COPY\n${copyBlock}\nEND COPY\n`,
+    },
+  },
+  {
+    id: "transfer-move-upward",
+    category: "move",
+    prompt:
+      "In pipeline.txt, move the complete BEGIN AUDIT through END AUDIT block immediately before BEGIN PARSE. Preserve every line inside both blocks.",
+    files: {
+      "pipeline.txt":
+        "HEADER\nBEGIN PARSE\nparse-one\nparse-two\nEND PARSE\nMIDDLE\nBEGIN AUDIT\naudit-one\naudit-two\nEND AUDIT\nFOOTER\n",
+    },
+    expectedFiles: {
+      "pipeline.txt":
+        "HEADER\nBEGIN AUDIT\naudit-one\naudit-two\nEND AUDIT\nBEGIN PARSE\nparse-one\nparse-two\nEND PARSE\nMIDDLE\nFOOTER\n",
+    },
+  },
+  {
+    id: "transfer-move-downward",
+    category: "move",
+    prompt:
+      "In pipeline.txt, move the complete BEGIN PARSE through END PARSE block immediately after END AUDIT. Preserve every line inside both blocks.",
+    files: {
+      "pipeline.txt":
+        "HEADER\nBEGIN PARSE\nparse-one\nparse-two\nEND PARSE\nMIDDLE\nBEGIN AUDIT\naudit-one\naudit-two\nEND AUDIT\nFOOTER\n",
+    },
+    expectedFiles: {
+      "pipeline.txt":
+        "HEADER\nMIDDLE\nBEGIN AUDIT\naudit-one\naudit-two\nEND AUDIT\nBEGIN PARSE\nparse-one\nparse-two\nEND PARSE\nFOOTER\n",
+    },
+  },
+  {
+    id: "transfer-multiple",
+    category: "batch",
+    prompt:
+      "In layout.txt, move the complete BLOCK B section before BLOCK A, and copy both template value lines immediately after CLONE. Do not change any line text.",
+    files: {
+      "layout.txt":
+        "HEADER\nBLOCK A\na-one\na-two\nEND A\nGAP\nBLOCK B\nb-one\nb-two\nEND B\nTEMPLATE\nvalue-one\nvalue-two\nCLONE\nFOOTER\n",
+    },
+    expectedFiles: {
+      "layout.txt":
+        "HEADER\nBLOCK B\nb-one\nb-two\nEND B\nBLOCK A\na-one\na-two\nEND A\nGAP\nTEMPLATE\nvalue-one\nvalue-two\nCLONE\nvalue-one\nvalue-two\nFOOTER\n",
+    },
+  },
+  {
+    id: "transfer-long-corridor",
+    category: "move-economics",
+    prompt:
+      "In long.txt, move the three-line BEGIN FOOTER through END FOOTER block immediately after HEADER. Leave all 5,000 unchanged lines in their original order.",
+    files: {
+      "long.txt": `HEADER\n${longCorridor}\nBEGIN FOOTER\nfooter-value\nEND FOOTER\n`,
+    },
+    expectedFiles: {
+      "long.txt": `HEADER\nBEGIN FOOTER\nfooter-value\nEND FOOTER\n${longCorridor}\n`,
+    },
+  },
+  {
+    id: "transfer-conflict-recovery",
+    category: "recovery",
+    prompt:
+      "In settings.txt, copy the two original value lines from TEMPLATE immediately after CLONE, then change only TEMPLATE's mode from old to new. The copied mode must remain old.",
+    files: {
+      "settings.txt": "TEMPLATE\nmode=old\nenabled=true\nEND TEMPLATE\nCLONE\nEND CLONE\n",
+    },
+    expectedFiles: {
+      "settings.txt":
+        "TEMPLATE\nmode=new\nenabled=true\nEND TEMPLATE\nCLONE\nmode=old\nenabled=true\nEND CLONE\n",
+    },
+  },
+  {
+    id: "transfer-duplicate-source",
+    category: "ambiguity",
+    prompt:
+      "In duplicates.txt, copy only the two value lines under SECOND immediately after TARGET. Do not copy from FIRST and do not change either source block.",
+    files: {
+      "duplicates.txt":
+        "FIRST\nvalue=one\nenabled=true\nEND FIRST\nSECOND\nvalue=one\nenabled=true\nEND SECOND\nTARGET\nEND TARGET\n",
+    },
+    expectedFiles: {
+      "duplicates.txt":
+        "FIRST\nvalue=one\nenabled=true\nEND FIRST\nSECOND\nvalue=one\nenabled=true\nEND SECOND\nTARGET\nvalue=one\nenabled=true\nEND TARGET\n",
+    },
+  },
+  {
+    id: "transfer-legacy-control",
+    category: "control",
+    prompt: "In control.txt, change status=pending to status=ready. Make no other changes.",
+    files: { "control.txt": "name=fixture\nstatus=pending\n" },
+    expectedFiles: { "control.txt": "name=fixture\nstatus=ready\n" },
+  },
+];
+
+export const modelTaskSets = {
+  "baseline-v1": modelTasks,
+  "transfer-v1": transferModelTasks,
+} as const satisfies Record<string, readonly ModelTask[]>;
+
+export type ModelTaskSetId = keyof typeof modelTaskSets;

@@ -4,7 +4,7 @@ import { relative } from "node:path";
 import { type Plugin, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
 import type { EditOperation, RebaseMode } from "./edits.js";
-import { planEdits, validateEditOperations } from "./edits.js";
+import { moveCorridor, planEdits, validateEditOperations } from "./edits.js";
 import { fail, HashlineError } from "./errors.js";
 import {
   assertTargetAbsent,
@@ -33,11 +33,14 @@ import { assertLineLimit, decodeTextDocument, encodeNewText } from "./text.js";
 const NATIVE_MUTATORS = new Set(["edit", "write", "apply_patch"]);
 
 const editOperationShape = {
-  op: tool.schema.enum(["replace", "insert", "replace_file"]),
+  op: tool.schema.enum(["replace", "insert", "replace_file", "copy_range", "move_range"]),
   startLine: tool.schema.number().int().min(1).optional(),
   endLine: tool.schema.number().int().min(1).optional(),
   afterLine: tool.schema.number().int().min(0).optional(),
-  lines: tool.schema.array(tool.schema.string().max(16 * 1024 * 1024)).max(100_000),
+  lines: tool.schema
+    .array(tool.schema.string().max(16 * 1024 * 1024))
+    .max(100_000)
+    .optional(),
   finalNewline: tool.schema.boolean().optional(),
 };
 const editOperation = tool.schema.object(editOperationShape).strict();
@@ -65,7 +68,10 @@ const editArgumentShape = {
     .describe("Set true only to write an intentional N| or @hashline-style source line"),
   operations: tool.schema.array(editOperation).min(1).max(100),
 };
-const editArguments = tool.schema.object(editArgumentShape).strict();
+export const hashlineEditArgumentsSchema = tool.schema.object(editArgumentShape).strict();
+
+export const hashlineEditDescription =
+  'Atomically edit one exact hashline_read snapshot. replace/insert require lines; copy_range/move_range require startLine,endLine,afterLine; replace_file is sole. All coordinates use one immutable pre-batch snapshot; transfers read pre-edit source; afterLine is never adjusted for moves/deletes. lines:[] deletes. lines:[""] is one empty logical value and may only alter EOL bytes. unique rebase is exact, unchanged, ambiguity-rejecting, and never fuzzy.';
 
 const writeArgumentShape = {
   filePath: tool.schema.string().min(1),
@@ -85,11 +91,11 @@ type PendingRead = {
 };
 
 type RawEditOperation = {
-  op: "replace" | "insert" | "replace_file";
+  op: "replace" | "insert" | "replace_file" | "copy_range" | "move_range";
   startLine?: number | undefined;
   endLine?: number | undefined;
   afterLine?: number | undefined;
-  lines: string[];
+  lines?: string[] | undefined;
   finalNewline?: boolean | undefined;
 };
 
@@ -115,6 +121,7 @@ function invalidArguments(toolName: string): never {
 
 function assertNoDisplayPrefixes(operations: readonly EditOperation[]): void {
   for (const operation of operations) {
+    if (operation.op === "copy_range" || operation.op === "move_range") continue;
     for (const line of operation.lines) {
       if (/^(?:\d+[!]?\||@(?:hashline|more|eof|note)(?:\s|$))/u.test(line)) {
         fail(
@@ -131,20 +138,59 @@ function parseOperations(
   maxFileBytes: number,
   maxLines: number,
 ): EditOperation[] {
+  for (const operation of operations) {
+    if (operation.op !== "copy_range" && operation.op !== "move_range") continue;
+    if (
+      operation.startLine === undefined ||
+      operation.endLine === undefined ||
+      operation.afterLine === undefined ||
+      operation.lines !== undefined ||
+      operation.finalNewline !== undefined
+    ) {
+      fail(
+        "INVALID_ARGUMENT",
+        `${operation.op} requires startLine, endLine, and afterLine, and does not accept lines or finalNewline.`,
+      );
+    }
+  }
+
+  for (const operation of operations) {
+    if (operation.op === "copy_range" || operation.op === "move_range") continue;
+    if (operation.lines !== undefined) continue;
+    if (operation.op === "replace") {
+      fail(
+        "INVALID_ARGUMENT",
+        "replace requires startLine and endLine, and does not accept afterLine or finalNewline.",
+      );
+    }
+    if (operation.op === "insert") {
+      fail(
+        "INVALID_ARGUMENT",
+        "insert requires afterLine, and does not accept startLine, endLine, or finalNewline.",
+      );
+    }
+    fail("INVALID_ARGUMENT", "replace_file requires lines and does not accept line coordinates.");
+  }
+
   let totalBytes = 0;
   let totalLines = 0;
   for (const operation of operations) {
-    totalLines += operation.lines.length;
-    for (const line of operation.lines) {
+    if (operation.op === "copy_range" || operation.op === "move_range") continue;
+    const lines = operation.lines;
+    if (lines === undefined) continue;
+    totalLines += lines.length;
+    for (const line of lines) {
       totalBytes += Buffer.byteLength(line, "utf8") + 2;
       if (totalBytes > maxFileBytes || totalLines > maxLines) {
         fail("UNSUPPORTED_FILE", "Replacement payload exceeds the configured safety limits.");
       }
     }
   }
-  return operations.map((operation) => {
+
+  return operations.map((operation): EditOperation => {
     if (operation.op === "replace") {
       if (
+        operation.lines === undefined ||
         operation.startLine === undefined ||
         operation.endLine === undefined ||
         operation.afterLine !== undefined ||
@@ -168,6 +214,7 @@ function parseOperations(
 
     if (operation.op === "insert") {
       if (
+        operation.lines === undefined ||
         operation.afterLine === undefined ||
         operation.startLine !== undefined ||
         operation.endLine !== undefined ||
@@ -184,17 +231,42 @@ function parseOperations(
       return { op: "insert", afterLine: operation.afterLine, lines: operation.lines };
     }
 
+    if (operation.op === "replace_file") {
+      if (
+        operation.lines === undefined ||
+        operation.startLine !== undefined ||
+        operation.endLine !== undefined ||
+        operation.afterLine !== undefined
+      ) {
+        fail(
+          "INVALID_ARGUMENT",
+          "replace_file requires lines and does not accept line coordinates.",
+        );
+      }
+      return {
+        op: "replace_file",
+        lines: operation.lines,
+        ...(operation.finalNewline === undefined ? {} : { finalNewline: operation.finalNewline }),
+      };
+    }
+
     if (
-      operation.startLine !== undefined ||
-      operation.endLine !== undefined ||
-      operation.afterLine !== undefined
+      operation.startLine === undefined ||
+      operation.endLine === undefined ||
+      operation.afterLine === undefined ||
+      operation.lines !== undefined ||
+      operation.finalNewline !== undefined
     ) {
-      fail("INVALID_ARGUMENT", "replace_file does not accept line coordinates.");
+      fail(
+        "INVALID_ARGUMENT",
+        `${operation.op} requires startLine, endLine, and afterLine, and does not accept lines or finalNewline.`,
+      );
     }
     return {
-      op: "replace_file",
-      lines: operation.lines,
-      ...(operation.finalNewline === undefined ? {} : { finalNewline: operation.finalNewline }),
+      op: operation.op,
+      startLine: operation.startLine,
+      endLine: operation.endLine,
+      afterLine: operation.afterLine,
     };
   });
 }
@@ -205,7 +277,47 @@ function assertIssued(
   operations: readonly EditOperation[],
   rebase: RebaseMode,
 ): void {
-  for (const operation of operations) {
+  const hasTransfer = operations.some(
+    (operation) => operation.op === "copy_range" || operation.op === "move_range",
+  );
+  if (hasTransfer) {
+    const ranges = new Map<string, { startLine: number; endLine: number }>();
+    const boundaries = new Set<number>();
+    const addRange = (startLine: number, endLine: number): void => {
+      ranges.set(`${startLine}:${endLine}`, { startLine, endLine });
+    };
+    for (const operation of operations) {
+      if (operation.op === "replace") {
+        addRange(operation.startLine, operation.endLine);
+      } else if (operation.op === "insert") {
+        boundaries.add(operation.afterLine);
+      } else if (operation.op === "copy_range") {
+        addRange(operation.startLine, operation.endLine);
+        boundaries.add(operation.afterLine);
+      } else if (operation.op === "move_range") {
+        addRange(operation.startLine, operation.endLine);
+        const corridor = moveCorridor(operation);
+        addRange(corridor.startLine, corridor.endLine);
+        boundaries.add(operation.afterLine);
+      }
+    }
+    const orderedRanges = [...ranges.values()].sort(
+      (left, right) => left.startLine - right.startLine || left.endLine - right.endLine,
+    );
+    for (const range of orderedRanges) {
+      store.assertRangeIssued(snapshot, range.startLine, range.endLine);
+    }
+    for (const boundary of [...boundaries].sort((left, right) => left - right)) {
+      store.assertBoundaryIssued(snapshot, boundary);
+    }
+    return;
+  }
+
+  const legacyOperations = operations as readonly Extract<
+    EditOperation,
+    { op: "replace" | "insert" | "replace_file" }
+  >[];
+  for (const operation of legacyOperations) {
     if (operation.op === "replace") {
       store.assertRangeIssued(snapshot, operation.startLine, operation.endLine);
     } else if (operation.op === "insert") {
@@ -301,13 +413,12 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
   });
 
   const hashlineEdit = tool({
-    description:
-      'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. rebase defaults to none; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.',
+    description: hashlineEditDescription,
     args: editArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
       throwIfAborted(context.abort);
-      const parsed = editArguments.safeParse(rawArgs);
+      const parsed = hashlineEditArgumentsSchema.safeParse(rawArgs);
       if (!parsed.success) invalidArguments("hashline_edit");
       const args = parsed.data;
       const operations = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
@@ -336,6 +447,8 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
             operations,
             rebase,
             maxContextLines: options.maxContextLines,
+            maxFileBytes: options.maxFileBytes,
+            maxLines: options.maxLines,
           });
           if (plan.bytes.byteLength > options.maxFileBytes) {
             fail("UNSUPPORTED_FILE", "The edited file exceeds maxFileBytes.");

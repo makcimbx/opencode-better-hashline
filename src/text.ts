@@ -65,7 +65,7 @@ function assertUnicode(text: string, label: string): void {
   }
 }
 
-function parseLines(text: string): TextLine[] {
+export function parseTextLines(text: string): TextLine[] {
   const lines: TextLine[] = [];
   let start = 0;
   while (start < text.length) {
@@ -161,7 +161,7 @@ export function decodeTextDocument(
     fail("UNSUPPORTED_FILE", "The file is not valid UTF-8.");
   }
   assertEditableText(text);
-  const lines = parseLines(text);
+  const lines = parseTextLines(text);
   return {
     bytes,
     text,

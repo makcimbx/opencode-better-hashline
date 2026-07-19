@@ -7,6 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Add snapshot-bound `copy_range` and `move_range` operations with immutable coordinates, issued-source authority, mixed-batch conflict analysis, and exact-unique multi-anchor relocation.
+- Add a separately versioned eight-task `transfer-v1` model-development manifest without changing the 12-task baseline.
+- Add deterministic transfer safety cases plus operation-call, provider-schema, and move-corridor wire evidence.
+
+### Changed
+
+- Preserve released legacy payload-limit precedence and overlap diagnostics while making transfer-batch conflict diagnostics independent of operation order.
+- Make the flat provider-level `lines` field optional while retaining operation-specific runtime requirements for all existing payload operations.
+- Preflight projected byte and logical-line limits before materializing transfer output.
+- Reject blank-line moves that cannot preserve logical text and positional EOL slots under CRLF/no-phantom parsing instead of normalizing their byte layout.
+
 ## [0.1.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.1.0...v0.1.1) - 2026-07-18
 
 ### Added

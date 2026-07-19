@@ -113,13 +113,19 @@ describe("line edit planning", () => {
         { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
         { op: "replace", startLine: 2, endLine: 2, lines: ["y"] },
       ]),
-    ).toThrow("OPERATIONS_OVERLAP:");
+    ).toThrow("OPERATIONS_OVERLAP: Replacement ranges overlap in the snapshot.");
     expect(() =>
       plan("a\nb\n", "a\nb\n", [
         { op: "insert", afterLine: 1, lines: ["x"] },
         { op: "insert", afterLine: 1, lines: ["y"] },
       ]),
-    ).toThrow("OPERATIONS_OVERLAP:");
+    ).toThrow("OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary.");
+    expect(() =>
+      plan("a\nb\n", "a\nb\n", [
+        { op: "replace", startLine: 1, endLine: 1, lines: ["x"] },
+        { op: "insert", afterLine: 1, lines: ["y"] },
+      ]),
+    ).toThrow("OPERATIONS_OVERLAP: An insertion touches a replacement range boundary.");
     expect(() => plan("a\n", "a\n", [{ op: "insert", afterLine: 1, lines: [] }])).toThrow(
       "INVALID_ARGUMENT:",
     );

@@ -1,19 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="520" viewBox="0 0 1100 520" role="img" aria-labelledby="title desc">
   <title id="title">Deterministic adversarial benchmark outcomes</title>
-  <desc id="desc">A chart of unsafe accepts and false rejects for six mechanical editing adapters over twenty-one scenarios.</desc>
+  <desc id="desc">A chart of unsafe accepts and false rejects for six mechanical editing adapters over twenty-eight scenarios.</desc>
   <rect width="1100" height="520" rx="24" fill="#091523"/>
   <text x="54" y="60" fill="#f3f7ff" font-family="Inter,Segoe UI,sans-serif" font-size="29" font-weight="800">Adversarial protocol corpus</text>
-  <text x="54" y="90" fill="#8fa8c4" font-family="Inter,Segoe UI,sans-serif" font-size="15">21 deterministic scenarios, 2026-07-19. Mechanical safety only; no model claim.</text>
+  <text x="54" y="90" fill="#8fa8c4" font-family="Inter,Segoe UI,sans-serif" font-size="15">28 deterministic scenarios, 2026-07-19. Mechanical safety only; no model claim.</text>
   <g transform="translate(54 128)" font-family="Inter,Segoe UI,sans-serif">
     <text x="322" y="0" fill="#8fa8c4" font-size="13">0</text><text x="472" y="0" fill="#8fa8c4" font-size="13">5</text><text x="622" y="0" fill="#8fa8c4" font-size="13">10</text><text x="772" y="0" fill="#8fa8c4" font-size="13">15</text><text x="922" y="0" fill="#8fa8c4" font-size="13">20</text>
     <g stroke="#263d56" opacity="0.65"><path d="M325 12v330"/><path d="M475 12v330"/><path d="M625 12v330"/><path d="M775 12v330"/><path d="M925 12v330"/></g>
 
-    <g transform="translate(0 30)"><text x="0" y="18" fill="#dce9f8" font-size="15">Better Hashline strict</text><rect x="325" width="0" height="22" fill="#ff6b6b"/><rect x="325" y="25" width="90" height="8" rx="4" fill="#f3c969"/><text x="426" y="31" fill="#f3c969" font-size="12">3 false rejects</text></g>
+    <g transform="translate(0 30)"><text x="0" y="18" fill="#dce9f8" font-size="15">Better Hashline strict</text><rect x="325" width="0" height="22" fill="#ff6b6b"/><rect x="325" y="25" width="150" height="8" rx="4" fill="#f3c969"/><text x="486" y="31" fill="#f3c969" font-size="12">5 false rejects</text></g>
     <g transform="translate(0 88)"><text x="0" y="18" fill="#dce9f8" font-size="15">Better Hashline unique</text><circle cx="337" cy="11" r="10" fill="#72f1b8"/><path d="M332 11l4 4 7-8" fill="none" stroke="#07111f" stroke-width="2"/><text x="355" y="16" fill="#72f1b8" font-size="13">0 unsafe, 0 false rejects</text></g>
-    <g transform="translate(0 146)"><text x="0" y="18" fill="#dce9f8" font-size="15">Target-only exact search / replace</text><rect x="325" width="120" height="22" rx="5" fill="#ff6b6b"/><rect x="325" y="25" width="30" height="8" rx="4" fill="#f3c969"/><text x="456" y="17" fill="#ff9c9c" font-size="13">4 unsafe, 1 false reject</text></g>
-    <g transform="translate(0 204)"><text x="0" y="18" fill="#dce9f8" font-size="15">Line number only</text><rect x="325" width="510" height="22" rx="5" fill="#ff6b6b"/><text x="846" y="17" fill="#ff9c9c" font-size="13">17 unsafe</text></g>
-    <g transform="translate(0 262)"><text x="0" y="18" fill="#dce9f8" font-size="15">8-bit endpoint hash</text><rect x="325" width="180" height="22" rx="5" fill="#ff6b6b"/><rect x="325" y="25" width="60" height="8" rx="4" fill="#f3c969"/><text x="516" y="17" fill="#ff9c9c" font-size="13">6 unsafe</text></g>
-    <g transform="translate(0 320)"><text x="0" y="18" fill="#dce9f8" font-size="15">16-bit endpoint hash</text><rect x="325" width="150" height="22" rx="5" fill="#ff6b6b"/><rect x="325" y="25" width="60" height="8" rx="4" fill="#f3c969"/><text x="486" y="17" fill="#ff9c9c" font-size="13">5 unsafe</text></g>
+    <g transform="translate(0 146)"><text x="0" y="18" fill="#dce9f8" font-size="15">Target-only exact search / replace</text><rect x="325" width="150" height="22" rx="5" fill="#ff6b6b"/><rect x="325" y="25" width="30" height="8" rx="4" fill="#f3c969"/><text x="486" y="17" fill="#ff9c9c" font-size="13">5 unsafe, 1 false reject</text></g>
+    <g transform="translate(0 204)"><text x="0" y="18" fill="#dce9f8" font-size="15">Line number only</text><rect x="325" width="630" height="22" rx="5" fill="#ff6b6b"/><text x="966" y="17" fill="#ff9c9c" font-size="13">21 unsafe</text></g>
+    <g transform="translate(0 262)"><text x="0" y="18" fill="#dce9f8" font-size="15">8-bit endpoint hash</text><rect x="325" width="180" height="22" rx="5" fill="#ff6b6b"/><rect x="325" y="25" width="120" height="8" rx="4" fill="#f3c969"/><text x="516" y="17" fill="#ff9c9c" font-size="13">6 unsafe, 4 false rejects</text></g>
+    <g transform="translate(0 320)"><text x="0" y="18" fill="#dce9f8" font-size="15">16-bit endpoint hash</text><rect x="325" width="150" height="22" rx="5" fill="#ff6b6b"/><rect x="325" y="25" width="120" height="8" rx="4" fill="#f3c969"/><text x="486" y="17" fill="#ff9c9c" font-size="13">5 unsafe, 4 false rejects</text></g>
   </g>
   <g transform="translate(54 476)" font-family="Inter,Segoe UI,sans-serif" font-size="13"><rect width="15" height="15" rx="3" fill="#ff6b6b"/><text x="24" y="13" fill="#aebfd3">unsafe accept</text><rect x="160" width="15" height="8" y="4" rx="3" fill="#f3c969"/><text x="184" y="13" fill="#aebfd3">false reject</text><text x="982" y="13" text-anchor="end" fill="#6f849d">Lower is better</text></g>
 </svg>
