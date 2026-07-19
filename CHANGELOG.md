@@ -5,14 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.1.1...v0.2.0) (2026-07-19)
-
-
-### Features
-
-* add snapshot-bound range transfers ([#9](https://github.com/makcimbx/opencode-better-hashline/issues/9)) ([84f57f4](https://github.com/makcimbx/opencode-better-hashline/commit/84f57f4b0f91d03ace205e9b425b46b10d18c9b9))
-
 ## [Unreleased]
+
+## [0.2.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.1.1...v0.2.0) - 2026-07-19
 
 ### Added
 
