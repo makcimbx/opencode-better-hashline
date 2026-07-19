@@ -237,6 +237,7 @@ Full boundaries and trust assumptions are in [docs/threat-model.md](docs/threat-
 - [Threat model](docs/threat-model.md)
 - [Research and prior art](docs/research.md)
 - [Benchmarks](docs/benchmarks.md)
+- [Experimental native-alias preview plan](docs/native-alias-preview-plan.md)
 - [Release process](docs/releasing.md)
 - [Contributing](CONTRIBUTING.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)

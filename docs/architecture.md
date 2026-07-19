@@ -9,6 +9,7 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/text.ts` | Fatal UTF-8 decoding, BOM/EOL model, byte-preserving encode, payload validation |
 | `src/snapshots.ts` | Opaque IDs, exact bytes/SHA-256, scope, issued provenance, TTL/LRU limits |
 | `src/render.ts` | Byte-bounded `N|content` pages and preview-only oversized lines |
+| `src/presentation.ts` | Experimental native-alias metadata, canonical fingerprints, and serialized-size measurement |
 | `src/rebase.ts` | Exact unique range/boundary relocation with a cumulative comparison budget |
 | `src/edits.ts` | Operation validation, transfer effect analysis, immutable planning, bounded projection, final bytes |
 | `src/filesystem.ts` | Canonicalization, OpenCode permissions, stable reads, locks, publication |
