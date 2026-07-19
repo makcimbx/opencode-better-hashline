@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.1.1...v0.2.0) - 2026-07-19
+
 ### Added
 
 - Add snapshot-bound `copy_range` and `move_range` operations with immutable coordinates, issued-source authority, mixed-batch conflict analysis, and exact-unique multi-anchor relocation.
