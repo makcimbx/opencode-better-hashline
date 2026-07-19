@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { type ModelTask, modelTasks } from "./tasks.js";
+import { type ModelTask, modelTaskSets } from "./tasks.js";
 import {
   inspectJsonlTrace,
   inspectSessionExport,
@@ -579,6 +579,12 @@ const model = option("model") ?? process.env.BENCHMARK_MODEL;
 const variant = option("variant");
 const agent = option("agent") ?? "build";
 const authFile = option("auth-file") ?? process.env.BENCHMARK_AUTH_FILE;
+const taskSetName = option("task-set") ?? "baseline-v1";
+if (!Object.hasOwn(modelTaskSets, taskSetName)) {
+  throw new Error(`--task-set must be one of: ${Object.keys(modelTaskSets).sort().join(", ")}.`);
+}
+const taskSet = taskSetName as keyof typeof modelTaskSets;
+const modelTasks: readonly ModelTask[] = modelTaskSets[taskSet];
 const repository = resolve(import.meta.dir, "../..");
 const output = resolve(
   option("output") ??
@@ -594,7 +600,7 @@ const sessions = modelTasks.length * repeats * 2;
 
 if (!execute && !preflight) {
   console.log(
-    `Planned paired model benchmark: ${modelTasks.length} tasks x 2 adapters x ${repeats} repeats = ${sessions} sessions.`,
+    `Planned paired model benchmark ${taskSet}: ${modelTasks.length} tasks x 2 adapters x ${repeats} repeats = ${sessions} sessions.`,
   );
   console.log(
     "No model was called. Pass --execute, --model=provider/model, and BENCHMARK_ACK_COSTS=yes to run it.",
@@ -627,9 +633,12 @@ if (preflight) {
       join(output, "preflight.json"),
       `${JSON.stringify(
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           generatedAt: new Date().toISOString(),
           modelCalls: 0,
+          taskSet,
+          taskCount: modelTasks.length,
+          taskManifestSha256: sha256(JSON.stringify(modelTasks)),
           sideEffects: [
             "built the local package",
             "created an npm tarball",
@@ -731,7 +740,7 @@ try {
     ]),
   );
   const report = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt: new Date().toISOString(),
     provenance: {
       sourceCommit,
@@ -755,6 +764,7 @@ try {
       requestedModel: model,
       requestedVariant: variant ?? null,
       requestedAgent: agent,
+      taskSet,
       repeats,
       paired: true,
       adapterOrder: "alternating",

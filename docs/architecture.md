@@ -9,8 +9,8 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/text.ts` | Fatal UTF-8 decoding, BOM/EOL model, byte-preserving encode, payload validation |
 | `src/snapshots.ts` | Opaque IDs, exact bytes/SHA-256, scope, issued provenance, TTL/LRU limits |
 | `src/render.ts` | Byte-bounded `N|content` pages and preview-only oversized lines |
-| `src/rebase.ts` | Exact unique range and insertion-boundary relocation |
-| `src/edits.ts` | Operation validation, immutable planning, overlap/order checks, final bytes |
+| `src/rebase.ts` | Exact unique range/boundary relocation with a cumulative comparison budget |
+| `src/edits.ts` | Operation validation, transfer effect analysis, immutable planning, bounded projection, final bytes |
 | `src/filesystem.ts` | Canonicalization, OpenCode permissions, stable reads, locks, publication |
 | `src/plugin.ts` | Tool schemas, hooks, native-mutator enforcement, lifecycle integration |
 | `src/index.ts` | Public library exports and OpenCode `PluginModule` |
@@ -29,6 +29,8 @@ The snapshot store distinguishes bytes retained by the process from line referen
 ### Planning is pure
 
 `planEdits` receives base and current immutable text documents and returns final text/bytes or a stable rejection. It performs no I/O and asks no permission. This makes exhaustive and property testing possible without weakening the filesystem path.
+
+Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy reads retained logical texts and inserts them with destination-local EOL rules. Move rewrites one source-to-destination corridor by permuting texts over fixed positional EOL slots. A declarative read/write effect graph rejects dependencies instead of giving operation array order sequential meaning. Projected text statistics compose CRLF across planned segment boundaries; after bounded projection, every move is rendered lazily and reparsed to prove that its expected logical texts and positional EOL slots remain representable.
 
 ### Permissions approve a fixed plan
 

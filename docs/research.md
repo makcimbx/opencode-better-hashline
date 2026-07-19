@@ -1,6 +1,6 @@
 # Hashline Research and Prior Art
 
-Audit date: 2026-07-18. Findings are tied to the linked commits, issues, and pull requests; upstream behavior can change.
+Audit date: 2026-07-19. Findings are tied to the linked commits, issues, and pull requests; upstream behavior can change.
 
 ## Origin and Evolution
 
@@ -24,6 +24,25 @@ The useful idea is compact, model-copyable addressing. The unsafe leap is treati
 | [Dirac](https://github.com/dirac-run/dirac) | Task-scoped opaque word anchors and Myers identity reconciliation | Duplicate ambiguity, source-prefix handling, cache questions, and no established external CAS |
 
 OpenCode stable 1.18.3 and development commit `fab213312927ea64cf968832c527206e8c944f9e` had no merged native Hashline implementation at audit time. Both core proposals above were closed unmerged.
+
+## Range Transfer Prior Art
+
+No surveyed Hashline implementation exposes arbitrary same-file line-range copy or move. Current
+[oh-my-pi `MV`](https://github.com/can1357/oh-my-pi/blob/9fd6e97113f5ed3a847e66d346970efdf8afcad9/packages/hashline/src/types.ts)
+is a whole-file move. Mature editors and protocols provide only partial analogies:
+
+- [Vim `:copy` and `:move`](https://github.com/vim/vim/blob/6f02e5cd7c27fc098d0b8dfec99542c7663a807e/src/ex_cmds.c#L872-L1076)
+  use an inclusive source and destination below a line; copy may target inside its source, while move
+  rejects an interior destination.
+- [CodeMirror transactions](https://codemirror.net/docs/guide/#changes-and-transactions) and
+  [LSP 3.18 `TextEdit[]`](https://github.com/microsoft/language-server-protocol/blob/b7f5132c95261c0898ae5124e7a91707abc48fcd/_specifications/lsp/3.18/types/textEditArray.md)
+  address one initial document and reject conflicting changes.
+- [JSON Patch](https://www.rfc-editor.org/rfc/rfc6902#section-4.4) applies operations sequentially and
+  defines move as remove followed by add. Its evolving array indexes are intentionally not used here.
+
+Better Hashline therefore treats transfers as one immutable snapshot transformation: source and
+destination coordinates always address the pre-edit document, move is one corridor rewrite, and the
+final compound bytes are planned and approved once.
 
 ## Repeated Failure Modes
 

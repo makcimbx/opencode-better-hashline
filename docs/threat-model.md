@@ -9,6 +9,8 @@ Better Hashline is designed to prevent these failures during cooperative agent e
 - accepting only range endpoints while an interior line changed;
 - composing overlapping or same-boundary operations;
 - editing a line that was retained internally but not issued to the model;
+- copying retained source text that was not issued to the model;
+- moving through unseen corridor content or composing a move from evolving coordinates;
 - bypassing normal OpenCode read/edit/external-directory permission decisions;
 - silently overwriting an existing path through the create tool;
 - following a retargeted symlink without reauthorization;
@@ -49,11 +51,13 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | Snapshot freshness | Exact byte equality in strict mode |
 | Target identity | Canonical path plus stable file metadata checks |
 | Relocation | Exact selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges |
-| Batch validation | One file, all operations before mutation |
+| Batch validation | One immutable pre-batch file, declared read/write effects checked before mutation |
 | Permission binding | Exact planned unified diff before approval |
 | Publication visibility | At most one final replacement attempt where rename supports it |
 | New file safety | Staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
 | Memory bounds | Global, session, path, byte, and TTL limits |
+
+Transfer operations are source-referenced compound edits. Copy requires complete source provenance plus destination-boundary provenance. Move requires complete provenance for the source-to-destination corridor because logical texts are permuted over its positional EOL slots. Exact-unique relocation maps every source, corridor, and destination anchor through one cumulative budget, then rejects changed topology. Copy amplification is projected against configured output limits before materializing the final document. Projection composes CRLF across segment boundaries, and move rendering is reparsed against its expected logical texts and EOL slots. This prevents empty-text moves from merging a lone CR with a relocated LF or changing the no-phantom EOF model.
 
 ## Metadata
 

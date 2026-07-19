@@ -43,7 +43,7 @@ await Promise.all(
   ),
 );
 await Promise.all([
-  writeFile(fixture, "alpha\nbeta\n", "utf8"),
+  writeFile(fixture, "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n", "utf8"),
   writeFile(hookLog, "", "utf8"),
   writeFile(
     observer,
@@ -158,7 +158,7 @@ const server = Bun.serve({
     }
     const serialized = JSON.stringify(body.messages ?? []);
     const snapshotId = serialized.match(/s_[A-Za-z0-9_-]{22}/u)?.[0];
-    if (serialized.includes("Applied 1 operation")) {
+    if (serialized.includes("Applied 2 operations")) {
       return streamResponse({ kind: "text", text: "Scripted read/edit sequence complete." });
     }
     if (snapshotId) {
@@ -169,7 +169,10 @@ const server = Bun.serve({
         args: {
           filePath: "probe.txt",
           snapshotId,
-          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["edited"] }],
+          operations: [
+            { op: "copy_range", startLine: 1, endLine: 1, afterLine: 2 },
+            { op: "move_range", startLine: 5, endLine: 5, afterLine: 3 },
+          ],
         },
       });
     }
@@ -177,7 +180,7 @@ const server = Bun.serve({
       kind: "tool",
       id: "call_hashline_read",
       name: "hashline_read",
-      args: { filePath: "probe.txt", limit: 2 },
+      args: { filePath: "probe.txt", limit: 6 },
     });
   },
 });
@@ -288,7 +291,7 @@ try {
     throw new Error("OpenCode did not expose both hashline session tools");
   }
   const finalBytes = await readFile(fixture, "utf8");
-  if (finalBytes !== "edited\nbeta\n") {
+  if (finalBytes !== "alpha\nbeta\nalpha\ngamma\nepsilon\ndelta\nzeta\n") {
     throw new Error(`Session smoke produced unexpected bytes: ${JSON.stringify(finalBytes)}`);
   }
 

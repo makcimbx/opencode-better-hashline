@@ -15,7 +15,14 @@ Result paths are write-once unless `--force` is supplied explicitly. Never use `
 
 ## Model Runner
 
-`bun run bench:model` is a dry run. A model-free adapter/package check is available separately:
+`bun run bench:model` is a dry run of the frozen `baseline-v1` task set. The separately versioned
+transfer development set is also dry-run by default:
+
+```sh
+bun run bench:model --task-set=transfer-v1
+```
+
+A model-free adapter/package check is available separately:
 
 ```sh
 bun run bench:model --preflight --output=benchmarks/results/local/preflight
@@ -29,7 +36,7 @@ Paid execution requires all three controls:
 BENCHMARK_MODEL=provider/model \
 BENCHMARK_AUTH_FILE=/path/to/opencode-auth.json \
 BENCHMARK_ACK_COSTS=yes \
-bun run bench:model --execute --repeats=2
+bun run bench:model --execute --task-set=baseline-v1 --repeats=2
 ```
 
 On PowerShell:

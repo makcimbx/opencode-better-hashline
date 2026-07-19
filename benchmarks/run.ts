@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { z } from "zod";
+import { hashlineEditArgumentsSchema, hashlineEditDescription } from "../src/plugin.js";
 import {
   runDeterministicSuite,
   runMicroSuite,
+  runMoveCorridorWireSuite,
   runRenderingWireSuite,
   runStaticSizeSuite,
+  runTransferCallWireSuite,
 } from "./suite.js";
 
 function argument(name: string): string | undefined {
@@ -22,6 +26,48 @@ function digest(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+type JsonSchemaNode = {
+  enum?: string[] | undefined;
+  items?: JsonSchemaNode | undefined;
+  properties?: Record<string, JsonSchemaNode> | undefined;
+  required?: string[] | undefined;
+};
+
+function providerSchemaWireSize(): {
+  scenario: string;
+  legacyBytes: number;
+  currentBytes: number;
+  deltaBytes: number;
+  deltaPercent: number;
+} {
+  const legacyDescription =
+    'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. rebase defaults to none; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.';
+  const currentParameters = z.toJSONSchema(hashlineEditArgumentsSchema);
+  const legacyParameters = structuredClone(currentParameters) as JsonSchemaNode;
+  const operation = legacyParameters.properties?.operations?.items;
+  const discriminator = operation?.properties?.op;
+  if (!operation || !discriminator) {
+    throw new Error("Unexpected hashline_edit provider schema shape.");
+  }
+  discriminator.enum = ["replace", "insert", "replace_file"];
+  operation.required = ["op", "lines"];
+
+  const encoder = new TextEncoder();
+  const legacyBytes = encoder.encode(
+    JSON.stringify({ description: legacyDescription, parameters: legacyParameters }),
+  ).byteLength;
+  const currentBytes = encoder.encode(
+    JSON.stringify({ description: hashlineEditDescription, parameters: currentParameters }),
+  ).byteLength;
+  return {
+    scenario: "hashline_edit description plus JSON Schema",
+    legacyBytes,
+    currentBytes,
+    deltaBytes: currentBytes - legacyBytes,
+    deltaPercent: Number((((currentBytes - legacyBytes) / legacyBytes) * 100).toFixed(2)),
+  };
+}
+
 const repository = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(await readFile(resolve(repository, "package.json"), "utf8")) as {
   version: string;
@@ -34,6 +80,7 @@ const implementationSources = await Promise.all(
     "benchmarks/suite.ts",
     "src/edits.ts",
     "src/errors.ts",
+    "src/plugin.ts",
     "src/rebase.ts",
     "src/render.ts",
     "src/snapshots.ts",
@@ -44,6 +91,9 @@ const implementationSources = await Promise.all(
 const deterministic = runDeterministicSuite();
 const staticSize = runStaticSizeSuite();
 const renderingWireSize = runRenderingWireSuite();
+const operationSchemaWireSize = providerSchemaWireSize();
+const transferCallWireSize = runTransferCallWireSuite();
+const moveCorridorWireSize = runMoveCorridorWireSuite();
 const micro = runMicroSuite();
 if (renderingWireSize.legacyIssued || !renderingWireSize.currentIssued) {
   throw new Error("Long-line rendering wire-size assertions failed.");
@@ -59,7 +109,7 @@ if (
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -83,12 +133,21 @@ const result = {
     staticSize: "Exact UTF-8 bytes for one generated 1,000-line fixture; not token estimates.",
     renderingWireSize:
       "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",
+    operationSchemaWireSize:
+      "Exact compact UTF-8 JSON bytes for the hashline_edit description and provider schema before and after transfer operations.",
+    transferCallWireSize:
+      "Exact compact UTF-8 JSON bytes for copy/move calls versus equivalent model-supplied insert/replace payloads.",
+    moveCorridorWireSize:
+      "Exact UTF-8 hashline_read output bytes required to issue fixed near and far move corridors under the default page and output limits.",
     micro:
       "Five warmups, 100 measured runs below 10k lines and 30 otherwise; wall-clock timings are non-gating.",
   },
   deterministic,
   staticSize,
   renderingWireSize,
+  operationSchemaWireSize,
+  transferCallWireSize,
+  moveCorridorWireSize,
   micro,
 };
 
@@ -98,6 +157,12 @@ console.log("\nStatic model-visible size\n");
 console.table(staticSize);
 console.log("\nLong-line rendering wire-size change\n");
 console.table([renderingWireSize]);
+console.log("\nOperation-schema wire-size change\n");
+console.table([operationSchemaWireSize]);
+console.log("\nTransfer call wire-size change\n");
+console.table(transferCallWireSize);
+console.log("\nMove-corridor read wire size\n");
+console.table(moveCorridorWireSize);
 console.log("\nCore microbenchmarks (milliseconds)\n");
 console.table(
   micro.map(({ lineCount, bytes, sha256, decode, strictEditPlan }) => ({

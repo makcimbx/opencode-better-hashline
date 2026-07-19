@@ -67,6 +67,38 @@ function findSequences(haystack: readonly string[], needle: readonly string[]): 
   return found;
 }
 
+function mapExactRange(
+  baseTokens: readonly string[],
+  currentTokens: readonly string[],
+  startLine: number,
+  endLine: number,
+): { startLine: number; endLine: number } {
+  const target = baseTokens.slice(startLine - 1, endLine);
+  const matches = findSequences(currentTokens, target);
+  if (matches.length !== 1) throw new Error("old text is missing or ambiguous");
+  const mappedStart = (matches[0] ?? 0) + 1;
+  return { startLine: mappedStart, endLine: mappedStart + target.length - 1 };
+}
+
+function mapExactBoundary(
+  baseTokens: readonly string[],
+  currentTokens: readonly string[],
+  position: number,
+): number {
+  if (position === 0) {
+    if (baseTokens[0] !== currentTokens[0]) throw new Error("BOF boundary changed");
+    return 0;
+  }
+  if (position === baseTokens.length) {
+    if (baseTokens.at(-1) !== currentTokens.at(-1)) throw new Error("EOF boundary changed");
+    return currentTokens.length;
+  }
+  const pair = baseTokens.slice(position - 1, position + 1);
+  const matches = findSequences(currentTokens, pair);
+  if (matches.length !== 1) throw new Error("insertion boundary is missing or ambiguous");
+  return (matches[0] ?? 0) + 1;
+}
+
 function mapExactOperations(scenario: Scenario): EditOperation[] {
   const base = document(scenario.base);
   const current = document(scenario.current);
@@ -78,27 +110,66 @@ function mapExactOperations(scenario: Scenario): EditOperation[] {
       return operation;
     }
     if (operation.op === "replace") {
-      const target = baseTokens.slice(operation.startLine - 1, operation.endLine);
-      const matches = findSequences(currentTokens, target);
-      if (matches.length !== 1) throw new Error("old text is missing or ambiguous");
-      const startLine = (matches[0] ?? 0) + 1;
-      return { ...operation, startLine, endLine: startLine + target.length - 1 };
+      return {
+        ...operation,
+        ...mapExactRange(baseTokens, currentTokens, operation.startLine, operation.endLine),
+      };
     }
-
-    const position = operation.afterLine;
-    if (position === 0) {
-      if (baseTokens[0] !== currentTokens[0]) throw new Error("BOF boundary changed");
-      return operation;
+    if (operation.op === "insert") {
+      return {
+        ...operation,
+        afterLine: mapExactBoundary(baseTokens, currentTokens, operation.afterLine),
+      };
     }
-    if (position === baseTokens.length) {
-      if (baseTokens.at(-1) !== currentTokens.at(-1)) throw new Error("EOF boundary changed");
-      return { ...operation, afterLine: currentTokens.length };
-    }
-    const pair = baseTokens.slice(position - 1, position + 1);
-    const matches = findSequences(currentTokens, pair);
-    if (matches.length !== 1) throw new Error("insertion boundary is missing or ambiguous");
-    return { ...operation, afterLine: (matches[0] ?? 0) + 1 };
+    return {
+      ...operation,
+      ...mapExactRange(baseTokens, currentTokens, operation.startLine, operation.endLine),
+      afterLine: mapExactBoundary(baseTokens, currentTokens, operation.afterLine),
+    };
   });
+}
+
+function validateEndpointRange(
+  base: TextDocument,
+  current: TextDocument,
+  startLine: number,
+  endLine: number,
+  bits: 8 | 16,
+): void {
+  const baseFirst = base.lines[startLine - 1];
+  const baseLast = base.lines[endLine - 1];
+  const currentFirst = current.lines[startLine - 1];
+  const currentLast = current.lines[endLine - 1];
+  if (!baseFirst || !baseLast || !currentFirst || !currentLast) {
+    throw new Error("endpoint missing");
+  }
+  if (
+    shortHash(lineToken(baseFirst), bits) !== shortHash(lineToken(currentFirst), bits) ||
+    shortHash(lineToken(baseLast), bits) !== shortHash(lineToken(currentLast), bits)
+  ) {
+    throw new Error("endpoint hash mismatch");
+  }
+}
+
+function validateEndpointBoundary(
+  base: TextDocument,
+  current: TextDocument,
+  position: number,
+  bits: 8 | 16,
+): void {
+  const beforeBase = base.lines[position - 1];
+  const afterBase = base.lines[position];
+  const beforeCurrent = current.lines[position - 1];
+  const afterCurrent = current.lines[position];
+  for (const [left, right] of [
+    [beforeBase, beforeCurrent],
+    [afterBase, afterCurrent],
+  ] as const) {
+    if (!left && !right) continue;
+    if (!left || !right || shortHash(lineToken(left), bits) !== shortHash(lineToken(right), bits)) {
+      throw new Error("boundary hash mismatch");
+    }
+  }
 }
 
 function validateEndpointHashes(scenario: Scenario, bits: 8 | 16): void {
@@ -112,39 +183,15 @@ function validateEndpointHashes(scenario: Scenario, bits: 8 | 16): void {
       continue;
     }
     if (operation.op === "replace") {
-      const baseFirst = base.lines[operation.startLine - 1];
-      const baseLast = base.lines[operation.endLine - 1];
-      const currentFirst = current.lines[operation.startLine - 1];
-      const currentLast = current.lines[operation.endLine - 1];
-      if (!baseFirst || !baseLast || !currentFirst || !currentLast) {
-        throw new Error("endpoint missing");
-      }
-      if (
-        shortHash(lineToken(baseFirst), bits) !== shortHash(lineToken(currentFirst), bits) ||
-        shortHash(lineToken(baseLast), bits) !== shortHash(lineToken(currentLast), bits)
-      ) {
-        throw new Error("endpoint hash mismatch");
-      }
+      validateEndpointRange(base, current, operation.startLine, operation.endLine, bits);
       continue;
     }
-
-    const beforeBase = base.lines[operation.afterLine - 1];
-    const afterBase = base.lines[operation.afterLine];
-    const beforeCurrent = current.lines[operation.afterLine - 1];
-    const afterCurrent = current.lines[operation.afterLine];
-    for (const [left, right] of [
-      [beforeBase, beforeCurrent],
-      [afterBase, afterCurrent],
-    ] as const) {
-      if (!left && !right) continue;
-      if (
-        !left ||
-        !right ||
-        shortHash(lineToken(left), bits) !== shortHash(lineToken(right), bits)
-      ) {
-        throw new Error("boundary hash mismatch");
-      }
+    if (operation.op === "insert") {
+      validateEndpointBoundary(base, current, operation.afterLine, bits);
+      continue;
     }
+    validateEndpointRange(base, current, operation.startLine, operation.endLine, bits);
+    validateEndpointBoundary(base, current, operation.afterLine, bits);
   }
 }
 
@@ -335,6 +382,62 @@ export function scenarios(): Scenario[] {
       expectedText: "ONE\ntwo\nthree\nextra\n",
     },
     {
+      id: "exact-copy-range",
+      category: "transfer",
+      base: "one\ntwo\nthree\n",
+      current: "one\ntwo\nthree\n",
+      operations: [{ op: "copy_range", startLine: 1, endLine: 1, afterLine: 3 }],
+      expectedText: "one\ntwo\nthree\none\n",
+    },
+    {
+      id: "exact-move-range",
+      category: "transfer",
+      base: "A\nB\nC\nD\n",
+      current: "A\nB\nC\nD\n",
+      operations: [{ op: "move_range", startLine: 4, endLine: 4, afterLine: 1 }],
+      expectedText: "A\nD\nB\nC\n",
+    },
+    {
+      id: "copy-range-independent-relocation",
+      category: "transfer-relocation",
+      base: "head\nsource\nmiddle\ndestination\ntail\n",
+      current: "prefix\nhead\nsource\nmiddle\nextra\ndestination\ntail\n",
+      operations: [{ op: "copy_range", startLine: 2, endLine: 2, afterLine: 4 }],
+      expectedText: "prefix\nhead\nsource\nmiddle\nextra\ndestination\nsource\ntail\n",
+    },
+    {
+      id: "move-range-intact-corridor-relocation",
+      category: "transfer-relocation",
+      base: "a\nb\nc\nd\ne\nf\n",
+      current: "prefix\na\nb\nc\nd\ne\nf\n",
+      operations: [{ op: "move_range", startLine: 5, endLine: 5, afterLine: 2 }],
+      expectedText: "prefix\na\nb\ne\nc\nd\nf\n",
+    },
+    {
+      id: "copy-range-source-changed",
+      category: "transfer-stale",
+      base: "a\nsource\nb\ndestination\n",
+      current: "a\nchanged\nb\ndestination\n",
+      operations: [{ op: "copy_range", startLine: 2, endLine: 2, afterLine: 4 }],
+    },
+    {
+      id: "move-range-corridor-changed",
+      category: "transfer-stale",
+      base: "a\nb\nc\nd\ne\nf\n",
+      current: "a\nb\nc\nconcurrent\nd\ne\nf\n",
+      operations: [{ op: "move_range", startLine: 5, endLine: 5, afterLine: 2 }],
+    },
+    {
+      id: "copy-read-write-conflict",
+      category: "transfer-overlap",
+      base: "a\nb\nc\nd\ne\n",
+      current: "a\nb\nc\nd\ne\n",
+      operations: [
+        { op: "copy_range", startLine: 2, endLine: 3, afterLine: 5 },
+        { op: "replace", startLine: 3, endLine: 3, lines: ["changed"] },
+      ],
+    },
+    {
       id: "empty-file-boundary-changed",
       category: "boundary",
       base: "",
@@ -391,6 +494,7 @@ export function adapters(): Adapter[] {
 }
 
 function classify(scenario: Scenario, outcome: AdapterOutcome): Classification {
+  // Scenario truth is adapter-independent so conservative stale rejection remains measurable.
   if (scenario.expectedText === undefined)
     return outcome.accepted ? "unsafe_accept" : "safe_reject";
   if (!outcome.accepted) return "false_reject";
@@ -516,6 +620,95 @@ export function runRenderingWireSuite() {
     currentIssued: current.page.ranges.some(({ start, end }) => start === 1 && end === 1),
     deltaBytes: currentIssuedBytes - legacyPreviewBytes,
   };
+}
+
+function serializedEditCall(operations: readonly EditOperation[]): number {
+  return encoder.encode(
+    JSON.stringify({
+      filePath: "src/example.ts",
+      snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
+      rebase: "none",
+      operations,
+    }),
+  ).byteLength;
+}
+
+export function runTransferCallWireSuite() {
+  return [1, 10, 100, 1000, 100_000].flatMap((sourceLineCount) => {
+    const lines = Array.from(
+      { length: sourceLineCount },
+      (_, index) => `source-line-${String(index + 1).padStart(6, "0")}`,
+    );
+    const startLine = 10;
+    const endLine = startLine + sourceLineCount - 1;
+    const afterLine = endLine + 10;
+    const copyLegacy = serializedEditCall([{ op: "insert", afterLine, lines }]);
+    const copyCurrent = serializedEditCall([{ op: "copy_range", startLine, endLine, afterLine }]);
+    const moveLegacy = serializedEditCall([
+      { op: "insert", afterLine, lines },
+      { op: "replace", startLine, endLine, lines: [] },
+    ]);
+    const moveCurrent = serializedEditCall([{ op: "move_range", startLine, endLine, afterLine }]);
+    return [
+      {
+        operation: "copy_range",
+        sourceLineCount,
+        legacyBytes: copyLegacy,
+        currentBytes: copyCurrent,
+        savingsBytes: copyLegacy - copyCurrent,
+      },
+      {
+        operation: "move_range",
+        sourceLineCount,
+        legacyBytes: moveLegacy,
+        currentBytes: moveCurrent,
+        savingsBytes: moveLegacy - moveCurrent,
+      },
+    ];
+  });
+}
+
+export function runMoveCorridorWireSuite() {
+  const lineCount = 5000;
+  const lines = Array.from(
+    { length: lineCount },
+    (_, index) => `const value${index + 1} = ${index + 1};`,
+  );
+  const snapshot = new SnapshotStore({
+    maxCacheBytes: 1024 * 1024,
+    maxSnapshots: 1,
+    maxSnapshotsPerPath: 1,
+    maxSnapshotsPerSession: 1,
+    snapshotTtlMs: 60_000,
+  }).remember(
+    { sessionId: "benchmark", worktree: "/benchmark" },
+    "/benchmark/corridor.ts",
+    document(`${lines.join("\n")}\n`),
+  );
+
+  const measure = (scenario: string, startLine: number, endLine: number) => {
+    let offset = startLine;
+    let pages = 0;
+    let bytes = 0;
+    while (offset <= endLine) {
+      const rendered = renderSnapshotPage({
+        snapshot,
+        offset,
+        limit: Math.min(1000, endLine - offset + 1),
+        maxOutputBytes: 40 * 1024,
+      });
+      const issuedEnd = rendered.page.ranges.at(-1)?.end;
+      if (issuedEnd === undefined || issuedEnd < offset) {
+        throw new Error(`Move-corridor wire fixture made no progress at line ${offset}.`);
+      }
+      bytes += encoder.encode(rendered.output).byteLength;
+      pages += 1;
+      offset = issuedEnd + 1;
+    }
+    return { scenario, startLine, endLine, corridorLines: endLine - startLine + 1, pages, bytes };
+  };
+
+  return [measure("near move corridor", 100, 119), measure("far move corridor", 1, lineCount)];
 }
 
 export function runMicroSuite() {

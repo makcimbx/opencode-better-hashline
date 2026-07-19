@@ -3,7 +3,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hooks, ToolContext } from "@opencode-ai/plugin";
-import { betterHashlinePlugin } from "../src/plugin.js";
+import { z } from "zod";
+import {
+  betterHashlinePlugin,
+  hashlineEditArgumentsSchema,
+  hashlineEditDescription,
+} from "../src/plugin.js";
 
 type StructuredResult = {
   title: string;
@@ -34,6 +39,7 @@ function context(
     deny?: string;
     sessionID?: string;
     controller?: AbortController;
+    onAsk?: (request: AskRecord) => void | Promise<void>;
   } = {},
 ): ToolContext {
   const controller = input.controller ?? new AbortController();
@@ -46,7 +52,9 @@ function context(
     abort: controller.signal,
     metadata() {},
     async ask(request) {
-      input.asks?.push(request as AskRecord);
+      const record = request as AskRecord;
+      input.asks?.push(record);
+      await input.onAsk?.(record);
       if (request.permission === input.deny) throw new Error(`denied ${request.permission}`);
     },
   } as ToolContext;
@@ -490,7 +498,7 @@ describe("OpenCode plugin protocol", () => {
   test("validates the flat provider-compatible operation schema", async () => {
     const file = join(root, "file.txt");
     await writeFile(file, "old\n");
-    const value = await hooks();
+    const value = await hooks({ maxFileBytes: 1024, maxCacheBytes: 3072 });
     const { hashlineRead, hashlineEdit } = registry(value);
     const toolContext = context();
     const readResult = structured(
@@ -509,6 +517,21 @@ describe("OpenCode plugin protocol", () => {
         toolContext,
       ),
     ).rejects.toThrow("INVALID_ARGUMENT:");
+    const oversizedLegacy = {
+      op: "replace" as const,
+      startLine: 1,
+      endLine: 1,
+      lines: ["x".repeat(1025)],
+    };
+    const malformedLegacy = { op: "insert" as const, lines: ["new"] };
+    for (const operations of [
+      [oversizedLegacy, malformedLegacy],
+      [malformedLegacy, oversizedLegacy],
+    ]) {
+      await expect(hashlineEdit.execute({ ...common, operations }, toolContext)).rejects.toThrow(
+        "UNSUPPORTED_FILE: Replacement payload exceeds the configured safety limits.",
+      );
+    }
     await expect(
       hashlineEdit.execute(
         {
@@ -524,7 +547,88 @@ describe("OpenCode plugin protocol", () => {
         toolContext,
       ),
     ).rejects.toThrow("INVALID_ARGUMENT:");
+    await expect(
+      hashlineEdit.execute(
+        {
+          ...common,
+          operations: [
+            {
+              op: "copy_range",
+              startLine: 1,
+              endLine: 1,
+              afterLine: 1,
+              lines: ["x".repeat(1025)],
+            },
+          ],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
+    await expect(
+      hashlineEdit.execute(
+        {
+          ...common,
+          operations: [{ op: "move_range", startLine: 1, endLine: 1 }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
+    await expect(
+      hashlineEdit.execute(
+        {
+          ...common,
+          operations: [
+            {
+              op: "move_range",
+              startLine: 1,
+              endLine: 1,
+              afterLine: 1,
+              finalNewline: false,
+            },
+          ],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
+    await expect(
+      hashlineEdit.execute(
+        {
+          ...common,
+          operations: [{ op: "replace", startLine: 1, endLine: 1 }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("INVALID_ARGUMENT:");
     expect(await readFile(file, "utf8")).toBe("old\n");
+  });
+
+  test("publishes the intended flat transfer schema and coordinate guidance", () => {
+    const schema = z.toJSONSchema(hashlineEditArgumentsSchema) as {
+      additionalProperties?: boolean;
+      properties?: {
+        operations?: {
+          items?: {
+            additionalProperties?: boolean;
+            properties?: { op?: { enum?: string[] } };
+            required?: string[];
+          };
+        };
+      };
+    };
+    const operation = schema.properties?.operations?.items;
+
+    expect(schema.additionalProperties).toBe(false);
+    expect(operation?.additionalProperties).toBe(false);
+    expect(operation?.properties?.op?.enum).toEqual([
+      "replace",
+      "insert",
+      "replace_file",
+      "copy_range",
+      "move_range",
+    ]);
+    expect(operation?.required).toEqual(["op"]);
+    expect(hashlineEditDescription).toContain("immutable pre-batch snapshot");
+    expect(hashlineEditDescription).toContain("afterLine is never adjusted");
   });
 
   test("validates complete tool arguments before permissions or filesystem access", async () => {
@@ -591,6 +695,258 @@ describe("OpenCode plugin protocol", () => {
     } finally {
       await rm(externalRoot, { recursive: true, force: true });
     }
+  });
+
+  test("publishes one exact mixed transfer batch through the real plugin path", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "1|literal\nbeta\ngamma\ndelta\nepsilon\nzeta\n");
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+
+    const editResult = structured(
+      await hashlineEdit.execute(
+        {
+          filePath: "file.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [
+            { op: "copy_range", startLine: 1, endLine: 1, afterLine: 2 },
+            { op: "move_range", startLine: 5, endLine: 5, afterLine: 3 },
+          ],
+        },
+        toolContext,
+      ),
+    );
+
+    expect(editResult.output).toContain("Applied 2 operations");
+    expect(await readFile(file, "utf8")).toBe(
+      "1|literal\nbeta\n1|literal\ngamma\nepsilon\ndelta\nzeta\n",
+    );
+    expect(asks.map(({ permission }) => permission)).toEqual(["read", "edit"]);
+    expect(String(asks.at(-1)?.metadata?.diff)).toContain("+1|literal");
+  });
+
+  test("publishes mixed-EOL transfers without changing the BOM or positional delimiters", async () => {
+    const file = join(root, "file.txt");
+    const initial = Uint8Array.of(
+      0xef,
+      0xbb,
+      0xbf,
+      ...new TextEncoder().encode("one\r\ntwo\nthree\rfour\r\n"),
+    );
+    const expected = Uint8Array.of(
+      0xef,
+      0xbb,
+      0xbf,
+      ...new TextEncoder().encode("one\r\nthree\ntwo\rfour\r\nfour\r\n"),
+    );
+    await writeFile(file, initial);
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId: String(readResult.metadata.snapshotId),
+        operations: [
+          { op: "move_range", startLine: 3, endLine: 3, afterLine: 1 },
+          { op: "copy_range", startLine: 4, endLine: 4, afterLine: 4 },
+        ],
+      },
+      toolContext,
+    );
+
+    expect(new Uint8Array(await readFile(file))).toEqual(expected);
+  });
+
+  test("requires issued copy source and both destination neighbors or edge authority", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "one\ntwo\nthree\nfour\nfive\nsix\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const first = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 1, limit: 2 }, toolContext),
+    );
+    await activateRead(value, first);
+    const snapshotId = String(first.metadata.snapshotId);
+
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "file.txt",
+          snapshotId,
+          operations: [{ op: "copy_range", startLine: 1, endLine: 1, afterLine: 6 }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("REF_NOT_ISSUED:");
+
+    const fourth = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 4, limit: 1 }, toolContext),
+    );
+    await activateRead(value, fourth);
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "file.txt",
+          snapshotId,
+          operations: [{ op: "copy_range", startLine: 1, endLine: 1, afterLine: 4 }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
+
+    const fifth = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 5, limit: 1 }, toolContext),
+    );
+    await activateRead(value, fifth);
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId,
+        operations: [{ op: "copy_range", startLine: 1, endLine: 1, afterLine: 4 }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toBe("one\ntwo\nthree\nfour\none\nfive\nsix\n");
+  });
+
+  test("checks transfer-batch provenance in canonical order", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "a\nb\nc\nd\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 1, limit: 1 }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const snapshotId = String(readResult.metadata.snapshotId);
+    const first = { op: "copy_range" as const, startLine: 1, endLine: 1, afterLine: 4 };
+    const second = { op: "copy_range" as const, startLine: 3, endLine: 3, afterLine: 1 };
+
+    for (const operations of [
+      [first, second],
+      [second, first],
+    ]) {
+      await expect(
+        hashlineEdit.execute({ filePath: "file.txt", snapshotId, operations }, toolContext),
+      ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
+    }
+    expect(await readFile(file, "utf8")).toBe("a\nb\nc\nd\n");
+  });
+
+  test("requires the complete move corridor and reports identity moves as no-ops", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "one\ntwo\nthree\nfour\nfive\nsix\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const source = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 5, limit: 1 }, toolContext),
+    );
+    await activateRead(value, source);
+    const snapshotId = String(source.metadata.snapshotId);
+    const destination = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 2, limit: 2 }, toolContext),
+    );
+    await activateRead(value, destination);
+
+    const move = {
+      filePath: "file.txt",
+      snapshotId,
+      operations: [{ op: "move_range" as const, startLine: 5, endLine: 5, afterLine: 2 }],
+    };
+    await expect(hashlineEdit.execute(move, toolContext)).rejects.toThrow(
+      "RANGE_NOT_FULLY_ISSUED:",
+    );
+
+    const corridor = structured(
+      await hashlineRead.execute({ filePath: "file.txt", offset: 4, limit: 1 }, toolContext),
+    );
+    await activateRead(value, corridor);
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "file.txt",
+          snapshotId,
+          operations: [{ op: "move_range", startLine: 4, endLine: 4, afterLine: 4 }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("NO_CHANGE:");
+
+    await hashlineEdit.execute(move, toolContext);
+    expect(await readFile(file, "utf8")).toBe("one\ntwo\nfive\nthree\nfour\nsix\n");
+  });
+
+  test("relocates all transfer anchors before requesting one exact permission", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "a\nb\nc\nd\ne\nf\n");
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    await writeFile(file, "top\na\nb\nc\nd\ne\nf\n");
+
+    const result = structured(
+      await hashlineEdit.execute(
+        {
+          filePath: "file.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          rebase: "unique",
+          operations: [{ op: "move_range", startLine: 5, endLine: 5, afterLine: 2 }],
+        },
+        toolContext,
+      ),
+    );
+    expect(result.metadata.rebased).toBe(true);
+    expect(await readFile(file, "utf8")).toBe("top\na\nb\ne\nc\nd\nf\n");
+    expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(1);
+  });
+
+  test("binds transfer permission to one plan and never replans after a race", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "a\nb\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const readResult = structured(await hashlineRead.execute({ filePath: "file.txt" }, context()));
+    await activateRead(value, readResult);
+    const asks: AskRecord[] = [];
+    const racing = context({
+      asks,
+      async onAsk(request) {
+        if (request.permission === "edit") await writeFile(file, "raced\n");
+      },
+    });
+
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "file.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [{ op: "copy_range", startLine: 1, endLine: 1, afterLine: 2 }],
+        },
+        racing,
+      ),
+    ).rejects.toThrow("RACE_BEFORE_WRITE:");
+    expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(1);
+    expect(await readFile(file, "utf8")).toBe("raced\n");
   });
 
   test("creates new files exclusively through hashline_write", async () => {

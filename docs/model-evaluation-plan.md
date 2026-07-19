@@ -55,7 +55,7 @@ This study will not attempt to prove:
 | Mechanism ablation | Yes | Isolate addressing semantics | Mechanism-specific result |
 
 No result may be promoted from one layer to a stronger layer. In particular, the existing 12-task
-model harness remains a development smoke and the 21-case deterministic corpus remains mechanical
+model harness remains a development smoke and the 28-case deterministic corpus remains mechanical
 protocol evidence.
 
 ## Causal Estimands
@@ -159,6 +159,21 @@ replacement, and paired files.
 
 These tasks are not part of confirmatory inference because they have already influenced harness
 design.
+
+### Transfer Development Tasks
+
+Transfer evaluation uses the separately versioned `transfer-v1` development task set rather than
+changing the 12-task transport baseline. Its eight checked-in exact-output tasks cover long-block
+copy, upward and downward moves, multiple independent transfers, a 5,000-line corridor, conflict
+recovery, duplicate source content, and a legacy-operation control. Deterministic mechanism scenarios
+separately cover source/destination shifts, relocation ambiguity, a write intersecting a copy source,
+and changed move corridors.
+
+Report `copy_range` and `move_range` independently. Copy can avoid retransmitting any sufficiently
+large issued source, while move requires issuance of its complete source-to-destination corridor and
+may be uneconomical over long distances. Record rereads, issued bytes, malformed calls, safe rejects,
+recovery rounds, tokens, latency, and unintended changes. Treat `transfer-v1` as development evidence,
+not confirmation, and do not execute or publish it without the controls below.
 
 ### Deterministic Safety Gallery
 
