@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.2.0...v0.2.1) - 2026-07-19
+
 ### Fixed
 
 - Describe every operation-specific field combination in the flat provider schema, including that `finalNewline` is exclusive to `replace_file` and that empty `lines` are invalid for `insert`.
