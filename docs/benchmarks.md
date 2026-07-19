@@ -79,6 +79,10 @@ Result paths are write-once by default. Use `--force` only when deliberately reg
 
 ## Model Harness
 
+The staged expansion from transport smoke to preregistered real-repository studies is specified in
+the [Model Evaluation Plan](model-evaluation-plan.md). The plan is a study design, not evidence that
+model quality has improved.
+
 The model harness has 12 exact-output tasks across mechanical, ambiguous, batch, boundary, range, encoding, structured, creation, whole-file, and multi-file categories. It pairs native OpenCode editing against Better Hashline in fresh temporary directories and alternates adapter order.
 
 Dry run, no model calls:
