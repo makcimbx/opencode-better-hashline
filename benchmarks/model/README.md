@@ -6,4 +6,5 @@ Use `--preflight --output=<new-directory>` to build, pack, install, and verify b
 
 Paid runs use isolated home/config/temp roots and only explicitly selected authentication. They validate successful tool use, forbidden transports, process/trace integrity, and observed parent-session identity. Task definitions live in `tasks.ts`; the runner preserves raw JSONL, stderr, and sanitized session exports under an ignored, write-once result directory.
 
-See [the benchmark guide](../README.md) and [methodology](../../docs/benchmarks.md).
+See [the benchmark guide](../README.md), [methodology](../../docs/benchmarks.md), and the
+[staged model evaluation plan](../../docs/model-evaluation-plan.md).
