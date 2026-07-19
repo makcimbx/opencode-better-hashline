@@ -71,6 +71,12 @@ Adding both transfer operations and their model-facing coordinate rules grows th
 or 18.54%. The provider schema remains flat; `lines` is optional at schema level and runtime-required
 for the three payload operations.
 
+Making every operation-specific field combination and payload constraint explicit, while matching
+the runtime's optional `rebase`, grows the same compact payload from 1,541 to 2,749 UTF-8 bytes:
++1,208 bytes, or 78.39%. This adds description metadata and relaxes the generated schema to accept an
+already-supported omitted default; existing calls, transcripts, and configuration require no
+migration.
+
 The call-size fixture compares one compact transfer call with the equivalent retained text echoed in
 an `insert`, or in an `insert` plus deletion for move:
 

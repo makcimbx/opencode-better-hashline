@@ -1169,6 +1169,10 @@ export function planEdits(input: {
     maxLines = Number.POSITIVE_INFINITY,
   } = input;
   validateEditOperations(base, operations);
+  const wholeFile = operations.find((operation) => operation.op === "replace_file");
+  if (wholeFile && rebase !== "none") {
+    fail("INVALID_ARGUMENT", "replace_file does not support unique rebase.");
+  }
   const unchanged = bytesEqual(base.bytes, current.bytes);
   if (!unchanged && rebase === "none") {
     fail("TARGET_CHANGED", "The file changed since hashline_read. Reread before editing.");
@@ -1177,9 +1181,8 @@ export function planEdits(input: {
     fail("TARGET_CHANGED", "The file byte-order mark changed since hashline_read.");
   }
 
-  const wholeFile = operations.find((operation) => operation.op === "replace_file");
   if (wholeFile) {
-    if (rebase !== "none" || !unchanged) {
+    if (!unchanged) {
       fail("TARGET_CHANGED", "replace_file requires an exact, current snapshot.");
     }
     const result = renderWholeFile(base, wholeFile);

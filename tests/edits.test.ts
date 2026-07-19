@@ -145,10 +145,17 @@ describe("line edit planning", () => {
       ]),
     ).toThrow("OPERATIONS_OVERLAP:");
     expect(() => plan("a\n", "a\n", [{ op: "replace_file", lines: ["x"] }], "unique")).toThrow(
-      "TARGET_CHANGED:",
+      "INVALID_ARGUMENT: replace_file does not support unique rebase.",
+    );
+    expect(() => plan("a\n", "a\n", [{ op: "replace_file", lines: [] }])).toThrow(
+      "INVALID_ARGUMENT:",
     );
     expect(() =>
       plan("a\n", "a\n", [{ op: "replace_file", lines: [], finalNewline: true }]),
     ).toThrow("INVALID_ARGUMENT:");
+    expect(plan("a\n", "a\n", [{ op: "replace_file", lines: [], finalNewline: false }]).text).toBe(
+      "",
+    );
+    expect(plan("a", "a", [{ op: "replace_file", lines: [] }]).text).toBe("");
   });
 });

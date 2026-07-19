@@ -33,17 +33,49 @@ import { assertLineLimit, decodeTextDocument, encodeNewText } from "./text.js";
 const NATIVE_MUTATORS = new Set(["edit", "write", "apply_patch"]);
 
 const editOperationShape = {
-  op: tool.schema.enum(["replace", "insert", "replace_file", "copy_range", "move_range"]),
-  startLine: tool.schema.number().int().min(1).optional(),
-  endLine: tool.schema.number().int().min(1).optional(),
-  afterLine: tool.schema.number().int().min(0).optional(),
+  op: tool.schema
+    .enum(["replace", "insert", "replace_file", "copy_range", "move_range"])
+    .describe(
+      "Required: replace(startLine,endLine,lines); insert(afterLine,lines); replace_file(lines); copy_range/move_range(startLine,endLine,afterLine). Optional only: replace_file(finalNewline). All other fields are forbidden.",
+    ),
+  startLine: tool.schema
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe("Only for replace, copy_range, and move_range; one-based inclusive."),
+  endLine: tool.schema
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe("Only for replace, copy_range, and move_range; one-based inclusive."),
+  afterLine: tool.schema
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "Only for insert, copy_range, and move_range; 0 means before line 1. Copy may target its source; move forbids destinations strictly inside its source and rejects adjacent identity destinations.",
+    ),
   lines: tool.schema
     .array(tool.schema.string().max(16 * 1024 * 1024))
     .max(100_000)
-    .optional(),
-  finalNewline: tool.schema.boolean().optional(),
+    .optional()
+    .describe(
+      "Only for replace, insert, and replace_file. replace accepts 0..20,000; insert 1..20,000. Each item is one logical line without CR, LF, NUL, or invalid Unicode.",
+    ),
+  finalNewline: tool.schema
+    .boolean()
+    .optional()
+    .describe(
+      "Only for replace_file; omit to preserve snapshot state. true requires non-empty lines; an empty file requires false.",
+    ),
 };
-const editOperation = tool.schema.object(editOperationShape).strict();
+const editOperation = tool.schema
+  .object(editOperationShape)
+  .strict()
+  .describe("Fields not listed for the selected op are invalid; replace_file must be sole.");
 
 const readArgumentShape = {
   filePath: tool.schema.string().min(1).describe("Path relative to the session directory"),
@@ -61,17 +93,22 @@ const readArguments = tool.schema.object(readArgumentShape).strict();
 const editArgumentShape = {
   filePath: tool.schema.string().min(1),
   snapshotId: tool.schema.string().regex(/^s_[A-Za-z0-9_-]{22}$/),
-  rebase: tool.schema.enum(["none", "unique"]).default("none"),
+  rebase: tool.schema
+    .enum(["none", "unique"])
+    .optional()
+    .describe("none is default; replace_file forbids unique."),
   allowHashlinePrefixes: tool.schema
     .boolean()
     .optional()
-    .describe("Set true only to write an intentional N| or @hashline-style source line"),
+    .describe(
+      "Only affects replace, insert, and replace_file payloads. Set true only to write an intentional N| or @hashline-style source line.",
+    ),
   operations: tool.schema.array(editOperation).min(1).max(100),
 };
 export const hashlineEditArgumentsSchema = tool.schema.object(editArgumentShape).strict();
 
 export const hashlineEditDescription =
-  'Atomically edit one exact hashline_read snapshot. replace/insert require lines; copy_range/move_range require startLine,endLine,afterLine; replace_file is sole. All coordinates use one immutable pre-batch snapshot; transfers read pre-edit source; afterLine is never adjusted for moves/deletes. lines:[] deletes. lines:[""] is one empty logical value and may only alter EOL bytes. unique rebase is exact, unchanged, ambiguity-rejecting, and never fuzzy.';
+  'Atomically edit one exact hashline_read snapshot. Use only fields listed for each op; finalNewline is replace_file-only. replace_file must be sole and use rebase:none. All coordinates use one immutable pre-batch snapshot; transfers read pre-edit source; afterLine is never adjusted for moves/deletes. replace lines:[] deletes; insert forbids []; use replace_file with lines:[],finalNewline:false for an empty file. lines:[""] is one empty logical value and may only alter EOL bytes. unique rebase is exact, unchanged, ambiguity-rejecting, and never fuzzy.';
 
 const writeArgumentShape = {
   filePath: tool.schema.string().min(1),
@@ -160,13 +197,13 @@ function parseOperations(
     if (operation.op === "replace") {
       fail(
         "INVALID_ARGUMENT",
-        "replace requires startLine and endLine, and does not accept afterLine or finalNewline.",
+        "replace requires startLine, endLine, and lines, and does not accept afterLine or finalNewline.",
       );
     }
     if (operation.op === "insert") {
       fail(
         "INVALID_ARGUMENT",
-        "insert requires afterLine, and does not accept startLine, endLine, or finalNewline.",
+        "insert requires afterLine and lines, and does not accept startLine, endLine, or finalNewline.",
       );
     }
     fail("INVALID_ARGUMENT", "replace_file requires lines and does not accept line coordinates.");
@@ -198,7 +235,7 @@ function parseOperations(
       ) {
         fail(
           "INVALID_ARGUMENT",
-          "replace requires startLine and endLine, and does not accept afterLine or finalNewline.",
+          "replace requires startLine, endLine, and lines, and does not accept afterLine or finalNewline.",
         );
       }
       if (operation.lines.length > 20_000) {
@@ -222,7 +259,7 @@ function parseOperations(
       ) {
         fail(
           "INVALID_ARGUMENT",
-          "insert requires afterLine, and does not accept startLine, endLine, or finalNewline.",
+          "insert requires afterLine and lines, and does not accept startLine, endLine, or finalNewline.",
         );
       }
       if (operation.lines.length === 0 || operation.lines.length > 20_000) {
