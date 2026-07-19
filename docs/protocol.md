@@ -90,6 +90,25 @@ Tool: `hashline_edit`
 }
 ```
 
+The provider schema stays flat for broad provider compatibility, so operation-specific fields other
+than `op` are optional at the JSON Schema level. Optional does not mean valid for every operation:
+runtime validation accepts only these exact combinations and rejects every unlisted field:
+
+| `op` | Required fields | Optional fields | Forbidden fields |
+| --- | --- | --- | --- |
+| `replace` | `startLine`, `endLine`, `lines` | none | `afterLine`, `finalNewline` |
+| `insert` | `afterLine`, `lines` (non-empty) | none | `startLine`, `endLine`, `finalNewline` |
+| `replace_file` | `lines` | `finalNewline` | `startLine`, `endLine`, `afterLine` |
+| `copy_range` | `startLine`, `endLine`, `afterLine` | none | `lines`, `finalNewline` |
+| `move_range` | `startLine`, `endLine`, `afterLine` | none | `lines`, `finalNewline` |
+
+`replace_file` must also be the sole operation and use `rebase: "none"`. Unknown operation fields
+are rejected rather than ignored.
+
+At the top level, `rebase` is optional and defaults to `"none"`. `allowHashlinePrefixes` affects only
+literal `replace`, `insert`, and `replace_file` payloads; leave it omitted unless an `N|` or
+`@hashline`-style prefix is intentional file content.
+
 ### Replace
 
 `startLine` and `endLine` are one-based and inclusive. Every line in the range must have been issued from the same snapshot. Range endpoints alone are never sufficient.
@@ -138,7 +157,7 @@ Transfer operations never accept `lines` or `finalNewline`; their source is exac
 }
 ```
 
-`replace_file` must be the sole operation, requires `rebase: "none"`, exact current bytes, and a completely issued snapshot including BOF and EOF.
+`replace_file` must be the sole operation, requires `rebase: "none"`, exact current bytes, and a completely issued snapshot including BOF and EOF. `finalNewline` is optional only for `replace_file`; omitting it preserves the snapshot's final-newline state. To write an empty file regardless of that state, pass `lines: []` and `finalNewline: false`. An empty array with inherited or explicit `true` is invalid; use `lines: [""]` to represent a file containing one newline.
 
 ## Rebase Modes
 
@@ -208,7 +227,7 @@ diagnostic text. Transfer-free batches retain the released `0.1.1` overlap diagn
 
 An individually byte-identical `move_range` rejects the entire batch with `NO_CHANGE`, including when another member would change the file. This intentionally treats an identity move as a model-addressing error. Legacy no-op `replace` or `insert` members retain aggregate behavior: they are accepted when the final batch changes bytes.
 
-The provider accepts 1 to 100 operations. Each `replace` accepts at most 20,000 payload lines; `insert` accepts 1 to 20,000. Aggregate payload and projected final output must remain within configured byte and logical-line limits. Transfer projection is bounded before final materialization, including copy amplification.
+The provider accepts 1 to 100 operations. Each `replace` accepts 0 to 20,000 payload lines; `insert` accepts 1 to 20,000. Each payload item is one logical line and must not contain CR, LF, NUL, or invalid Unicode. Aggregate payload and projected final output must remain within configured byte and logical-line limits. Transfer projection is bounded before final materialization, including copy amplification.
 
 This is not a filesystem transaction. Post-rename verification can detect an immediate overwrite but cannot safely roll it back without risking a newer writer. Multi-file tool calls are independent and can leave an earlier file committed if a later file fails.
 

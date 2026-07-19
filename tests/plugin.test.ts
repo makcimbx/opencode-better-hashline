@@ -23,6 +23,15 @@ type AskRecord = {
   metadata?: Record<string, unknown>;
 };
 
+type EditOperationInput = {
+  op: "replace" | "insert" | "replace_file" | "copy_range" | "move_range";
+  startLine?: number;
+  endLine?: number;
+  afterLine?: number;
+  lines?: string[];
+  finalNewline?: boolean;
+};
+
 let root = "";
 
 beforeEach(async () => {
@@ -495,7 +504,7 @@ describe("OpenCode plugin protocol", () => {
     expect(await readFile(file, "utf8")).toBe("old\n");
   });
 
-  test("validates the flat provider-compatible operation schema", async () => {
+  test("rejects every missing and forbidden operation field", async () => {
     const file = join(root, "file.txt");
     await writeFile(file, "old\n");
     const value = await hooks({ maxFileBytes: 1024, maxCacheBytes: 3072 });
@@ -510,13 +519,68 @@ describe("OpenCode plugin protocol", () => {
       snapshotId: String(readResult.metadata.snapshotId),
       rebase: "none" as const,
     };
+    const replaceMessage =
+      "replace requires startLine, endLine, and lines, and does not accept afterLine or finalNewline.";
+    const insertMessage =
+      "insert requires afterLine and lines, and does not accept startLine, endLine, or finalNewline.";
+    const replaceFileMessage = "replace_file requires lines and does not accept line coordinates.";
+    const transferMessage = (op: "copy_range" | "move_range") =>
+      `${op} requires startLine, endLine, and afterLine, and does not accept lines or finalNewline.`;
+    type OperationField = Exclude<keyof EditOperationInput, "op">;
+    const shapes: Array<{
+      valid: EditOperationInput;
+      required: OperationField[];
+      forbidden: Partial<Omit<EditOperationInput, "op">>;
+      message: string;
+    }> = [
+      {
+        valid: { op: "replace", startLine: 1, endLine: 1, lines: ["new"] },
+        required: ["startLine", "endLine", "lines"],
+        forbidden: { afterLine: 0, finalNewline: false },
+        message: replaceMessage,
+      },
+      {
+        valid: { op: "insert", afterLine: 0, lines: ["new"] },
+        required: ["afterLine", "lines"],
+        forbidden: { startLine: 1, endLine: 1, finalNewline: false },
+        message: insertMessage,
+      },
+      {
+        valid: { op: "replace_file", lines: ["new"] },
+        required: ["lines"],
+        forbidden: { startLine: 1, endLine: 1, afterLine: 0 },
+        message: replaceFileMessage,
+      },
+      {
+        valid: { op: "copy_range", startLine: 1, endLine: 1, afterLine: 1 },
+        required: ["startLine", "endLine", "afterLine"],
+        forbidden: { lines: ["new"], finalNewline: false },
+        message: transferMessage("copy_range"),
+      },
+      {
+        valid: { op: "move_range", startLine: 1, endLine: 1, afterLine: 1 },
+        required: ["startLine", "endLine", "afterLine"],
+        forbidden: { lines: ["new"], finalNewline: false },
+        message: transferMessage("move_range"),
+      },
+    ];
 
-    await expect(
-      hashlineEdit.execute(
-        { ...common, operations: [{ op: "replace", startLine: 1, lines: ["new"] }] },
-        toolContext,
-      ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    for (const shape of shapes) {
+      for (const field of shape.required) {
+        const operation = { ...shape.valid };
+        delete operation[field];
+        await expect(
+          hashlineEdit.execute({ ...common, operations: [operation] }, toolContext),
+        ).rejects.toThrow(`INVALID_ARGUMENT: ${shape.message}`);
+      }
+      for (const [field, value] of Object.entries(shape.forbidden)) {
+        const operation = { ...shape.valid, [field]: value };
+        await expect(
+          hashlineEdit.execute({ ...common, operations: [operation] }, toolContext),
+        ).rejects.toThrow(`INVALID_ARGUMENT: ${shape.message}`);
+      }
+    }
+
     const oversizedLegacy = {
       op: "replace" as const,
       startLine: 1,
@@ -532,84 +596,175 @@ describe("OpenCode plugin protocol", () => {
         "UNSUPPORTED_FILE: Replacement payload exceeds the configured safety limits.",
       );
     }
+    expect(await readFile(file, "utf8")).toBe("old\n");
+  });
+
+  test("accepts every documented minimal operation shape without explicit rebase", async () => {
+    const cases: Array<{
+      initial: string;
+      operation: EditOperationInput;
+      expected: string;
+    }> = [
+      {
+        initial: "a\nb\n",
+        operation: { op: "replace", startLine: 1, endLine: 1, lines: ["A"] },
+        expected: "A\nb\n",
+      },
+      {
+        initial: "a\nb\n",
+        operation: { op: "insert", afterLine: 0, lines: ["before"] },
+        expected: "before\na\nb\n",
+      },
+      {
+        initial: "a\nb\n",
+        operation: { op: "replace_file", lines: ["whole"], finalNewline: true },
+        expected: "whole\n",
+      },
+      {
+        initial: "a\n",
+        operation: { op: "replace_file", lines: [], finalNewline: false },
+        expected: "",
+      },
+      {
+        initial: "a\nb\n",
+        operation: { op: "copy_range", startLine: 1, endLine: 1, afterLine: 2 },
+        expected: "a\nb\na\n",
+      },
+      {
+        initial: "a\nb\n",
+        operation: { op: "move_range", startLine: 1, endLine: 1, afterLine: 2 },
+        expected: "b\na\n",
+      },
+    ];
+
+    for (const [index, entry] of cases.entries()) {
+      const filePath = `valid-${index}.txt`;
+      await writeFile(join(root, filePath), entry.initial);
+      const value = await hooks();
+      const { hashlineRead, hashlineEdit } = registry(value);
+      const toolContext = context();
+      const readResult = structured(await hashlineRead.execute({ filePath }, toolContext));
+      await activateRead(value, readResult);
+      await hashlineEdit.execute(
+        {
+          filePath,
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [entry.operation],
+        },
+        toolContext,
+      );
+      expect(await readFile(join(root, filePath), "utf8")).toBe(entry.expected);
+      await value.dispose?.();
+    }
+  });
+
+  test("enforces documented payload limits through the public tool", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "old\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const common = {
+      filePath: "file.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+    };
+
+    for (const [line, message] of [
+      ["bad\nline", "Logical line 1 contains a newline character."],
+      ["bad\rline", "Logical line 1 contains a newline character."],
+      ["bad\0line", "Logical line 1 contains a NUL character."],
+      ["\ud800", "Logical line 1 has invalid Unicode."],
+    ]) {
+      await expect(
+        hashlineEdit.execute(
+          {
+            ...common,
+            operations: [{ op: "replace", startLine: 1, endLine: 1, lines: [line] }],
+          },
+          toolContext,
+        ),
+      ).rejects.toThrow(`INVALID_ARGUMENT: ${message}`);
+    }
+
+    const tooManyLines = Array.from({ length: 20_001 }, () => "x");
     await expect(
       hashlineEdit.execute(
         {
           ...common,
-          operations: [{ op: "insert", afterLine: 0, lines: [], finalNewline: true }],
+          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: tooManyLines }],
         },
         toolContext,
       ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    ).rejects.toThrow("INVALID_ARGUMENT: replace accepts at most 20,000 replacement lines.");
     await expect(
       hashlineEdit.execute(
-        { ...common, operations: [{ op: "replace_file", afterLine: 0, lines: ["new"] }] },
+        {
+          ...common,
+          operations: [{ op: "insert", afterLine: 0, lines: tooManyLines }],
+        },
         toolContext,
       ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    ).rejects.toThrow("INVALID_ARGUMENT: insert requires between 1 and 20,000 lines.");
+    expect(await readFile(file, "utf8")).toBe("old\n");
+  });
+
+  test("rejects invalid public replace_file combinations consistently", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "old\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const common = {
+      filePath: "file.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+    };
+
+    await expect(
+      hashlineEdit.execute(
+        {
+          ...common,
+          rebase: "unique",
+          operations: [{ op: "replace_file", lines: ["new"] }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("INVALID_ARGUMENT: replace_file does not support unique rebase.");
     await expect(
       hashlineEdit.execute(
         {
           ...common,
           operations: [
-            {
-              op: "copy_range",
-              startLine: 1,
-              endLine: 1,
-              afterLine: 1,
-              lines: ["x".repeat(1025)],
-            },
+            { op: "replace_file", lines: ["new"] },
+            { op: "insert", afterLine: 0, lines: ["before"] },
           ],
         },
         toolContext,
       ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
-    await expect(
-      hashlineEdit.execute(
-        {
-          ...common,
-          operations: [{ op: "move_range", startLine: 1, endLine: 1 }],
-        },
-        toolContext,
-      ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
-    await expect(
-      hashlineEdit.execute(
-        {
-          ...common,
-          operations: [
-            {
-              op: "move_range",
-              startLine: 1,
-              endLine: 1,
-              afterLine: 1,
-              finalNewline: false,
-            },
-          ],
-        },
-        toolContext,
-      ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
-    await expect(
-      hashlineEdit.execute(
-        {
-          ...common,
-          operations: [{ op: "replace", startLine: 1, endLine: 1 }],
-        },
-        toolContext,
-      ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    ).rejects.toThrow("OPERATIONS_OVERLAP: replace_file must be the only operation.");
     expect(await readFile(file, "utf8")).toBe("old\n");
   });
 
   test("publishes the intended flat transfer schema and coordinate guidance", () => {
+    type SchemaProperty = { description?: string; enum?: string[] };
     const schema = z.toJSONSchema(hashlineEditArgumentsSchema) as {
       additionalProperties?: boolean;
+      required?: string[];
       properties?: {
+        allowHashlinePrefixes?: SchemaProperty;
+        rebase?: SchemaProperty;
         operations?: {
           items?: {
             additionalProperties?: boolean;
-            properties?: { op?: { enum?: string[] } };
+            description?: string;
+            properties?: Record<string, SchemaProperty>;
             required?: string[];
           };
         };
@@ -618,6 +773,7 @@ describe("OpenCode plugin protocol", () => {
     const operation = schema.properties?.operations?.items;
 
     expect(schema.additionalProperties).toBe(false);
+    expect(schema.required).toEqual(["filePath", "snapshotId", "operations"]);
     expect(operation?.additionalProperties).toBe(false);
     expect(operation?.properties?.op?.enum).toEqual([
       "replace",
@@ -627,8 +783,41 @@ describe("OpenCode plugin protocol", () => {
       "move_range",
     ]);
     expect(operation?.required).toEqual(["op"]);
+    expect(operation?.description).toBe(
+      "Fields not listed for the selected op are invalid; replace_file must be sole.",
+    );
+    expect(operation?.properties?.op?.description).toBe(
+      "Required: replace(startLine,endLine,lines); insert(afterLine,lines); replace_file(lines); copy_range/move_range(startLine,endLine,afterLine). Optional only: replace_file(finalNewline). All other fields are forbidden.",
+    );
+    expect(operation?.properties?.startLine?.description).toContain(
+      "Only for replace, copy_range, and move_range",
+    );
+    expect(operation?.properties?.endLine?.description).toContain(
+      "Only for replace, copy_range, and move_range",
+    );
+    expect(operation?.properties?.afterLine?.description).toContain(
+      "Only for insert, copy_range, and move_range",
+    );
+    expect(operation?.properties?.afterLine?.description).toContain(
+      "move forbids destinations strictly inside its source",
+    );
+    expect(operation?.properties?.lines?.description).toContain(
+      "Only for replace, insert, and replace_file",
+    );
+    expect(operation?.properties?.lines?.description).toContain("insert 1..20,000");
+    expect(operation?.properties?.lines?.description).toContain("without CR, LF, NUL");
+    expect(operation?.properties?.finalNewline?.description).toContain("Only for replace_file");
+    expect(operation?.properties?.finalNewline?.description).toContain(
+      "an empty file requires false",
+    );
+    expect(schema.properties?.rebase?.description).toContain("replace_file forbids unique");
+    expect(schema.properties?.allowHashlinePrefixes?.description).toContain(
+      "Only affects replace, insert, and replace_file payloads",
+    );
     expect(hashlineEditDescription).toContain("immutable pre-batch snapshot");
     expect(hashlineEditDescription).toContain("afterLine is never adjusted");
+    expect(hashlineEditDescription).toContain("finalNewline is replace_file-only");
+    expect(hashlineEditDescription).toContain("replace lines:[] deletes");
   });
 
   test("validates complete tool arguments before permissions or filesystem access", async () => {
