@@ -1,3 +1,7 @@
+import { isAbsolute, relative, resolve } from "node:path";
+import type { NativeAliasProtocolIdentity } from "../../src/session-protocol.js";
+import { assertNativeAliasHistory } from "../../src/session-protocol.js";
+
 export interface TokenUsage {
   input: number;
   output: number;
@@ -10,6 +14,9 @@ export interface ToolTerminalEvent {
   tool: string;
   callID: string;
   status: "completed" | "error";
+  argumentShape: "better-hashline" | "native" | "hybrid" | "other";
+  errorCode: string | null;
+  protocolMarker: "absent" | "valid" | "invalid";
 }
 
 export interface TraceInspection {
@@ -26,6 +33,10 @@ export interface TraceInspection {
   finishReasons: Record<string, number>;
   tokens: TokenUsage;
   cost: number;
+}
+
+export interface TraceInspectionOptions {
+  nativeAlias?: Omit<NativeAliasProtocolIdentity, "worktree"> & { allowedPathRoot: string };
 }
 
 export interface SessionExportInspection {
@@ -81,7 +92,87 @@ function addTokens(value: unknown, target: TokenUsage): boolean {
   return true;
 }
 
-export function inspectJsonlTrace(output: string): TraceInspection {
+function argumentShape(tool: string, input: unknown): ToolTerminalEvent["argumentShape"] {
+  const args = object(input);
+  if (!args || (tool !== "edit" && tool !== "apply_patch" && tool !== "hashline_edit")) {
+    return "other";
+  }
+  const betterHashline =
+    typeof args.filePath === "string" &&
+    typeof args.snapshotId === "string" &&
+    Array.isArray(args.operations);
+  const native =
+    (tool === "edit" && ("oldString" in args || "newString" in args)) ||
+    (tool === "apply_patch" && "patchText" in args);
+  if (betterHashline && native) return "hybrid";
+  if (native) return "native";
+  if (betterHashline) return "better-hashline";
+  return "other";
+}
+
+function protocolMarker(
+  tool: string,
+  metadata: unknown,
+  expected: TraceInspectionOptions["nativeAlias"],
+): ToolTerminalEvent["protocolMarker"] {
+  const marker = object(object(metadata)?.betterHashline);
+  if (!marker) return "absent";
+  if (!expected || (tool !== "edit" && tool !== "apply_patch")) return "invalid";
+  try {
+    const metadataRecord = object(metadata);
+    const file =
+      tool === "edit"
+        ? object(metadataRecord?.filediff)
+        : Array.isArray(metadataRecord?.files)
+          ? object(metadataRecord.files[0])
+          : undefined;
+    const canonicalPath = tool === "edit" ? file?.file : file?.filePath;
+    const patch = file?.patch;
+    const shownPath =
+      tool === "edit" && typeof patch === "string"
+        ? /^--- ([^\t\r\n]+)\tbefore$/mu.exec(patch)?.[1]
+        : file?.relativePath;
+    if (
+      typeof canonicalPath !== "string" ||
+      typeof shownPath !== "string" ||
+      isAbsolute(shownPath)
+    ) {
+      return "invalid";
+    }
+    const confined = relative(resolve(expected.allowedPathRoot), resolve(canonicalPath));
+    if (confined.startsWith("..") || isAbsolute(confined)) return "invalid";
+    const expectedShownPath = confined.replaceAll("\\", "/");
+    if (shownPath !== expectedShownPath) return "invalid";
+    assertNativeAliasHistory(
+      [
+        {
+          parts: [
+            {
+              type: "tool",
+              tool,
+              callID: "benchmark-trace",
+              state: { status: "completed", metadata },
+            },
+          ],
+        },
+      ],
+      { ...expected, worktree: resolve(expected.allowedPathRoot) },
+    );
+    return "valid";
+  } catch {
+    return "invalid";
+  }
+}
+
+function errorCode(error: unknown): string | null {
+  if (typeof error !== "string") return null;
+  return /^([A-Z][A-Z_]+):/u.exec(error)?.[1] ?? null;
+}
+
+export function inspectJsonlTrace(
+  output: string,
+  options: TraceInspectionOptions = {},
+): TraceInspection {
   const inspection: TraceInspection = {
     eventCount: 0,
     parseErrors: 0,
@@ -121,6 +212,7 @@ export function inspectJsonlTrace(output: string): TraceInspection {
       const status = state?.status;
       if (
         !partRecord ||
+        !state ||
         typeof partRecord.tool !== "string" ||
         typeof partRecord.callID !== "string" ||
         (status !== "completed" && status !== "error")
@@ -140,7 +232,14 @@ export function inspectJsonlTrace(output: string): TraceInspection {
       }
       terminalCalls.set(partRecord.callID, status);
       increment(inspection.toolAttempts, partRecord.tool);
-      inspection.toolEvents.push({ tool: partRecord.tool, callID: partRecord.callID, status });
+      inspection.toolEvents.push({
+        tool: partRecord.tool,
+        callID: partRecord.callID,
+        status,
+        argumentShape: argumentShape(partRecord.tool, state.input),
+        errorCode: errorCode(state.error),
+        protocolMarker: protocolMarker(partRecord.tool, state.metadata, options.nativeAlias),
+      });
       if (status === "completed") increment(inspection.tools, partRecord.tool);
       else increment(inspection.toolErrors, partRecord.tool);
       continue;

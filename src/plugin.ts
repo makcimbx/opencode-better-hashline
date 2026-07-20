@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
-import { relative } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { type Plugin, type ToolContext, type ToolResult, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
 import type { EditOperation, RebaseMode } from "./edits.js";
@@ -19,8 +19,27 @@ import {
   throwIfAborted,
   withPathLock,
 } from "./filesystem.js";
+import {
+  detectOpenCodeVersion,
+  openCode1183ProviderSchema,
+  readOpenCodeSessionHistory,
+  SUPPORTED_OPENCODE_VERSIONS,
+} from "./native-alias.js";
 import { type ResolvedOptions, resolveOptions } from "./options.js";
+import {
+  buildNativeAliasMetadata,
+  countUnifiedDiffChanges,
+  jsonSha256,
+  NATIVE_ALIAS_METADATA_MAX_BYTES,
+  nativeAliasProtocolFingerprint,
+} from "./presentation.js";
 import { renderSnapshotPage } from "./render.js";
+import {
+  assertNativeAliasHistory,
+  type NativeAliasProtocolIdentity,
+  NativeAliasSessionRegistry,
+  SESSION_HISTORY_FETCH_LIMIT,
+} from "./session-protocol.js";
 import {
   type IssuedPage,
   type Snapshot,
@@ -29,6 +48,7 @@ import {
   sha256,
 } from "./snapshots.js";
 import { assertLineLimit, decodeTextDocument, encodeNewText } from "./text.js";
+import { PACKAGE_VERSION } from "./version.js";
 
 const NATIVE_MUTATORS = new Set(["edit", "write", "apply_patch"]);
 
@@ -402,22 +422,95 @@ function withoutPendingMetadata(metadata: unknown): Record<string, unknown> {
   return rest;
 }
 
-export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
+export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
+  const requestedToolSurface =
+    rawOptions?.toolSurface === "native-aliases" ? "native-aliases" : "hashline";
   let initializationError: string | undefined;
   let options: ResolvedOptions;
   try {
     options = resolveOptions(rawOptions);
   } catch (error) {
     initializationError = error instanceof Error ? error.message : "Invalid plugin options.";
-    options = resolveOptions({ enforce: true });
+    options = resolveOptions({ enforce: true, toolSurface: requestedToolSurface });
+  }
+  let aliasAvailabilityError: string | undefined;
+  let aliasIdentity: NativeAliasProtocolIdentity | undefined;
+  let aliasFingerprint: string | undefined;
+  if (options.toolSurface === "native-aliases" && !initializationError) {
+    try {
+      const hostVersion = await detectOpenCodeVersion(input.client);
+      if (!SUPPORTED_OPENCODE_VERSIONS.has(hostVersion)) {
+        throw new Error(`OpenCode ${hostVersion} is not allowlisted; expected 1.18.3.`);
+      }
+      const schemaSha256 = jsonSha256(
+        openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+      );
+      aliasIdentity = {
+        packageVersion: PACKAGE_VERSION,
+        schemaSha256,
+        hostVersion,
+        worktree: input.worktree,
+      };
+      aliasFingerprint = nativeAliasProtocolFingerprint(aliasIdentity);
+    } catch (error) {
+      aliasAvailabilityError =
+        error instanceof Error ? error.message : "Native alias initialization failed.";
+    }
   }
   const snapshots = new SnapshotStore(options);
   const pendingReads = new Map<string, PendingRead>();
+  const sessions = new NativeAliasSessionRegistry();
 
   function assertConfigured(): void {
     if (initializationError) {
       fail("CONFIG_INVALID", initializationError);
     }
+  }
+
+  function assertAliasAvailable(): {
+    identity: NativeAliasProtocolIdentity;
+    fingerprint: string;
+  } {
+    if (aliasAvailabilityError || !aliasIdentity || !aliasFingerprint) {
+      fail(
+        "TOOL_SURFACE_UNAVAILABLE",
+        aliasAvailabilityError ?? "Native alias protocol identity is unavailable.",
+      );
+    }
+    return { identity: aliasIdentity, fingerprint: aliasFingerprint };
+  }
+
+  async function assertAliasSession(
+    sessionId: string,
+    directory: string,
+    worktree: string,
+    currentCall?: { id: string; tool: "edit" | "apply_patch" },
+  ): Promise<void> {
+    const alias = assertAliasAvailable();
+    const identity = { ...alias.identity, worktree: resolve(worktree) };
+    const fingerprint = jsonSha256({
+      protocol: alias.fingerprint,
+      worktree: identity.worktree,
+    });
+    if (sessions.isBound(sessionId, fingerprint)) return;
+
+    let messages: unknown;
+    try {
+      messages = await readOpenCodeSessionHistory(
+        input.client,
+        sessionId,
+        directory,
+        SESSION_HISTORY_FETCH_LIMIT,
+      );
+    } catch {
+      fail(
+        "SESSION_PROTOCOL_MISMATCH",
+        "OpenCode session history could not be inspected. Start a new session before editing.",
+      );
+    }
+    const historyOptions = currentCall === undefined ? {} : { currentCall };
+    assertNativeAliasHistory(messages, identity, historyOptions);
+    sessions.bind(sessionId, fingerprint);
   }
 
   function rememberPending(pendingId: string, pending: PendingRead): void {
@@ -431,7 +524,9 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
 
   const hashlineRead = tool({
     description:
-      "Read a UTF-8 text file and issue an exact snapshot for hashline_edit. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited.",
+      options.toolSurface === "native-aliases"
+        ? "Read a UTF-8 text file and issue an exact snapshot for Better Hashline's edit or apply_patch alias. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited."
+        : "Read a UTF-8 text file and issue an exact snapshot for hashline_edit. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited.",
     args: readArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
@@ -486,6 +581,9 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
     throwIfAborted(context.abort);
     const parsed = hashlineEditArgumentsSchema.safeParse(rawArgs);
     if (!parsed.success) invalidArguments(toolName);
+    if (toolName !== "hashline_edit") {
+      await assertAliasSession(context.sessionID, context.directory, context.worktree);
+    }
     const args = parsed.data;
     const operations = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
     const rebase = args.rebase ?? "none";
@@ -494,6 +592,11 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
     }
     if (!args.allowHashlinePrefixes) assertNoDisplayPrefixes(operations);
     const resolved = await resolveExistingFile(args.filePath, context.directory);
+    const shownPath = displayPath(context.worktree, resolved.canonicalPath);
+    const aliasPath = shownPath.replaceAll("\\", "/");
+    if (toolName !== "hashline_edit" && (isAbsolute(shownPath) || aliasPath.startsWith("../"))) {
+      fail("UNSUPPORTED_FILE", "Native aliases cannot edit files outside the current worktree.");
+    }
     const scope = scopeFor(context);
     const snapshot = snapshots.pin(scope, args.snapshotId);
     try {
@@ -521,8 +624,36 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
         }
         assertLineLimit(plan.bytes, options.maxLines);
 
-        const shownPath = displayPath(context.worktree, resolved.canonicalPath);
-        const diff = unifiedDiff(shownPath, current.text, plan.text);
+        const diffPath = toolName === "hashline_edit" ? shownPath : shownPath.replaceAll("\\", "/");
+        const diff = unifiedDiff(diffPath, current.text, plan.text);
+        let metadata: Record<string, unknown>;
+        if (toolName === "hashline_edit") {
+          metadata = {
+            diff,
+            operationCount: plan.operationCount,
+            rebased: plan.rebased,
+          };
+        } else {
+          const metadataInput = {
+            surface: toolName,
+            canonicalPath: resolved.canonicalPath,
+            relativePath: shownPath,
+            unifiedDiff: diff,
+            ...countUnifiedDiffChanges(diff),
+            ...assertAliasAvailable().identity,
+          };
+          metadata = buildNativeAliasMetadata(metadataInput);
+          const persistedBytes = Buffer.byteLength(
+            JSON.stringify({ ...metadata, truncated: false }),
+            "utf8",
+          );
+          if (persistedBytes > NATIVE_ALIAS_METADATA_MAX_BYTES) {
+            fail(
+              "UNSUPPORTED_FILE",
+              `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes. Split the edit into smaller operations.`,
+            );
+          }
+        }
         await authorizeEdit(context, resolved, diff);
         await publishReplacement({
           resolved,
@@ -532,15 +663,14 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
           signal: context.abort,
           consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
         });
-        context.metadata({ title: shownPath, metadata: { diff } });
+        context.metadata({
+          title: shownPath,
+          metadata: toolName === "hashline_edit" ? { diff } : metadata,
+        });
         return {
           title: shownPath,
           output: `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}. Reread before the next edit.`,
-          metadata: {
-            diff,
-            operationCount: plan.operationCount,
-            rebased: plan.rebased,
-          },
+          metadata,
         };
       });
     } finally {
@@ -549,13 +679,18 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
   }
 
   const hashlineEdit = createSnapshotEditTool("hashline_edit", executeSnapshotBoundEdit);
+  const nativeEdit = createSnapshotEditTool("edit", executeSnapshotBoundEdit);
+  const nativeApplyPatch = createSnapshotEditTool("apply_patch", executeSnapshotBoundEdit);
 
   const hashlineWrite = tool({
     description:
-      "Create a new UTF-8 file. This tool is create-only and fails if any file, directory, or symlink already exists at the target. Use hashline_edit for existing files.",
+      options.toolSurface === "native-aliases"
+        ? "Create a new UTF-8 file. This tool is create-only and fails if any file, directory, or symlink already exists at the target. Use hashline_read followed by edit or apply_patch for existing files."
+        : "Create a new UTF-8 file. This tool is create-only and fails if any file, directory, or symlink already exists at the target. Use hashline_edit for existing files.",
     args: writeArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
+      if (options.toolSurface === "native-aliases") assertAliasAvailable();
       throwIfAborted(context.abort);
       const parsed = writeArguments.safeParse(rawArgs);
       if (!parsed.success) invalidArguments("hashline_write");
@@ -584,27 +719,74 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
     },
   });
 
+  const toolRegistry =
+    options.toolSurface === "native-aliases"
+      ? initializationError || aliasAvailabilityError
+        ? {
+            hashline_read: hashlineRead,
+            hashline_write: hashlineWrite,
+          }
+        : {
+            hashline_read: hashlineRead,
+            edit: nativeEdit,
+            apply_patch: nativeApplyPatch,
+            hashline_write: hashlineWrite,
+          }
+      : {
+          hashline_read: hashlineRead,
+          hashline_edit: hashlineEdit,
+          hashline_write: hashlineWrite,
+        };
+
+  function suppressMutators(tools: Record<string, boolean>): void {
+    if (!options.enforce) return;
+    if (options.toolSurface === "hashline") {
+      for (const name of NATIVE_MUTATORS) tools[name] = false;
+      return;
+    }
+    tools.write = false;
+    tools.hashline_edit = false;
+    if (initializationError || aliasAvailabilityError) {
+      tools.edit = false;
+      tools.apply_patch = false;
+    }
+  }
+
   return {
-    tool: {
-      hashline_read: hashlineRead,
-      hashline_edit: hashlineEdit,
-      hashline_write: hashlineWrite,
-    },
+    tool: toolRegistry,
     async "chat.message"(_input, output) {
       if (!options.enforce) return;
       output.message.tools ??= {};
-      for (const name of NATIVE_MUTATORS) output.message.tools[name] = false;
+      suppressMutators(output.message.tools);
     },
-    async "tool.execute.before"(input) {
-      if (options.enforce && NATIVE_MUTATORS.has(input.tool)) {
-        if (initializationError) {
-          fail("CONFIG_INVALID", initializationError);
-        }
+    async "tool.execute.before"(hookInput, output) {
+      if (options.toolSurface === "hashline") {
+        if (!options.enforce || !NATIVE_MUTATORS.has(hookInput.tool)) return;
+        assertConfigured();
         fail(
           "NATIVE_TOOL_DISABLED",
-          `Use hashline_edit for existing files or hashline_write for new files instead of ${input.tool}.`,
+          `Use hashline_edit for existing files or hashline_write for new files instead of ${hookInput.tool}.`,
         );
       }
+      if (!options.enforce) return;
+      if (hookInput.tool === "write" || hookInput.tool === "hashline_edit") {
+        assertConfigured();
+        fail(
+          "NATIVE_TOOL_DISABLED",
+          hookInput.tool === "write"
+            ? "Use hashline_write to create a new file; native write is disabled."
+            : "hashline_edit is unavailable on the native-aliases surface. Start a new session after changing surfaces.",
+        );
+      }
+      if (hookInput.tool !== "edit" && hookInput.tool !== "apply_patch") return;
+      assertConfigured();
+      if (!hashlineEditArgumentsSchema.safeParse(output.args).success) {
+        invalidArguments(hookInput.tool);
+      }
+      await assertAliasSession(hookInput.sessionID, input.directory, input.worktree, {
+        id: hookInput.callID,
+        tool: hookInput.tool,
+      });
     },
     async "tool.execute.after"(input, output) {
       if (input.tool !== "hashline_read") return;
@@ -651,20 +833,27 @@ export const betterHashlinePlugin: Plugin = async (_input, rawOptions) => {
       output.system.push(
         initializationError
           ? `Better Hashline configuration is invalid and file mutation is disabled: ${initializationError}`
-          : options.enforce
-            ? "Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. Use hashline_write only to create a new file. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content."
-            : "Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files. Native editing tools remain enabled by configuration.",
+          : options.toolSurface === "native-aliases" && aliasAvailabilityError
+            ? `Better Hashline native aliases are unavailable and file mutation is disabled: ${aliasAvailabilityError}`
+            : options.toolSurface === "native-aliases"
+              ? "Better Hashline native aliases are active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then the available edit or apply_patch tool with the Better Hashline snapshot operation schema. Use hashline_write only to create a new file. Native write and hashline_edit are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content. This experimental surface requires OpenCode 1.18.3, a new session after configuration changes, and Better Hashline to be the last plugin defining edit or apply_patch."
+              : options.enforce
+                ? "Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. Use hashline_write only to create a new file. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content."
+                : "Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files. Native editing tools remain enabled by configuration.",
       );
     },
     async "tool.definition"(input, output) {
       if (input.toolID === "read") {
         output.description +=
-          "\nFor any text file that may be edited, use hashline_read instead so the edit has an exact snapshot.";
+          options.toolSurface === "native-aliases"
+            ? "\nFor any text file that may be edited with Better Hashline's edit or apply_patch alias, use hashline_read instead so the edit has an exact snapshot."
+            : "\nFor any text file that may be edited, use hashline_read instead so the edit has an exact snapshot.";
       }
     },
     async dispose() {
       pendingReads.clear();
       snapshots.clear();
+      sessions.clear();
     },
   };
 };

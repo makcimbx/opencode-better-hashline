@@ -11,12 +11,12 @@
 
 ## Architecture And Invariants
 
-- `src/index.ts` is the public library entry and `src/server.ts` is OpenCode's preferred `./server` entry. Keep the explicit import/default export in `server.ts` and the two separate Bun build invocations; collapsing either previously produced an invalid bundle.
-- Protocol logic stays pure in `text.ts`, `snapshots.ts`, `render.ts`, `rebase.ts`, and `edits.ts`; filesystem authorization/publication belongs in `filesystem.ts`; OpenCode schemas and hooks belong in `plugin.ts`.
+- `src/index.ts` is the public library entry, `src/server.ts` is OpenCode's preferred `./server` entry, and `src/cli.ts` is the verifier bin. Keep the explicit import/default export in `server.ts` and all three separate Bun build invocations; collapsing entry builds previously produced an invalid bundle.
+- Protocol logic stays pure in `text.ts`, `snapshots.ts`, `render.ts`, `rebase.ts`, `edits.ts`, `presentation.ts`, and `session-protocol.ts`; filesystem authorization/publication belongs in `filesystem.ts`; OpenCode schemas and hooks belong in `plugin.ts`.
 - Keep `.js` specifiers in TypeScript imports. Do not edit generated `dist/` or `coverage/`.
 - Snapshot refs become editable only in `tool.execute.after`, after host truncation and output-digest checks. Retained or pending bytes are not issued provenance.
 - Exact retained bytes are freshness authority. `rebase: "none"` stays strict by default; `"unique"` is explicit, exact, and ambiguity-rejecting. Do not add fuzzy matching, normalization, nearest-match selection, source repair, or silent fallback.
-- Keep unique `hashline_*` IDs and native `read`. `enforce` hides and tripwires native `edit`, `write`, and `apply_patch`; it is not a shell sandbox.
+- Keep `hashline` as the default unique-ID surface and native `read`. Experimental `native-aliases` requires `enforce:true`, exact OpenCode 1.18.3, bounded history/metadata, and no silent fallback; it never aliases native `write`. Neither surface is a shell sandbox.
 - Preserve the filesystem order: canonicalize and authorize, plan one immutable result, approve that exact diff, reread bytes/identity, then stage and publish. Never replan after approval.
 - OpenCode may swallow plugin initialization failures. Option errors must retain diagnostic fail-closed mode rather than escaping initialization.
 - Keep public tool schemas flat/provider-friendly; validate operation-specific field combinations at runtime instead of adding union-heavy schemas.
@@ -28,6 +28,7 @@
 - Filesystem and plugin tests cover authorization, races, host hooks, and fail-closed behavior; update them when those paths change.
 - `bun run bench` is deterministic but result paths are write-once. Never `--force` published evidence; add a new dated result.
 - `bun run bench:model` is a no-cost dry run. `--preflight` performs installs/writes but no model call. Never use `--execute` without explicit user approval, a model/auth source, and `BENCHMARK_ACK_COSTS=yes`.
+- The native-alias pilot uses the frozen `--native-alias-pilot` manifest; do not release the preview based only on deterministic or packed evidence when the plan still requires paid-pilot approval.
 
 ## Workflow
 

@@ -5,6 +5,7 @@ describe("plugin options", () => {
   test("uses conservative defaults", () => {
     expect(resolveOptions(undefined)).toEqual({
       enforce: true,
+      toolSurface: "hashline",
       maxFileBytes: 8 * 1024 * 1024,
       maxLines: 100_000,
       maxCacheBytes: 64 * 1024 * 1024,
@@ -21,6 +22,7 @@ describe("plugin options", () => {
     expect(
       resolveOptions({
         enforce: false,
+        toolSurface: "hashline",
         maxFileBytes: 1024,
         maxLines: 10,
         maxCacheBytes: 3072,
@@ -37,6 +39,12 @@ describe("plugin options", () => {
   test("rejects misspelled, mistyped, and inconsistent options", () => {
     expect(() => resolveOptions({ unknown: true })).toThrow("Unknown Better Hashline option");
     expect(() => resolveOptions({ enforce: "yes" })).toThrow("enforce must be a boolean");
+    expect(() => resolveOptions({ toolSurface: "native" })).toThrow(
+      "toolSurface must be hashline or native-aliases",
+    );
+    expect(() => resolveOptions({ enforce: false, toolSurface: "native-aliases" })).toThrow(
+      "requires enforce=true",
+    );
     expect(() => resolveOptions({ maxFileBytes: 1.5 })).toThrow("must be an integer");
     expect(() => resolveOptions({ maxFileBytes: 1 })).toThrow("must be between");
     expect(() => resolveOptions({ maxFileBytes: 2048, maxCacheBytes: 4096 })).toThrow(

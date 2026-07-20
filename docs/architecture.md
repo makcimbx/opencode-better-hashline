@@ -10,12 +10,15 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/snapshots.ts` | Opaque IDs, exact bytes/SHA-256, scope, issued provenance, TTL/LRU limits |
 | `src/render.ts` | Byte-bounded `N|content` pages and preview-only oversized lines |
 | `src/presentation.ts` | Experimental native-alias metadata, canonical fingerprints, and serialized-size measurement |
+| `src/native-alias.ts` | Bounded exact-host detection through OpenCode's configured SDK transport |
+| `src/session-protocol.ts` | Bounded persisted-history validation and instance-local alias session binding |
 | `src/rebase.ts` | Exact unique range/boundary relocation with a cumulative comparison budget |
 | `src/edits.ts` | Operation validation, transfer effect analysis, immutable planning, bounded projection, final bytes |
 | `src/filesystem.ts` | Canonicalization, OpenCode permissions, stable reads, locks, publication |
 | `src/plugin.ts` | Tool schemas, hooks, native-mutator enforcement, lifecycle integration |
 | `src/index.ts` | Public library exports and OpenCode `PluginModule` |
 | `src/server.ts` | Modern OpenCode `./server` package entrypoint |
+| `src/verify.ts`, `src/cli.ts` | Credential-free packed OpenCode route, schema, hook, export/import, and renderer verification |
 
 ## Design Boundaries
 
@@ -45,13 +48,19 @@ Conflict detection uses exact bytes and identity. Same-directory temp plus renam
 
 The npm package default-exports a modern `PluginModule` and exposes both root and `./server` exports. OpenCode's stable V1 loader prefers the server entrypoint.
 
-Unique tool IDs avoid three OpenCode hazards:
+The default unique tool IDs avoid three OpenCode hazards:
 
 - later registry collisions silently replacing a builtin;
 - model-dependent filtering of exact IDs such as `edit` and `apply_patch`;
 - inability to call a displaced builtin for media or directory reads.
 
 The plugin keeps native `read` and adds `hashline_read`, `hashline_edit`, and `hashline_write`. With `enforce: true`, `chat.message` disables native mutator IDs on every user turn and `tool.execute.before` is a second tripwire. This is defense in depth, not a shell sandbox.
+
+The explicit native-alias preview instead registers Better Hashline's shared executor as `edit` and
+`apply_patch`, lets OpenCode 1.18.3 retain one by model route, and preserves unique read/create tools.
+Activation uses the host-configured SDK transport, exact host and schema fingerprints, bounded
+session-history validation, double argument parsing, and native renderer metadata. Registry ownership
+still cannot be attested, so this surface does not replace the unique-ID recommendation.
 
 ## State and Eviction
 
@@ -76,7 +85,8 @@ The test suite has separate layers:
 - renderer truncation and UTF-8 budget tests;
 - real temporary-filesystem tests for symlinks, hardlinks, races, modes, and no-replace creation;
 - plugin contract tests with fake OpenCode contexts and real tool/hook definitions;
-- packed-tarball installation, modern entrypoint checks, and a deterministic local OpenCode session that exercises real before/after hooks;
+- packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions for unique, non-GPT alias, and GPT-like alias routes;
+- collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
 - deterministic non-gating benchmarks and an opt-in model harness.
 
 Timing benchmarks never gate shared CI. Safety regressions do.

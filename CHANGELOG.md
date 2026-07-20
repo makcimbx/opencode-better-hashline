@@ -7,6 +7,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Add an explicit experimental `native-aliases` tool surface for exact OpenCode 1.18.3, with bounded host detection, session protocol binding, native renderer metadata, and fail-closed diagnostics.
+- Add a credential-free packaged verifier covering unique, non-GPT `edit`, and GPT-like `apply_patch` routes through stock OpenCode, including malformed calls, hooks, continuation, export/import, and renderer evidence.
+- Add deterministic collision fixtures and a separate `native-aliases-v1` paired-model adapter set with protocol-marker and malformed-retry trace metrics.
+
+### Changed
+
+- Keep the unique `hashline` surface as the default while routing all edit IDs through one snapshot-bound executor and capping native renderer metadata before permission or publication.
+
 ## [0.2.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.2.0...v0.2.1) - 2026-07-19
 
 ### Fixed

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { openCode1183ProviderSchema } from "../src/native-alias.js";
 import { hashlineEditArgumentsSchema, hashlineEditDescription } from "../src/plugin.js";
 import {
   buildNativeAliasMetadata,
@@ -39,6 +40,9 @@ describe("native alias presentation contracts", () => {
       "59c2d32adc0332e6f1a2b5a6e0db692a474c9a495dbd06979ea643bdab9ecb70",
     );
     expect(schemaSha256).toBe("fcc372c6be3bee0bf11d25ebc95e4428aa742de94c59ad8cd24f6e491af2ad9e");
+    expect(jsonSha256(openCode1183ProviderSchema(schema))).toBe(
+      "a7359841f93f0f111d5cb5cab8d747e0cf07cc130b683e97b8b75499a68a63d1",
+    );
     expect(jsonSha256(providerContract)).toBe(
       "ba9298e3db64c22b2e76c54fd6ca1041a8d003eb665e9df2d908565b8233c5e8",
     );
@@ -107,6 +111,28 @@ describe("native alias presentation contracts", () => {
       diffUtf8Bytes: 64,
       diffCopies: 1,
     });
+  });
+
+  test("keeps large-diff metadata linear and surface-bounded", () => {
+    const largeDiff = "x\n".repeat(128 * 1024);
+    const edit = measureNativeAliasMetadata({
+      ...commonInput,
+      surface: "edit",
+      unifiedDiff: largeDiff,
+    });
+    const patch = measureNativeAliasMetadata({
+      ...commonInput,
+      surface: "apply_patch",
+      unifiedDiff: largeDiff,
+    });
+
+    expect(edit.diffUtf8Bytes).toBe(256 * 1024);
+    expect(edit.serializedDiffBytes).toBe(768 * 1024);
+    expect(patch.serializedDiffBytes).toBe(384 * 1024);
+    expect(edit.compactJsonBytes - edit.serializedDiffBytes).toBe(edit.compactJsonBytesWithoutDiff);
+    expect(patch.compactJsonBytes - patch.serializedDiffBytes).toBe(
+      patch.compactJsonBytesWithoutDiff,
+    );
   });
 
   test("canonicalizes supported JSON and rejects ambiguous values", () => {

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 
 export const NATIVE_ALIAS_PROTOCOL = "native-aliases/v1";
 export const NATIVE_ALIAS_TOOL_SURFACE = "native-aliases";
+export const NATIVE_ALIAS_METADATA_MAX_BYTES = 1_048_576;
 
 export type NativeAliasSurface = "edit" | "apply_patch";
 
@@ -64,6 +65,29 @@ function sha256Text(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+export function canonicalPathSha256(canonicalPath: string): string {
+  return sha256Text(canonicalPath);
+}
+
+export function countUnifiedDiffChanges(diff: string): {
+  additions: number;
+  deletions: number;
+} {
+  let additions = 0;
+  let deletions = 0;
+  let inHunk = false;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("@@")) {
+      inHunk = true;
+    } else if (inHunk && line.startsWith("+")) {
+      additions += 1;
+    } else if (inHunk && line.startsWith("-")) {
+      deletions += 1;
+    }
+  }
+  return { additions, deletions };
+}
+
 export function canonicalJson(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -116,7 +140,7 @@ function marker(input: NativeAliasMetadataInput): BetterHashlineMarker {
     schemaSha256: input.schemaSha256,
     hostVersion: input.hostVersion,
     surface: input.surface,
-    canonicalPathSha256: sha256Text(input.canonicalPath),
+    canonicalPathSha256: canonicalPathSha256(input.canonicalPath),
   };
 }
 

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { inspectJsonlTrace, inspectSessionExport } from "../benchmarks/model/trace.js";
+import { buildNativeAliasMetadata } from "../src/presentation.js";
 
 describe("model benchmark trace inspection", () => {
   test("extracts completed tools, errors, tokens, cost, and finish reasons", () => {
@@ -46,13 +48,155 @@ describe("model benchmark trace inspection", () => {
       toolAttempts: { hashline_read: 1, hashline_edit: 1 },
       toolErrors: { hashline_edit: 1 },
       toolEvents: [
-        { tool: "hashline_read", callID: "call-read", status: "completed" },
-        { tool: "hashline_edit", callID: "call-edit", status: "error" },
+        {
+          tool: "hashline_read",
+          callID: "call-read",
+          status: "completed",
+          argumentShape: "other",
+          errorCode: null,
+          protocolMarker: "absent",
+        },
+        {
+          tool: "hashline_edit",
+          callID: "call-edit",
+          status: "error",
+          argumentShape: "other",
+          errorCode: null,
+          protocolMarker: "absent",
+        },
       ],
       finishReasons: { stop: 1 },
       tokens: { input: 100, output: 25, reasoning: 5, cacheRead: 40, cacheWrite: 2 },
       cost: 0.0125,
     });
+  });
+
+  test("classifies native-shaped retries and native-alias protocol markers", () => {
+    const allowedPathRoot = resolve("benchmark-fixture");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const metadata = buildNativeAliasMetadata({
+      surface: "edit",
+      canonicalPath: resolve(allowedPathRoot, "a.ts"),
+      relativePath: "a.ts",
+      unifiedDiff: "--- a.ts\tbefore\n+++ a.ts\tafter\n@@ -1 +1 @@\n-a\n+b\n",
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    const output = [
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session",
+        part: {
+          sessionID: "session",
+          tool: "edit",
+          callID: "native-call",
+          state: {
+            status: "error",
+            input: { filePath: "a.ts", oldString: "a", newString: "b" },
+            error: "INVALID_ARGUMENT: Invalid edit arguments.",
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session",
+        part: {
+          sessionID: "session",
+          tool: "edit",
+          callID: "hashline-call",
+          state: {
+            status: "completed",
+            input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+            metadata,
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session",
+        part: {
+          sessionID: "session",
+          tool: "apply_patch",
+          callID: "bad-marker",
+          state: {
+            status: "completed",
+            input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+            metadata: { betterHashline: { protocol: "native-aliases/v0" } },
+          },
+        },
+      }),
+    ].join("\n");
+
+    expect(
+      inspectJsonlTrace(output, { nativeAlias: { ...identity, allowedPathRoot } }).toolEvents,
+    ).toEqual([
+      {
+        tool: "edit",
+        callID: "native-call",
+        status: "error",
+        argumentShape: "native",
+        errorCode: "INVALID_ARGUMENT",
+        protocolMarker: "absent",
+      },
+      {
+        tool: "edit",
+        callID: "hashline-call",
+        status: "completed",
+        argumentShape: "better-hashline",
+        errorCode: null,
+        protocolMarker: "valid",
+      },
+      {
+        tool: "apply_patch",
+        callID: "bad-marker",
+        status: "completed",
+        argumentShape: "better-hashline",
+        errorCode: null,
+        protocolMarker: "invalid",
+      },
+    ]);
+  });
+
+  test("requires alias display paths to be relative to the exact fixture root", () => {
+    const allowedPathRoot = resolve("benchmark-fixture");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const metadata = buildNativeAliasMetadata({
+      surface: "edit",
+      canonicalPath: resolve(allowedPathRoot, "nested", "a.ts"),
+      relativePath: "a.ts",
+      unifiedDiff: "--- a.ts\tbefore\n+++ a.ts\tafter\n@@ -1 +1 @@\n-a\n+b\n",
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    const output = JSON.stringify({
+      type: "tool_use",
+      sessionID: "session",
+      part: {
+        sessionID: "session",
+        tool: "edit",
+        callID: "call",
+        state: {
+          status: "completed",
+          input: { filePath: "nested/a.ts", snapshotId: "s_123", operations: [] },
+          metadata,
+        },
+      },
+    });
+
+    expect(
+      inspectJsonlTrace(output, { nativeAlias: { ...identity, allowedPathRoot } }).toolEvents[0]
+        ?.protocolMarker,
+    ).toBe("invalid");
   });
 
   test("counts malformed lines without treating unrelated objects as events", () => {

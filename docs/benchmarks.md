@@ -128,11 +128,18 @@ transfers, a long corridor, conflict recovery, duplicate source content, and a l
 set is confirmatory evidence. The harness pairs native OpenCode editing against Better Hashline in
 fresh temporary directories and alternates adapter order.
 
+Adapter sets are independently versioned. `native-vs-unique-v1` remains the default. The experimental
+`native-aliases-v1` set pairs unique Better Hashline with `better-hashline-native-aliases`; it does
+not compare aliases against native OpenCode. Alias traces classify Better-shaped versus native-shaped
+arguments, stable error codes, active alias, and `native-aliases/v1` marker validity.
+
 Dry run, no model calls:
 
 ```sh
 bun run bench:model
 bun run bench:model --task-set=transfer-v1
+bun run bench:model --adapter-set=native-aliases-v1 --repeats=1
+bun run bench:model --native-alias-pilot
 ```
 
 Model-free adapter preflight:
@@ -142,13 +149,15 @@ bun run bench:model --preflight --output=benchmarks/results/local/preflight
 ```
 
 Preflight makes no model requests, but it builds, packs, installs dependencies with lifecycle scripts disabled, invokes the pinned OpenCode CLI, and writes evidence. It may access the npm registry when dependencies are not cached. The output directory must not already exist.
+It also runs the packed credential-free verifier for unique, non-GPT alias, and GPT-like alias routes.
 
 Paid execution:
 
 ```sh
 BENCHMARK_AUTH_FILE=/path/to/opencode-auth.json \
 BENCHMARK_ACK_COSTS=yes \
-bun run bench:model --execute --task-set=baseline-v1 --model=provider/model --repeats=2
+bun run bench:model --execute --task-set=baseline-v1 --model=provider/model --repeats=2 \
+  --approved-sessions=48 --approved-max-requests=576 --approved-max-cost-usd=10
 ```
 
 Alternatively, explicitly pass only the provider variables required by the selected model with `--pass-env=KEY_ONE,KEY_TWO`. OpenCode, home, configuration, and temporary-directory variables cannot be passed through.
@@ -160,6 +169,9 @@ The harness:
 - isolates home, profile, application-data, temporary, and all XDG directories;
 - copies only an explicitly selected auth file or explicitly named provider variables;
 - disables external skills and denies shell, task, and web tools;
+- caps every agent at 12 model steps and requires the exact derived session/request schedule;
+- aborts provider retries before another request and journals every completed session atomically;
+- stops before another session after OpenCode-reported cost reaches the explicitly approved ceiling;
 - uses a fresh directory for every adapter/task/repeat;
 - evaluates exact bytes and unexpected files;
 - requires successful expected edit tools and rejects forbidden transport usage;
@@ -168,6 +180,15 @@ The harness:
 - ignores raw model traces in Git by default.
 
 The harness reports requested and observed identities separately. Reported usage covers the validated parent session and is not asserted to equal a provider invoice. Before publishing model claims, inspect all traces, redact secrets, report malformed calls/retries/tokens/cost with their stated scope, run enough paired tasks for the intended claim, and preregister the primary metric. The default 48-session pilot is useful for harness debugging, not a universal superiority claim.
+
+The native-alias release gate is one frozen 96-session pilot: 12 baseline tasks x 2 surfaces x four
+approved models x one repeat. It runs with `--native-alias-pilot`, an approved auth-file copy, exactly
+1,152 maximum requests, a USD 4 total reported-cost stop threshold, and a USD 1 threshold per model.
+Its task and adapter-behavior SHA-256 values are frozen in the manifest, and dirty source overrides are
+forbidden. The paid command must also approve the exact committed HEAD and runner-source SHA-256 from
+the dry run; output is confined to ignored model results and authentication is snapshotted once.
+Deterministic and packed evidence do not substitute for that paid gate, and no alias
+model-result claim exists until the complete journal is reviewed.
 
 ## Result Vocabulary
 

@@ -2,14 +2,14 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Approved; Phase 1 implemented locally; native aliases remain unsupported |
+| Status | Phases 0-6 implemented and model-free gates passed; 96-session paid pilot pending |
 | Plan version | 1.0 |
 | Plan date | 2026-07-19 |
-| Package baseline | `opencode-better-hashline@0.2.0` |
-| Source baseline | `6a3aa76bee48b28ccf6ca57d1e7dbc05511ed5e1` |
+| Package baseline | `opencode-better-hashline@0.2.1` |
+| Source baseline | `da94bef57bf6319779f024d446b0c26bf62918ba` |
 | Initial host target | OpenCode `1.18.3` |
 
-This document plans an optional Better Hashline tool surface that uses OpenCode's native
+This document defines an optional Better Hashline tool surface that uses OpenCode's native
 `edit` and `apply_patch` renderer IDs while retaining Better Hashline's snapshot-bound edit
 executor. It does not change the current unique `hashline_*` tool IDs, runtime behavior,
 support policy, or safety claims.
@@ -439,10 +439,14 @@ No error may cause automatic execution by a built-in tool or silent surface fall
 
 ## Implementation Phases
 
-Phase 0 was approved on 2026-07-19. The behavior-preserving Phase 1 extraction is implemented in
-the working tree and awaits its separate review/landing step. No native alias is registered by
-that extraction; the production registry remains exactly `hashline_read`, `hashline_edit`, and
-`hashline_write`.
+Phases 0-6 were implemented on the feature branch on 2026-07-20. The default production registry
+remains exactly `hashline_read`, `hashline_edit`, and `hashline_write`. The explicit alias preview,
+deterministic matrix, collision fixtures, credential-free packed verifier, and model adapter are
+implemented. Packed verification covers resumed, forked, and imported edits, sanitized export, frozen
+stock terminal renderer output, pinned GPT-4/GPT-OSS/GPT-5 routing, wildcard/path edit permissions,
+and rollback to unique IDs. No paid model call has been made. The
+96-session pilot is approved with the bounds below; Phase 7 and npm release remain blocked on its
+execution and go/no-go review.
 
 ### Phase 0: ADR and frozen contract
 
@@ -566,6 +570,22 @@ The first pilot compares unique and alias surfaces, not native OpenCode:
 | Models | OpenAI Luna, OpenAI Sol, OpenRouter Nemotron Nano, OpenRouter Nemotron Ultra |
 | Repeats | 1 |
 | Sessions | 96 |
+| Maximum model requests | 1,152 (12 per session) |
+| Maximum reported cost | USD 4 total (USD 1 per model run) |
+| Authentication | One isolated copy of the approved OpenCode auth file |
+
+The exact model IDs are `openai/gpt-5.6-luna` (`medium`), `openai/gpt-5.6-sol`
+(`medium`), `openrouter/nvidia/nemotron-3-nano-30b-a3b:free`, and
+`openrouter/nvidia/nemotron-3-ultra-550b-a55b:free`. One `--native-alias-pilot` manifest freezes all
+models, variants, tasks, adapter order, 96 sessions, 1,152 requests, and the USD 4 stop threshold.
+The manifest pins task SHA-256 `8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a`
+and adapter-behavior SHA-256 `cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8`.
+Only the approved auth-file copy and a clean committed worktree are accepted; dirty overrides are
+forbidden. Paid execution also approves the exact committed HEAD and runner-source SHA-256, confines
+output to ignored model results, and snapshots authentication once before the first session. Provider
+retry status terminates the session before another request, every completed
+session is atomically journaled, and the first process, identity, protocol, request, cost, or exact-file
+failure stops the entire pilot without substitution or retry.
 
 Pilot outcomes:
 
@@ -582,6 +602,9 @@ Pilot outcomes:
 The pilot is transport evidence only. It cannot establish superiority. It runs only after explicit
 user approval and all existing model/auth/cost gates in the model evaluation plan.
 
+Implementation status: the `native-aliases-v1` adapter set, marker/retry metrics, model-free dry run,
+and packed preflight are complete. The 96 paid sessions themselves remain intentionally unexecuted.
+
 ### Phase 7: release decision
 
 Public opt-in support is considered only when every go/no-go gate passes. Otherwise the branch is
@@ -591,7 +614,7 @@ closed without npm publication.
 
 ### Required to proceed beyond prototype
 
-- Default unique surface is byte-, schema-, hook-, and behavior-compatible with `0.2.0`.
+- Default unique surface is byte-, schema-, hook-, and behavior-compatible with `0.2.1`.
 - All deterministic protocol, filesystem, and plugin tests remain green.
 - Alias calls use only the shared Better Hashline executor.
 - Native-shaped arguments produce no permission request or filesystem side effect.
@@ -624,7 +647,7 @@ closed without npm publication.
 - Real models enter persistent native-schema loops at an unacceptable rate.
 - Required renderer metadata creates unbounded or misleading completed-card output.
 
-## Documentation Changes If Released
+## Documentation Changes For Preview
 
 - Add the option with an experimental warning beside the configuration example.
 - Explain that the option changes model-visible and persisted tool IDs.
@@ -701,4 +724,5 @@ approve this plan
 ```
 
 The current unique-ID implementation remains the production recommendation until the full sequence
-passes. Visual parity alone is not sufficient reason to weaken the default protocol surface.
+passes. Visual parity and model-free evidence alone are not sufficient reason to weaken the default
+protocol surface or publish the preview.
