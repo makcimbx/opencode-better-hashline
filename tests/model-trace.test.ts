@@ -246,17 +246,21 @@ describe("model benchmark trace inspection", () => {
         nativeAlias: { ...identity, allowedPathRoot, worktree },
       }).toolEvents[0]?.protocolMarker,
     ).toBe("valid");
+    const sessionExport = JSON.stringify({
+      info: {
+        directory: allowedPathRoot,
+        path: relative(worktree, allowedPathRoot).replaceAll("\\", "/"),
+      },
+    });
+    expect(worktreeFromSessionExport(sessionExport, allowedPathRoot)).toBe(worktree);
     expect(
-      worktreeFromSessionExport(
-        JSON.stringify({
-          info: {
-            directory: allowedPathRoot,
-            path: relative(worktree, allowedPathRoot).replaceAll("\\", "/"),
-          },
-        }),
+      inspectNativeAliasTrace(output, sessionExport, {
+        ...identity,
         allowedPathRoot,
-      ),
-    ).toBe(worktree);
+        expectedDirectory: allowedPathRoot,
+        worktree: allowedPathRoot,
+      }).toolEvents[0]?.protocolMarker,
+    ).toBe("valid");
   });
 
   test("rejects paths outside the fixture even when they are inside the worktree", () => {

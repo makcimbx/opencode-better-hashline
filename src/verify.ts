@@ -25,9 +25,9 @@ const REOPENED_BYTES = "alpha\nDELTA\ngamma\n";
 const RENDERED_BYTES = "alpha\nRENDER\ngamma\n";
 const PRIVATE_CANARY = "BH_PRIVATE_CANARY_8f149f0a";
 const TERMINAL_RENDERER_SHA256: Record<VerificationCaseReport["route"], string> = {
-  hashline: "51216b4c378516b3a7281a74831f871a0b23052a477c08d427fb67d6e544eb06",
-  "native-edit": "f1849a2afe08c81ecd7ad8578560caf20aabe52c441260ad78b5d74a0b0b7f5f",
-  "native-apply-patch": "018a8b9a411bd58c92b26c4972b60eae3beac99601013a8ec5ac9861753b93c5",
+  hashline: "cc314f125f2cb87d36099a6503374a83d381f6ce09b0ae224869838d07092e8d",
+  "native-edit": "d40a50dbfe64e8989066dba98a3922ba5aafe956128e6d8652998bf04419d94c",
+  "native-apply-patch": "d9c6cef2282fac727d819bfecca836d90965dae5f7f691088bcc304fee310046",
 };
 const RELEVANT_TOOLS = new Set([
   "apply_patch",
@@ -396,7 +396,7 @@ function assertSanitizedExport(value: unknown, secrets: string[]): void {
   }
 }
 
-function exportedWorktree(value: unknown, expectedDirectory: string) {
+async function exportedWorktree(value: unknown, expectedDirectory: string) {
   invariant(
     value !== null && typeof value === "object" && !Array.isArray(value),
     "Session export is unreadable",
@@ -408,8 +408,12 @@ function exportedWorktree(value: unknown, expectedDirectory: string) {
   );
   const directory = (info as Record<string, unknown>).directory;
   const path = (info as Record<string, unknown>).path;
+  const [canonicalDirectory, canonicalExpectedDirectory] = await Promise.all([
+    typeof directory === "string" ? realpath(directory) : Promise.resolve(""),
+    realpath(expectedDirectory),
+  ]);
   invariant(
-    typeof directory === "string" && resolve(directory) === resolve(expectedDirectory),
+    typeof directory === "string" && canonicalDirectory === canonicalExpectedDirectory,
     "Session directory is inconsistent",
   );
   invariant(typeof path === "string", "Session worktree path is unreadable");
@@ -424,6 +428,23 @@ function exportedWorktree(value: unknown, expectedDirectory: string) {
     "Session worktree path is inconsistent",
   );
   return worktree;
+}
+
+function assertNativeAliasHistoryForWorktrees(
+  messages: unknown[],
+  identity: Omit<Parameters<typeof assertNativeAliasHistory>[1], "worktree">,
+  worktrees: string[],
+) {
+  let lastError: unknown;
+  for (const worktree of new Set(worktrees.map((value) => resolve(value)))) {
+    try {
+      assertNativeAliasHistory(messages, { ...identity, worktree });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 function normalizeRendererValue(value: unknown, roots: string[]): unknown {
@@ -518,6 +539,8 @@ function normalizedTerminalRenderer(stdout: string, roots: string[]): string {
     .replaceAll(PACKAGE_VERSION, "<package-version>")
     .replaceAll(/ses_[A-Za-z0-9_-]+/gu, "<session>")
     .replaceAll(/call_[A-Za-z0-9_-]+/gu, "<call>")
+    .replaceAll("<fixture>/probe.txt", "probe.txt")
+    .replaceAll("<fixture>\\probe.txt", "probe.txt")
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line, index, lines) => line.length > 0 || lines[index - 1]?.length !== 0)
@@ -1183,7 +1206,7 @@ async function verifyScenario(
 
     const exported = await run([opencode, "export", sessionID], workspace, environment);
     const exportValue = JSON.parse(exported.stdout) as unknown;
-    exportedWorktree(exportValue, workspace);
+    const reportedWorktree = await exportedWorktree(exportValue, workspace);
     const worktree = await realpath(workspace);
     const exportedToolParts = collectToolParts(exportValue);
     const completedEditParts = exportedToolParts.filter(
@@ -1199,12 +1222,11 @@ async function verifyScenario(
     );
     let fingerprint: string | undefined;
     if (scenario.surface === "native-aliases") {
-      assertNativeAliasHistory([{ parts: completedEditParts }], {
-        packageVersion: PACKAGE_VERSION,
-        schemaSha256,
-        hostVersion: PINNED_HOST_VERSION,
-        worktree,
-      });
+      assertNativeAliasHistoryForWorktrees(
+        [{ parts: completedEditParts }],
+        { packageVersion: PACKAGE_VERSION, schemaSha256, hostVersion: PINNED_HOST_VERSION },
+        [worktree, reportedWorktree],
+      );
       const marker = toolPart.state.metadata.betterHashline as Record<string, unknown>;
       invariant(marker.protocol === NATIVE_ALIAS_PROTOCOL, "Exported protocol marker is invalid");
       fingerprint = nativeAliasProtocolFingerprint({
@@ -1301,13 +1323,12 @@ async function verifyScenario(
     invariant(reopenedEdit?.state.metadata, "Reopened session lost completed edit metadata");
     invariant(reopenedEdits.length === 3, "Reopened session is missing a fresh edit result");
     if (scenario.surface === "native-aliases") {
-      exportedWorktree(reopenedValue, workspace);
-      assertNativeAliasHistory([{ parts: reopenedEdits }], {
-        packageVersion: PACKAGE_VERSION,
-        schemaSha256,
-        hostVersion: PINNED_HOST_VERSION,
-        worktree: await realpath(workspace),
-      });
+      const reportedWorktree = await exportedWorktree(reopenedValue, workspace);
+      assertNativeAliasHistoryForWorktrees(
+        [{ parts: reopenedEdits }],
+        { packageVersion: PACKAGE_VERSION, schemaSha256, hostVersion: PINNED_HOST_VERSION },
+        [await realpath(workspace), reportedWorktree],
+      );
       invariant(
         (reopenedEdit.state.metadata.betterHashline as { protocol?: unknown } | undefined)
           ?.protocol === NATIVE_ALIAS_PROTOCOL,

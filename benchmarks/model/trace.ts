@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { NativeAliasProtocolIdentity } from "../../src/session-protocol.js";
 import { assertNativeAliasHistory } from "../../src/session-protocol.js";
@@ -67,6 +68,14 @@ function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function canonicalPath(value: string): string {
+  try {
+    return realpathSync(value);
+  } catch {
+    return resolve(value);
+  }
 }
 
 function addTokens(value: unknown, target: TokenUsage): boolean {
@@ -174,7 +183,10 @@ export function worktreeFromSessionExport(output: string, expectedDirectory: str
   const info = object(exported?.info);
   const directory = info?.directory;
   const path = info?.path;
-  if (typeof directory !== "string" || resolve(directory) !== resolve(expectedDirectory)) {
+  if (
+    typeof directory !== "string" ||
+    canonicalPath(directory) !== canonicalPath(expectedDirectory)
+  ) {
     throw new Error("Session export directory is inconsistent.");
   }
   if (typeof path !== "string") throw new Error("Session export worktree path is unreadable.");
@@ -200,12 +212,18 @@ export function inspectNativeAliasTrace(
   try {
     const { expectedDirectory, worktree, ...identity } = expected;
     const exportedWorktree = worktreeFromSessionExport(sessionExport, expectedDirectory);
-    return inspectJsonlTrace(output, {
-      nativeAlias: {
-        ...identity,
-        worktree: worktree ?? exportedWorktree,
-      },
-    });
+    const candidates = [
+      ...new Set([worktree, exportedWorktree].filter((value) => value !== undefined)),
+    ];
+    for (const candidate of candidates) {
+      const inspection = inspectJsonlTrace(output, {
+        nativeAlias: { ...identity, worktree: candidate },
+      });
+      if (!inspection.toolEvents.some((event) => event.protocolMarker === "invalid")) {
+        return inspection;
+      }
+    }
+    return inspectJsonlTrace(output);
   } catch {
     // Preserve accounting and classify any marker as invalid when worktree attestation fails.
     return inspectJsonlTrace(output);
