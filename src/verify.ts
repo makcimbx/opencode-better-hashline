@@ -16,7 +16,7 @@ import { assertNativeAliasHistory } from "./session-protocol.js";
 import { PACKAGE_VERSION } from "./version.js";
 
 const PINNED_HOST_VERSION = "1.18.3";
-const COMMAND_TIMEOUT_MS = 120_000;
+const COMMAND_TIMEOUT_MS = process.platform === "win32" ? 240_000 : 120_000;
 const INITIAL_BYTES = "alpha\nbeta\ngamma\n";
 const FINAL_BYTES = "alpha\nBETA\ngamma\n";
 const CONTINUED_BYTES = "alpha\nGAMMA\ngamma\n";
