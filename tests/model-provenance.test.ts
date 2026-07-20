@@ -399,7 +399,8 @@ describe("effective tool provenance", () => {
 
     const before = await deriveEffectiveToolIdentities(options);
     expect(before.bun).toMatchObject({ version: "1.3.14", revision: "1.3.14+fixture" });
-    expect(before.npm.discoveryWrapper.path).toBe(canonical.npmWrapper);
+    expect(before.npm.discoveryWrapper.path).toBe(npmWrapperPath);
+    expect(before.npm.discoveryWrapper.realPath).toBe(canonical.npmWrapper);
     expect(before.npm.node).toMatchObject({ version: "v24.0.0" });
     expect(before.npm.cli).toMatchObject({
       path: canonical.npmCli,

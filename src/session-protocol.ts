@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
-import { realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fail } from "./errors.js";
 import { exactRelativePath } from "./path-identity.js";
 import {
@@ -381,18 +381,24 @@ function assertAliasInput(
     rejectHistory(`Completed historical ${toolName} input is unreadable.`);
   }
   if (directory && canonicalPath) {
-    let inputPath: string;
+    let pathMatches = false;
     const requestedPath = resolve(directory, input.filePath);
     try {
-      inputPath = realpathSync(requestedPath);
+      pathMatches = samePath(realpathSync(requestedPath), canonicalPath);
     } catch {
-      try {
-        inputPath = join(realpathSync(dirname(requestedPath)), basename(requestedPath));
-      } catch {
-        inputPath = requestedPath;
+      pathMatches = samePath(requestedPath, canonicalPath);
+      if (!pathMatches) {
+        try {
+          const requestedParent = statSync(realpathSync(dirname(requestedPath)));
+          const canonicalParent = statSync(realpathSync(dirname(canonicalPath)));
+          pathMatches =
+            basename(requestedPath) === basename(canonicalPath) &&
+            requestedParent.dev === canonicalParent.dev &&
+            requestedParent.ino === canonicalParent.ino;
+        } catch {}
       }
     }
-    if (!samePath(inputPath, canonicalPath)) {
+    if (!pathMatches) {
       rejectHistory(`Completed historical ${toolName} input path is inconsistent.`);
     }
   }

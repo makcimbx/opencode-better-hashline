@@ -33,7 +33,7 @@ function parseLocator(value: unknown): string[] {
   const segments = value.split("/");
   if (
     segments.some((segment) => !segment || segment === "." || segment === "..") ||
-    (process.platform === "win32" && segments.some((segment) => segment.includes(":")))
+    (process.platform === "win32" && value.includes(":"))
   ) {
     throw new Error("Session export worktree locator is unsafe.");
   }
