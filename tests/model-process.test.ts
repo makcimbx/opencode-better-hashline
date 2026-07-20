@@ -64,13 +64,9 @@ describe("bounded model process", () => {
     expect(result.timedOut).toBe(false);
   });
 
-  test("reports overflow even when the child exits immediately", async () => {
+  test("reports stdout overflow even when the child exits immediately", async () => {
     const result = await captureBoundedProcess({
-      command: [
-        process.execPath,
-        "-e",
-        'process.stdout.write("o".repeat(4096));process.stderr.write("e".repeat(4096))',
-      ],
+      command: [process.execPath, "-e", 'process.stdout.write("o".repeat(4096))'],
       cwd: process.cwd(),
       env: { ...process.env },
       timeoutMs: 10_000,
@@ -79,8 +75,20 @@ describe("bounded model process", () => {
     });
 
     expect(result.stdoutOverflow).toBe(true);
-    expect(result.stderrOverflow).toBe(true);
     expect(Buffer.byteLength(result.stdout)).toBe(128);
+  });
+
+  test("reports stderr overflow even when the child exits immediately", async () => {
+    const result = await captureBoundedProcess({
+      command: [process.execPath, "-e", 'process.stderr.write("e".repeat(4096))'],
+      cwd: process.cwd(),
+      env: { ...process.env },
+      timeoutMs: 10_000,
+      stdoutLimit: 128,
+      stderrLimit: 128,
+    });
+
+    expect(result.stderrOverflow).toBe(true);
     expect(Buffer.byteLength(result.stderr)).toBe(128);
   });
 
