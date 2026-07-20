@@ -955,7 +955,7 @@ async function verifyScenario(
         ...config,
         permission: {
           ...config.permission,
-          edit: { "*": "allow", "**/probe.txt": "deny" },
+          edit: { "*": "allow", "**/probe.txt": "deny", "probe.txt": "deny" },
         },
       });
       const pathDeny = await run(
