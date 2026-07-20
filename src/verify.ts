@@ -576,7 +576,7 @@ async function verifyScenario(
         if (body.model === "retry-scripted") {
           return Response.json(
             { error: { message: "Deterministic retry guard verification" } },
-            { status: 429, headers: { "retry-after": "0" } },
+            { status: 429, headers: { "retry-after": "120" } },
           );
         }
         const serialized = JSON.stringify(body.messages ?? []);
