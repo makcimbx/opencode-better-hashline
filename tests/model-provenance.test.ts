@@ -122,6 +122,23 @@ describe("package provenance", () => {
     );
   });
 
+  test("attests installed package metadata in bounded Windows batches", async () => {
+    if (process.platform !== "win32") return;
+    const packageRoot = join(root, "batched-package");
+    await mkdir(packageRoot);
+    const entries = Array.from({ length: 65 }, (_, index) => ({
+      path: `package/file-${index}.txt`,
+      body: `${index}\n`,
+    }));
+    await Promise.all(
+      entries.map((entry, index) => writeFile(join(packageRoot, `file-${index}.txt`), entry.body)),
+    );
+
+    expect(await deriveInstalledPackageManifest(packageRoot)).toEqual(
+      deriveNpmTarballManifest(npmTgz(entries)),
+    );
+  });
+
   test("reports missing, extra, and content-changed files exactly", async () => {
     const expected = deriveNpmTarballManifest(
       npmTgz([

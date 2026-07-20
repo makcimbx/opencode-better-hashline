@@ -14,7 +14,7 @@ export async function readWindowsPathMetadata(
     "$result += [pscustomobject]@{ path = $item; reparse = (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0); streams = $streams } }; ConvertTo-Json -Compress -Depth 3 -InputObject @($result)";
   const captured = await captureBoundedProcess({
     command: [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-    cwd: paths[0] ?? systemRoot,
+    cwd: systemRoot,
     env: { ...process.env, [environmentVariable]: JSON.stringify(paths) },
     timeoutMs: 30_000,
     stdoutLimit: 4 * 1024 * 1024,
