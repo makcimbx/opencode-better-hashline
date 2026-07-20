@@ -435,7 +435,7 @@ describe("native alias session protocol", () => {
       const requestedPath = join(linkedDirectory, "file.txt");
       await writeFile(requestedPath, "old\n");
       const historicalCanonicalPath = await realpath(requestedPath);
-      const localIdentity = { ...identity, worktree: fixture };
+      const localIdentity = { ...identity, worktree: await realpath(fixture) };
       const metadata = buildNativeAliasMetadata({
         surface: "edit",
         canonicalPath: historicalCanonicalPath,

@@ -346,33 +346,17 @@ async function assertWindowsPackageEntries(
 ): Promise<void> {
   if (process.platform !== "win32") return;
   const variable = "BETTER_HASHLINE_PACKAGE_PATHS";
-  const script =
-    `$ErrorActionPreference = 'Stop'; $items = ConvertFrom-Json -InputObject $env:${variable}; ` +
-    "$result = @(); foreach ($item in $items) { $entry = Get-Item -LiteralPath $item -Force -ErrorAction Stop; $streams = @(Get-Item -LiteralPath $item -Stream * -ErrorAction Stop | ForEach-Object { $_.Stream }); " +
-    "$result += [pscustomobject]@{ path = $item; reparse = (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0); streams = $streams } }; ConvertTo-Json -Compress -Depth 3 -InputObject @($result)";
+  const { readWindowsPathMetadata } = await import("../../src/windows-metadata.js");
   for (let offset = 0; offset < entries.length; offset += 64) {
     const batch = entries.slice(offset, offset + 64);
-    const result = await captureBoundedProcess({
-      command: ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-      cwd: process.cwd(),
-      env: { [variable]: JSON.stringify(batch.map((entry) => entry.absolute)) },
-      timeoutMs: 30_000,
-      stdoutLimit: 4 * 1024 * 1024,
-      stderrLimit: 256 * 1024,
-    });
-    if (
-      result.exitCode !== 0 ||
-      result.timedOut ||
-      result.stdoutOverflow ||
-      result.stderrOverflow
-    ) {
-      throw new Error("Unable to attest installed package NTFS metadata");
-    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(result.stdout);
+      parsed = await readWindowsPathMetadata(
+        batch.map((entry) => entry.absolute),
+        variable,
+      );
     } catch {
-      throw new Error("Installed package NTFS attestation returned invalid JSON");
+      throw new Error("Unable to attest installed package NTFS metadata");
     }
     if (!Array.isArray(parsed) || parsed.length !== batch.length) {
       throw new Error("Installed package NTFS attestation returned an invalid entry count");
@@ -411,10 +395,10 @@ export async function deriveInstalledPackageManifest(
     throw new Error("Installed package root is not a plain directory");
   }
   const root = await realpath(directory);
-  if (root !== resolve(directory)) {
-    throw new Error("Installed package root must not traverse links or junctions");
-  }
   const rootStats = await lstat(root);
+  if (!sameFile(suppliedRoot, rootStats)) {
+    throw new Error("Installed package root identity is ambiguous");
+  }
   const entries: PackageManifest = [];
   const observedEntries: Array<{ absolute: string; path: string; directory: boolean }> = [
     { absolute: root, path: ".", directory: true },
@@ -461,6 +445,9 @@ export async function deriveInstalledPackageManifest(
 
   await visit(root, [], rootStats);
   await assertWindowsPackageEntries(observedEntries);
+  if ((await realpath(directory)) !== root || !sameFile(await lstat(directory), rootStats)) {
+    throw new Error("Installed package root identity changed");
+  }
   return canonicalManifest(entries);
 }
 
@@ -843,10 +830,16 @@ export async function deriveOpenCodeIdentity(
     throw new Error("OpenCode package root is not a plain directory");
   }
   const packageDirectory = await realpath(suppliedPackageDirectory);
-  if (packageDirectory !== suppliedPackageDirectory) {
-    throw new Error("OpenCode package root must not traverse links or junctions");
+  if (!sameFile(packageStats, await lstat(packageDirectory))) {
+    throw new Error("OpenCode package root identity is ambiguous");
   }
   const manifest = await deriveInstalledPackageManifest(packageDirectory, { allowHardlinks: true });
+  if (
+    (await realpath(suppliedPackageDirectory)) !== packageDirectory ||
+    !sameFile(await lstat(suppliedPackageDirectory), packageStats)
+  ) {
+    throw new Error("OpenCode package root identity changed");
+  }
   const packageJson = parsePackageJson(
     await readStableRegularFile(
       join(packageDirectory, "package.json"),

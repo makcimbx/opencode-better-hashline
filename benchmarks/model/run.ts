@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
   access,
   chmod,
@@ -6,6 +7,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rm,
@@ -192,16 +194,37 @@ async function readBoundedRegularFile(
   if (before.isSymbolicLink() || !before.isFile() || before.size > maximumBytes) {
     throw new Error(`${label} must be a bounded regular file.`);
   }
-  if ((await realpath(resolved)) !== resolved) {
-    throw new Error(`${label} must not traverse links or case-distinct paths.`);
+  const canonical = await realpath(resolved);
+  const canonicalBefore = await lstat(canonical);
+  if (canonicalBefore.dev !== before.dev || canonicalBefore.ino !== before.ino) {
+    throw new Error(`${label} identity is ambiguous.`);
   }
-  const bytes = new Uint8Array(await readFile(resolved));
+  const handle = await open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  let bytes: Uint8Array;
+  try {
+    const handleBefore = await handle.stat();
+    if (handleBefore.dev !== before.dev || handleBefore.ino !== before.ino) {
+      throw new Error(`${label} changed before it was read.`);
+    }
+    bytes = new Uint8Array(await handle.readFile());
+    const handleAfter = await handle.stat();
+    if (
+      handleAfter.dev !== handleBefore.dev ||
+      handleAfter.ino !== handleBefore.ino ||
+      handleAfter.size !== bytes.byteLength
+    ) {
+      throw new Error(`${label} changed while it was read.`);
+    }
+  } finally {
+    await handle.close();
+  }
   const after = await lstat(resolved);
   if (
     after.isSymbolicLink() ||
     !after.isFile() ||
     after.dev !== before.dev ||
     after.ino !== before.ino ||
+    (await realpath(resolved)) !== canonical ||
     after.size !== bytes.byteLength ||
     after.size > maximumBytes
   ) {
@@ -1133,10 +1156,11 @@ if (
     pilotOutputRelative === ".." ||
     pilotOutputRelative.startsWith("../") ||
     pilotOutputRelative.startsWith("..\\") ||
-    isAbsolute(pilotOutputRelative))
+    isAbsolute(pilotOutputRelative) ||
+    /[\\/]/u.test(pilotOutputRelative))
 ) {
   throw new Error(
-    `--native-alias-pilot output must be a new child of benchmarks/results/${preflight ? "local" : "model"}/.`,
+    `--native-alias-pilot output must be a new direct child of benchmarks/results/${preflight ? "local" : "model"}/.`,
   );
 }
 const modelMultiplier = nativeAliasPilot ? scheduledModels.length : 1;

@@ -46,12 +46,13 @@ async function allWithin<T>(promise: Promise<T>, milliseconds: number): Promise<
 async function terminateProcessTree(
   processHandle: ReturnType<typeof Bun.spawn>,
   platform: NodeJS.Platform,
+  windowsTaskkillCommand?: readonly string[],
 ): Promise<void> {
   if (platform === "win32") {
-    const killer = Bun.spawn(["taskkill", "/PID", String(processHandle.pid), "/T", "/F"], {
-      stdout: "ignore",
-      stderr: "ignore",
-    });
+    const killer = Bun.spawn(
+      [...(windowsTaskkillCommand ?? ["taskkill"]), "/PID", String(processHandle.pid), "/T", "/F"],
+      { stdout: "ignore", stderr: "ignore" },
+    );
     if (await exitsWithin(killer, 5_000)) {
       await killer.exited;
     } else {
@@ -116,6 +117,7 @@ export async function captureBoundedProcess(input: {
   stdoutLimit: number;
   stderrLimit: number;
   platform?: NodeJS.Platform;
+  windowsTaskkillCommand?: readonly string[];
 }): Promise<BoundedProcessResult> {
   const platform = input.platform ?? process.platform;
   const processHandle = Bun.spawn(input.command, {
@@ -127,7 +129,7 @@ export async function captureBoundedProcess(input: {
   });
   let termination: Promise<void> | undefined;
   const terminate = () => {
-    termination ??= terminateProcessTree(processHandle, platform);
+    termination ??= terminateProcessTree(processHandle, platform, input.windowsTaskkillCommand);
   };
   const stdoutPromise = readBounded(processHandle.stdout, input.stdoutLimit, terminate);
   const stderrPromise = readBounded(processHandle.stderr, input.stderrLimit, terminate);

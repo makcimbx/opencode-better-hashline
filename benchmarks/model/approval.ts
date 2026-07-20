@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import type { Stats } from "node:fs";
 import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, resolve } from "node:path";
@@ -249,6 +250,10 @@ function isCommit(value: unknown): value is string {
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function sameFile(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function committedAnchorEncoding(value: unknown): string {
@@ -535,8 +540,13 @@ async function validateBrokerPath(
     throw new Error("External reservation broker must be a standalone regular file.");
   }
   const canonicalBroker = await realpath(resolvedBroker);
-  if (canonicalBroker !== resolvedBroker) {
-    throw new Error("External reservation broker path must not traverse links or junctions.");
+  const canonicalStatus = await lstat(canonicalBroker);
+  if (
+    canonicalStatus.isSymbolicLink() ||
+    !canonicalStatus.isFile() ||
+    !sameFile(brokerStatus, canonicalStatus)
+  ) {
+    throw new Error("External reservation broker identity is ambiguous.");
   }
   for (const root of excludedRoots) {
     const canonicalRoot = await realpath(root);
@@ -549,6 +559,11 @@ async function validateBrokerPath(
     }
   }
   const bytes = new Uint8Array(await readFile(canonicalBroker));
+  const finalCanonicalBroker = await realpath(resolvedBroker);
+  const finalBrokerStatus = await lstat(finalCanonicalBroker);
+  if (finalCanonicalBroker !== canonicalBroker || !sameFile(canonicalStatus, finalBrokerStatus)) {
+    throw new Error("External reservation broker changed while it was read.");
+  }
   if (sha256(bytes) !== expectedSha256) {
     throw new Error("External reservation broker hash does not match the approved bundle.");
   }

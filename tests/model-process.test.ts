@@ -99,8 +99,8 @@ describe("bounded model process", () => {
     expect(performance.now() - started).toBeLessThan(10_000);
   });
 
-  test("uses bounded POSIX process-group termination", async () => {
-    if (process.platform !== "win32") return;
+  test("uses the alternate platform's bounded termination path", async () => {
+    const useWindowsPath = process.platform !== "win32";
     const result = await captureBoundedProcess({
       command: [
         process.execPath,
@@ -112,7 +112,16 @@ describe("bounded model process", () => {
       timeoutMs: 10_000,
       stdoutLimit: 128,
       stderrLimit: 128,
-      platform: "linux",
+      platform: useWindowsPath ? "win32" : "linux",
+      ...(useWindowsPath
+        ? {
+            windowsTaskkillCommand: [
+              process.execPath,
+              "-e",
+              'const i=process.argv.indexOf("/PID");process.kill(Number(process.argv[i+1]),"SIGKILL")',
+            ],
+          }
+        : {}),
     });
 
     expect(result.stdoutOverflow).toBe(true);

@@ -2,7 +2,6 @@ import { constants } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { exactRelativePath } from "./path-identity.js";
-import { captureBoundedProcess } from "./process-capture.js";
 
 export interface ExactTreeExpectation {
   expectedFiles: Record<string, string>;
@@ -31,38 +30,18 @@ async function windowsStreamMismatches(
   paths: Array<{ absolute: string; display: string; directory: boolean }>,
 ): Promise<string[]> {
   if (process.platform !== "win32") return [];
-  const systemRoot = process.env.SystemRoot;
-  if (!systemRoot) return [".: unable to attest NTFS alternate data streams"];
-  const executable = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const variable = "BETTER_HASHLINE_ADS_PATHS";
-  const script =
-    `$ErrorActionPreference = 'Stop'; $items = ConvertFrom-Json -InputObject $env:${variable}; ` +
-    "$result = @(); foreach ($item in $items) { $entry = Get-Item -LiteralPath $item -Force -ErrorAction Stop; $streams = @(Get-Item -LiteralPath $item -Stream * -ErrorAction Stop | ForEach-Object { $_.Stream }); " +
-    "$result += [pscustomobject]@{ path = $item; reparse = (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0); streams = $streams } }; ConvertTo-Json -Compress -Depth 3 -InputObject @($result)";
-  let captured: Awaited<ReturnType<typeof captureBoundedProcess>>;
+  let parsed: unknown;
   try {
-    captured = await captureBoundedProcess({
-      command: [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-      cwd: paths[0]?.absolute ?? systemRoot,
-      env: { ...process.env, [variable]: JSON.stringify(paths.map((path) => path.absolute)) },
-      timeoutMs: 30_000,
-      stdoutLimit: 256 * 1024,
-      stderrLimit: 64 * 1024,
-    });
+    const { readWindowsPathMetadata } = await import("./windows-metadata.js");
+    parsed = await readWindowsPathMetadata(
+      paths.map((path) => path.absolute),
+      variable,
+    );
   } catch {
     return [".: unable to attest NTFS alternate data streams"];
   }
-  if (
-    captured.exitCode !== 0 ||
-    captured.timedOut ||
-    captured.stdoutOverflow ||
-    captured.stderrOverflow ||
-    captured.stderr.length > 0
-  ) {
-    return [".: unable to attest NTFS alternate data streams"];
-  }
   try {
-    const parsed = JSON.parse(captured.stdout.replace(/^\uFEFF/, "")) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== paths.length) throw new Error("shape");
     const mismatches: string[] = [];
     for (let index = 0; index < paths.length; index += 1) {

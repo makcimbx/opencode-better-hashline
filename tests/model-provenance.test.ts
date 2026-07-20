@@ -108,6 +108,20 @@ describe("package provenance", () => {
     expect(packageTreeSha256([...actual].reverse())).toBe(packageTreeSha256(expected));
   });
 
+  test("accepts a plain package reached through a canonicalized ancestor", async () => {
+    const actualParent = join(root, "actual-parent");
+    const actualRoot = join(actualParent, "package");
+    const aliasParent = join(root, "alias-parent");
+    const aliasRoot = join(aliasParent, "package");
+    await mkdir(actualRoot, { recursive: true });
+    await writeFile(join(actualRoot, "a.txt"), "alpha\n");
+    await symlink(actualParent, aliasParent, "junction");
+
+    expect(await deriveInstalledPackageManifest(aliasRoot)).toEqual(
+      deriveNpmTarballManifest(npmTgz([{ path: "package/a.txt", body: "alpha\n" }])),
+    );
+  });
+
   test("reports missing, extra, and content-changed files exactly", async () => {
     const expected = deriveNpmTarballManifest(
       npmTgz([
@@ -380,6 +394,12 @@ describe("effective tool provenance", () => {
       observedVersion: "1.18.3",
     });
     expect(() => assertEffectiveToolIdentitiesUnchanged(before, before)).not.toThrow();
+    await expect(
+      deriveEffectiveToolIdentities({
+        ...options,
+        run: (command, cwd) => (command[0] === canonical.openCode ? "1.18.4\n" : run(command, cwd)),
+      }),
+    ).rejects.toThrow("does not match package version");
 
     for (const mutation of [
       { path: bunPath, tool: "bun", bytes: "bun-binary-v2" },

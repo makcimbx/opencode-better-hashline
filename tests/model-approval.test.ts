@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -154,9 +154,13 @@ function fakeGit(options: FakeGitOptions): GitRunner {
 
 async function fixture() {
   const repository = await mkdtemp(join(tmpdir(), "better-hashline-approval-repository-"));
-  const externalRoot = await mkdtemp(join(tmpdir(), "better-hashline-approval-external-"));
-  temporaryRoots.push(repository, externalRoot);
-  const brokerPath = join(externalRoot, "reservation-broker.bin");
+  const externalParent = await mkdtemp(join(tmpdir(), "better-hashline-approval-external-"));
+  const externalRoot = join(externalParent, "actual");
+  const externalAlias = join(externalParent, "alias");
+  await mkdir(externalRoot);
+  await symlink(externalRoot, externalAlias, "junction");
+  temporaryRoots.push(repository, externalParent);
+  const brokerPath = join(externalAlias, "reservation-broker.bin");
   const brokerBytes = Buffer.from("hash-approved standalone broker", "utf8");
   await writeFile(brokerPath, brokerBytes);
   const bundle = externalBundle(digest(brokerBytes));
