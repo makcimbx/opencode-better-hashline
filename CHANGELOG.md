@@ -12,6 +12,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Add an explicit experimental `native-aliases` tool surface for exact OpenCode 1.18.3, with bounded host detection, session protocol binding, native renderer metadata, and fail-closed diagnostics.
 - Add a credential-free packaged verifier covering unique, non-GPT `edit`, and GPT-like `apply_patch` routes through stock OpenCode, including malformed calls, hooks, continuation, export/import, and renderer evidence.
 - Add deterministic collision fixtures and a separate `native-aliases-v1` paired-model adapter set with protocol-marker and malformed-retry trace metrics.
+- Record the failed-closed native-alias pilot v1 incident; no native-alias release or model-performance claim is made.
 
 ### Changed
 

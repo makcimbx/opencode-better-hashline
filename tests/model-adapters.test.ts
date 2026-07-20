@@ -4,7 +4,7 @@ import {
   adapterPluginConfig,
   adapterSetManifest,
   modelAdapterSets,
-  nativeAliasPilotV1,
+  nativeAliasPilotV2,
   verificationSurfaceForAdapterSet,
 } from "../benchmarks/model/adapters.js";
 import { modelTaskSets } from "../benchmarks/model/tasks.js";
@@ -34,17 +34,18 @@ describe("model benchmark adapters", () => {
     });
   });
 
-  test("freezes the approved 96-session native alias pilot", () => {
-    expect(nativeAliasPilotV1).toEqual({
-      id: "native-alias-pilot-v1",
+  test("freezes the unapproved 96-session native alias pilot proposal", () => {
+    expect(nativeAliasPilotV2).toEqual({
+      id: "native-alias-pilot-v2",
+      paidExecutionApproved: false,
       taskSet: "baseline-v1",
       adapterSet: "native-aliases-v1",
       repeats: 1,
       maxAgentSteps: 12,
-      approvedSessions: 96,
-      approvedMaxRequests: 1152,
-      approvedMaxCostUsd: 4,
-      approvedMaxCostPerModelUsd: 1,
+      sessionLimit: 96,
+      requestLimit: 1152,
+      totalCostLimitUsd: 4,
+      perModelCostLimitUsd: 1,
       taskManifestSha256: "8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a",
       adapterManifestSha256: "cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8",
       scheduleManifestSha256: "488392f98a0a130642f1a171c8df315ca1a54014ec750ad898c62dbc61b0a75c",
@@ -61,9 +62,9 @@ describe("model benchmark adapters", () => {
         },
       ],
     });
-    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV1.taskManifestSha256);
+    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV2.taskManifestSha256);
     expect(sha256(adapterSetManifest("native-aliases-v1"))).toBe(
-      nativeAliasPilotV1.adapterManifestSha256,
+      nativeAliasPilotV2.adapterManifestSha256,
     );
   });
 });

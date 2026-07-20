@@ -217,6 +217,10 @@ native structured diff from Better Hashline metadata. The unique `hashline` surf
 production recommendation until the paid pilot and release gates in the
 [preview plan](docs/native-alias-preview-plan.md) pass.
 
+Native-alias pilot v1 stopped after one session because of a benchmark-oracle worktree mismatch. It
+produced no release or model-comparison evidence. Native aliases therefore remain unreleased, and
+version publication is blocked pending a separately approved corrected pilot.
+
 ## Why No Per-Line Hash?
 
 A short per-line hash can help a model copy an address, but it cannot safely establish freshness:

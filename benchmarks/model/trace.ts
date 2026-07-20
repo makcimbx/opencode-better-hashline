@@ -36,7 +36,7 @@ export interface TraceInspection {
 }
 
 export interface TraceInspectionOptions {
-  nativeAlias?: Omit<NativeAliasProtocolIdentity, "worktree"> & { allowedPathRoot: string };
+  nativeAlias?: NativeAliasProtocolIdentity & { allowedPathRoot: string };
 }
 
 export interface SessionExportInspection {
@@ -141,8 +141,13 @@ function protocolMarker(
     }
     const confined = relative(resolve(expected.allowedPathRoot), resolve(canonicalPath));
     if (confined.startsWith("..") || isAbsolute(confined)) return "invalid";
-    const expectedShownPath = confined.replaceAll("\\", "/");
+    const expectedShownPath = relative(
+      resolve(expected.worktree),
+      resolve(canonicalPath),
+    ).replaceAll("\\", "/");
+    if (expectedShownPath.startsWith("../") || isAbsolute(expectedShownPath)) return "invalid";
     if (shownPath !== expectedShownPath) return "invalid";
+    const { allowedPathRoot: _allowedPathRoot, ...identity } = expected;
     assertNativeAliasHistory(
       [
         {
@@ -156,11 +161,52 @@ function protocolMarker(
           ],
         },
       ],
-      { ...expected, worktree: resolve(expected.allowedPathRoot) },
+      identity,
     );
     return "valid";
   } catch {
     return "invalid";
+  }
+}
+
+export function worktreeFromSessionExport(output: string, expectedDirectory: string): string {
+  const exported = object(JSON.parse(output));
+  const info = object(exported?.info);
+  const directory = info?.directory;
+  const path = info?.path;
+  if (typeof directory !== "string" || resolve(directory) !== resolve(expectedDirectory)) {
+    throw new Error("Session export directory is inconsistent.");
+  }
+  if (typeof path !== "string") throw new Error("Session export worktree path is unreadable.");
+  const segments = path.split(/[\\/]/u).filter(Boolean);
+  if (segments.some((segment) => segment === "." || segment === ".." || segment.includes(":"))) {
+    throw new Error("Session export worktree path is unsafe.");
+  }
+  const worktree = resolve(directory, ...segments.map(() => ".."));
+  if (relative(worktree, directory).replaceAll("\\", "/") !== segments.join("/")) {
+    throw new Error("Session export worktree path is inconsistent.");
+  }
+  return worktree;
+}
+
+export function inspectNativeAliasTrace(
+  output: string,
+  sessionExport: string,
+  expected: Omit<NonNullable<TraceInspectionOptions["nativeAlias"]>, "worktree"> & {
+    expectedDirectory: string;
+  },
+): TraceInspection {
+  try {
+    const { expectedDirectory, ...identity } = expected;
+    return inspectJsonlTrace(output, {
+      nativeAlias: {
+        ...identity,
+        worktree: worktreeFromSessionExport(sessionExport, expectedDirectory),
+      },
+    });
+  } catch {
+    // Preserve accounting and classify any marker as invalid when worktree attestation fails.
+    return inspectJsonlTrace(output);
   }
 }
 

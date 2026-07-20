@@ -2,9 +2,9 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Phases 0-6 implemented and model-free gates passed; 96-session paid pilot pending |
-| Plan version | 1.0 |
-| Plan date | 2026-07-19 |
+| Status | Pilot v1 stopped after session 1; release no-go; corrected pilot requires fresh approval |
+| Plan version | 1.1 |
+| Plan date | 2026-07-20 |
 | Package baseline | `opencode-better-hashline@0.2.1` |
 | Source baseline | `da94bef57bf6319779f024d446b0c26bf62918ba` |
 | Initial host target | OpenCode `1.18.3` |
@@ -439,14 +439,20 @@ No error may cause automatic execution by a built-in tool or silent surface fall
 
 ## Implementation Phases
 
-Phases 0-6 were implemented on the feature branch on 2026-07-20. The default production registry
+Phases 0-5 and the Phase 6 harness were implemented on the feature branch on 2026-07-20. The Phase 6
+behavioral gate is incomplete: pilot v1 failed closed and corrected v2 is unapproved and hard-disabled.
+The default production registry
 remains exactly `hashline_read`, `hashline_edit`, and `hashline_write`. The explicit alias preview,
 deterministic matrix, collision fixtures, credential-free packed verifier, and model adapter are
 implemented. Packed verification covers resumed, forked, and imported edits, sanitized export, frozen
 stock terminal renderer output, pinned GPT-4/GPT-OSS/GPT-5 routing, wildcard/path edit permissions,
-and rollback to unique IDs. No paid model call has been made. The
-96-session pilot is approved with the bounds below; Phase 7 and npm release remain blocked on its
-execution and go/no-go review.
+and rollback to unique IDs. Pilot v1 started from commit `57376db02bdaa31667df4891ab582f4e089a74da`
+and stopped after session 1 as required by its protocol-integrity gate. The edit and exact-file
+outcome succeeded, but the benchmark oracle incorrectly compared OpenCode's drive-root worktree
+metadata with the non-VCS fixture root. The immutable sanitized incident record is
+[`2026-07-20-native-alias-pilot-v1-incident.json`](../benchmarks/results/2026-07-20-native-alias-pilot-v1-incident.json).
+Pilot v1 cannot be resumed or retried. Phase 7 and npm release are no-go; a corrected pilot requires
+a new ID, commit, runner hash, model-free preflight, and explicit approval.
 
 ### Phase 0: ADR and frozen contract
 
@@ -561,7 +567,8 @@ Add a separate benchmark adapter:
 better-hashline-native-aliases
 ```
 
-The first pilot compares unique and alias surfaces, not native OpenCode:
+Pilot v1 compared unique and alias surfaces, not native OpenCode. The corrected, unapproved v2
+manifest is hard-disabled and retains these proposed bounds:
 
 | Dimension | Value |
 | --- | --- |
@@ -580,12 +587,17 @@ The exact model IDs are `openai/gpt-5.6-luna` (`medium`), `openai/gpt-5.6-sol`
 models, variants, tasks, adapter order, 96 sessions, 1,152 requests, and the USD 4 stop threshold.
 The manifest pins task SHA-256 `8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a`
 and adapter-behavior SHA-256 `cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8`.
-Only the approved auth-file copy and a clean committed worktree are accepted; dirty overrides are
-forbidden. Paid execution also approves the exact committed HEAD and runner-source SHA-256, confines
+If v2 is separately approved, only the approved auth-file copy and a clean committed worktree are
+accepted; dirty overrides are forbidden. Paid execution also approves the exact committed HEAD and runner-source SHA-256, confines
 output to ignored model results, and snapshots authentication once before the first session. Provider
 retry status terminates the session before another request, every completed
 session is atomically journaled, and the first process, identity, protocol, request, cost, or exact-file
 failure stops the entire pilot without substitution or retry.
+
+The v2 oracle keeps exact-file confinement relative to the disposable fixture but validates renderer
+and protocol paths relative to the worktree reported by OpenCode's in-memory session export. Only a
+sanitized export is persisted. Pilot v2 is not approved for paid execution; its manifest sets
+`paidExecutionApproved:false`, and enabling it requires a separate reviewed approval commit.
 
 Pilot outcomes:
 
@@ -602,8 +614,12 @@ Pilot outcomes:
 The pilot is transport evidence only. It cannot establish superiority. It runs only after explicit
 user approval and all existing model/auth/cost gates in the model evaluation plan.
 
-Implementation status: the `native-aliases-v1` adapter set, marker/retry metrics, model-free dry run,
-and packed preflight are complete. The 96 paid sessions themselves remain intentionally unexecuted.
+Implementation status: the `native-aliases-v1` adapter set, marker/retry metrics, and model-free v2
+harness checks are complete. Any v2 dry run and packed preflight must be repeated from a future
+approval commit before paid execution. Pilot v1 executed one of 96 sessions and then stopped. It consumed
+four requests at USD 0 reported cost and produced no model-comparison result. The failure was a
+benchmark-oracle worktree mismatch, not a runtime, model, exact-file, or retry failure. Raw evidence
+remains ignored and unchanged; only the sanitized incident record is included in this review candidate.
 
 ### Phase 7: release decision
 

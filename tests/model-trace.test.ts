@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
-import { inspectJsonlTrace, inspectSessionExport } from "../benchmarks/model/trace.js";
+import { parse, relative, resolve } from "node:path";
+import {
+  inspectJsonlTrace,
+  inspectNativeAliasTrace,
+  inspectSessionExport,
+  worktreeFromSessionExport,
+} from "../benchmarks/model/trace.js";
 import { buildNativeAliasMetadata } from "../src/presentation.js";
 
 describe("model benchmark trace inspection", () => {
@@ -133,7 +138,9 @@ describe("model benchmark trace inspection", () => {
     ].join("\n");
 
     expect(
-      inspectJsonlTrace(output, { nativeAlias: { ...identity, allowedPathRoot } }).toolEvents,
+      inspectJsonlTrace(output, {
+        nativeAlias: { ...identity, allowedPathRoot, worktree: allowedPathRoot },
+      }).toolEvents,
     ).toEqual([
       {
         tool: "edit",
@@ -194,9 +201,144 @@ describe("model benchmark trace inspection", () => {
     });
 
     expect(
-      inspectJsonlTrace(output, { nativeAlias: { ...identity, allowedPathRoot } }).toolEvents[0]
-        ?.protocolMarker,
+      inspectJsonlTrace(output, {
+        nativeAlias: { ...identity, allowedPathRoot, worktree: allowedPathRoot },
+      }).toolEvents[0]?.protocolMarker,
     ).toBe("invalid");
+  });
+
+  test("separates drive-root worktree paths from fixture confinement", () => {
+    const worktree = parse(resolve(".")).root;
+    const allowedPathRoot = resolve(worktree, "Users", "runner", "Temp", "benchmark-fixture");
+    const canonicalPath = resolve(allowedPathRoot, "a.ts");
+    const shownPath = relative(worktree, canonicalPath).replaceAll("\\", "/");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const metadata = buildNativeAliasMetadata({
+      surface: "apply_patch",
+      canonicalPath,
+      relativePath: shownPath,
+      unifiedDiff: `--- ${shownPath}\tbefore\n+++ ${shownPath}\tafter\n@@ -1 +1 @@\n-a\n+b\n`,
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    const output = JSON.stringify({
+      type: "tool_use",
+      sessionID: "session",
+      part: {
+        sessionID: "session",
+        tool: "apply_patch",
+        callID: "call",
+        state: {
+          status: "completed",
+          input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+          metadata,
+        },
+      },
+    });
+
+    expect(
+      inspectJsonlTrace(output, {
+        nativeAlias: { ...identity, allowedPathRoot, worktree },
+      }).toolEvents[0]?.protocolMarker,
+    ).toBe("valid");
+    expect(
+      worktreeFromSessionExport(
+        JSON.stringify({
+          info: {
+            directory: allowedPathRoot,
+            path: relative(worktree, allowedPathRoot).replaceAll("\\", "/"),
+          },
+        }),
+        allowedPathRoot,
+      ),
+    ).toBe(worktree);
+  });
+
+  test("rejects paths outside the fixture even when they are inside the worktree", () => {
+    const worktree = parse(resolve(".")).root;
+    const allowedPathRoot = resolve(worktree, "Users", "runner", "fixture");
+    const canonicalPath = resolve(worktree, "Users", "runner", "outside", "a.ts");
+    const shownPath = relative(worktree, canonicalPath).replaceAll("\\", "/");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const metadata = buildNativeAliasMetadata({
+      surface: "apply_patch",
+      canonicalPath,
+      relativePath: shownPath,
+      unifiedDiff: `--- ${shownPath}\tbefore\n+++ ${shownPath}\tafter\n@@ -1 +1 @@\n-a\n+b\n`,
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    const output = JSON.stringify({
+      type: "tool_use",
+      sessionID: "session",
+      part: {
+        sessionID: "session",
+        tool: "apply_patch",
+        callID: "call",
+        state: {
+          status: "completed",
+          input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+          metadata,
+        },
+      },
+    });
+
+    expect(
+      inspectJsonlTrace(output, {
+        nativeAlias: { ...identity, allowedPathRoot, worktree },
+      }).toolEvents[0]?.protocolMarker,
+    ).toBe("invalid");
+  });
+
+  test("keeps trace accounting when exported worktree attestation fails", () => {
+    const allowedPathRoot = resolve("benchmark-fixture");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const metadata = buildNativeAliasMetadata({
+      surface: "edit",
+      canonicalPath: resolve(allowedPathRoot, "a.ts"),
+      relativePath: "a.ts",
+      unifiedDiff: "--- a.ts\tbefore\n+++ a.ts\tafter\n@@ -1 +1 @@\n-a\n+b\n",
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    const output = JSON.stringify({
+      type: "tool_use",
+      sessionID: "session",
+      part: {
+        sessionID: "session",
+        tool: "edit",
+        callID: "call",
+        state: {
+          status: "completed",
+          input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+          metadata,
+        },
+      },
+    });
+
+    const trace = inspectNativeAliasTrace(output, "not json", {
+      ...identity,
+      allowedPathRoot,
+      expectedDirectory: allowedPathRoot,
+    });
+    expect(trace.eventCount).toBe(1);
+    expect(trace.sessionIds).toEqual(["session"]);
+    expect(trace.toolEvents[0]?.protocolMarker).toBe("invalid");
   });
 
   test("counts malformed lines without treating unrelated objects as events", () => {

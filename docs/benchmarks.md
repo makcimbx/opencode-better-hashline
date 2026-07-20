@@ -181,14 +181,25 @@ The harness:
 
 The harness reports requested and observed identities separately. Reported usage covers the validated parent session and is not asserted to equal a provider invoice. Before publishing model claims, inspect all traces, redact secrets, report malformed calls/retries/tokens/cost with their stated scope, run enough paired tasks for the intended claim, and preregister the primary metric. The default 48-session pilot is useful for harness debugging, not a universal superiority claim.
 
-The native-alias release gate is one frozen 96-session pilot: 12 baseline tasks x 2 surfaces x four
-approved models x one repeat. It runs with `--native-alias-pilot`, an approved auth-file copy, exactly
-1,152 maximum requests, a USD 4 total reported-cost stop threshold, and a USD 1 threshold per model.
+The proposed native-alias release gate is one frozen 96-session pilot: 12 baseline tasks x 2 surfaces
+x four candidate models x one repeat. Its corrected v2 manifest is currently hard-disabled and
+unapproved. If a separate approval commit enables it, the run requires one approved auth-file copy,
+exactly 1,152 maximum requests, a USD 4 total reported-cost stop threshold, and a USD 1 threshold per model.
 Its task and adapter-behavior SHA-256 values are frozen in the manifest, and dirty source overrides are
 forbidden. The paid command must also approve the exact committed HEAD and runner-source SHA-256 from
 the dry run; output is confined to ignored model results and authentication is snapshotted once.
 Deterministic and packed evidence do not substitute for that paid gate, and no alias
 model-result claim exists until the complete journal is reviewed.
+
+Native-alias pilot v1 stopped after its first session because the benchmark oracle conflated the
+task fixture with OpenCode's worktree. The edit itself, model identity, transport, and exact files
+passed, but protocol-marker classification failed closed. The run is not release evidence and cannot
+be resumed or retried. See the
+[sanitized incident record](../benchmarks/results/2026-07-20-native-alias-pilot-v1-incident.json).
+A future corrected pilot requires a new immutable runner identity and explicit approval.
+The corrected v2 oracle obtains OpenCode's actual worktree from an unsanitized export held only in
+memory, while persisted evidence remains sanitized and canonical-path confinement remains tied to the
+task fixture. Pilot v2 has not been approved.
 
 ## Result Vocabulary
 

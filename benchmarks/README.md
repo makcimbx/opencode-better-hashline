@@ -34,8 +34,8 @@ Preflight performs builds, package installation, registry access when needed, Op
 
 `--adapter-set=native-aliases-v1` pairs the unique and experimental alias surfaces. Its preflight
 also runs the credential-free packed verifier through unique `hashline_edit`, non-GPT `edit`, and
-GPT-like `apply_patch`. The full preregistered alias pilot freezes all four approved models, one
-repeat, and 96 paid sessions behind `--native-alias-pilot`.
+GPT-like `apply_patch`. The corrected v2 proposal freezes four candidate models, one repeat, and 96
+sessions behind `--native-alias-pilot`, but paid v2 execution is currently hard-disabled.
 
 Paid execution requires the exact immutable session/request schedule, a reported-cost ceiling, cost
 acknowledgement, and exactly one authentication source:
@@ -60,20 +60,12 @@ bun run bench:model --execute --repeats=2 --approved-sessions=48 `
 
 Instead of an auth file, provider variables can be allowlisted explicitly with `--pass-env=KEY_ONE,KEY_TWO` or `BENCHMARK_PASS_ENV`. The runner refuses OpenCode, home, XDG, configuration, and temporary-directory passthrough variables.
 
-The native-alias pilot is stricter: it accepts only the approved auth-file copy and frozen manifest:
-
-```sh
-BENCHMARK_AUTH_FILE=/path/to/opencode-auth.json \
-BENCHMARK_ACK_COSTS=yes \
-bun run bench:model --native-alias-pilot --execute \
-  --approved-source-commit=<40-hex-HEAD> \
-  --approved-runner-sha256=<64-hex-from-dry-run> \
-  --approved-sessions=96 --approved-max-requests=1152 --approved-max-cost-usd=4
-```
-
-The dry run prints the exact runner and schedule SHA-256 values. Pilot output is restricted to a new
-child of ignored `benchmarks/results/model/`, and authentication is copied once into an immutable
-temporary snapshot before the first session.
+The corrected native-alias pilot v2 is not approved. Paid execution is hard-disabled in its manifest,
+and no paid command is valid. A future approval requires a separate commit that explicitly enables
+the manifest, plus a new dry run, packed preflight, exact committed HEAD and runner hash, bounded
+schedule/cost acknowledgement, and one approved auth-file source. Paid output remains restricted to
+a new child of ignored `benchmarks/results/model/`; the runner permanently reserves a pilot ID before
+its first session so a failed run cannot be resumed or retried.
 
 Raw outputs are written under `benchmarks/results/model/` and ignored by Git. Review them before moving a result into a publishable location.
 
