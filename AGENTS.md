@@ -12,7 +12,7 @@
 ## Architecture And Invariants
 
 - `src/index.ts` is the public library entry, `src/server.ts` is OpenCode's preferred `./server` entry, and `src/cli.ts` is the verifier bin. Keep the explicit import/default export in `server.ts` and all three separate Bun build invocations; collapsing entry builds previously produced an invalid bundle.
-- Protocol logic stays pure in `text.ts`, `snapshots.ts`, `render.ts`, `rebase.ts`, `edits.ts`, `presentation.ts`, and `session-protocol.ts`; filesystem authorization/publication belongs in `filesystem.ts`; OpenCode schemas and hooks belong in `plugin.ts`.
+- Protocol and shared evidence logic stays pure or bounded in `text.ts`, `snapshots.ts`, `render.ts`, `rebase.ts`, `edits.ts`, `presentation.ts`, `session-protocol.ts`, `session-export.ts`, `model-trace.ts`, `path-identity.ts`, `process-capture.ts`, and `exact-tree.ts`; filesystem authorization/publication belongs in `filesystem.ts`; OpenCode schemas and hooks belong in `plugin.ts`.
 - Keep `.js` specifiers in TypeScript imports. Do not edit generated `dist/` or `coverage/`.
 - Snapshot refs become editable only in `tool.execute.after`, after host truncation and output-digest checks. Retained or pending bytes are not issued provenance.
 - Exact retained bytes are freshness authority. `rebase: "none"` stays strict by default; `"unique"` is explicit, exact, and ambiguity-rejecting. Do not add fuzzy matching, normalization, nearest-match selection, source repair, or silent fallback.
@@ -28,7 +28,7 @@
 - Filesystem and plugin tests cover authorization, races, host hooks, and fail-closed behavior; update them when those paths change.
 - `bun run bench` is deterministic but result paths are write-once. Never `--force` published evidence; add a new dated result.
 - `bun run bench:model` is a no-cost dry run. `--preflight` performs installs/writes but no model call. Never use `--execute` without explicit user approval, a model/auth source, and `BENCHMARK_ACK_COSTS=yes`.
-- The native-alias pilot uses the frozen `--native-alias-pilot` manifest; do not release the preview based only on deterministic or packed evidence when the plan still requires paid-pilot approval.
+- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted and paid v3 is hard-disabled by a null approval anchor. Candidate A must retain null and produce the exact schema-v6 receipt/artifact/package-tree/staged-runner evidence; external bundle B must bind auth, endpoint, hard-budget, user approval, toolchain, schedule, and broker hashes; direct-child commit C may change only the anchor to B's hash and must reuse A's runner bytes. The approved external broker must atomically reserve v3 outside every repository/worktree before any model process. Never treat deterministic or packed evidence as the paid release gate.
 
 ## Workflow
 

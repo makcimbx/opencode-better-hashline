@@ -171,7 +171,7 @@ The harness:
 - disables external skills and denies shell, task, and web tools;
 - caps every agent at 12 model steps and requires the exact derived session/request schedule;
 - aborts provider retries before another request and journals every completed session atomically;
-- stops before another session after OpenCode-reported cost reaches the explicitly approved ceiling;
+- stops before another session after OpenCode-reported cost reaches the explicitly approved stop threshold, which is not a provider billing cap;
 - uses a fresh directory for every adapter/task/repeat;
 - evaluates exact bytes and unexpected files;
 - requires successful expected edit tools and rejects forbidden transport usage;
@@ -182,12 +182,14 @@ The harness:
 The harness reports requested and observed identities separately. Reported usage covers the validated parent session and is not asserted to equal a provider invoice. Before publishing model claims, inspect all traces, redact secrets, report malformed calls/retries/tokens/cost with their stated scope, run enough paired tasks for the intended claim, and preregister the primary metric. The default 48-session pilot is useful for harness debugging, not a universal superiority claim.
 
 The proposed native-alias release gate is one frozen 96-session pilot: 12 baseline tasks x 2 surfaces
-x four candidate models x one repeat. Its corrected v2 manifest is currently hard-disabled and
-unapproved. If a separate approval commit enables it, the run requires one approved auth-file copy,
-exactly 1,152 maximum requests, a USD 4 total reported-cost stop threshold, and a USD 1 threshold per model.
+x four candidate models x one repeat. Its corrected v3 approval anchor is currently null and the pilot
+is unapproved. If a separate approval commit activates an externally reviewed bundle, the run requires one approved auth-file copy,
+exactly 1,152 maximum requests, a 300-second session timeout, 2,048 requested host output tokens per request, an 8 MiB
+trace limit, a USD 4 total reported-cost stop threshold, and a USD 1 threshold per model. These are
+reported-cost stop thresholds, not hard provider billing caps.
 Its task and adapter-behavior SHA-256 values are frozen in the manifest, and dirty source overrides are
-forbidden. The paid command must also approve the exact committed HEAD and runner-source SHA-256 from
-the dry run; output is confined to ignored model results and authentication is snapshotted once.
+forbidden. The paid command must execute candidate A's exact staged runner bytes under direct-child
+approval commit C; output is fixed under ignored model results and authentication is snapshotted once.
 Deterministic and packed evidence do not substitute for that paid gate, and no alias
 model-result claim exists until the complete journal is reviewed.
 
@@ -197,10 +199,17 @@ passed, but protocol-marker classification failed closed. The run is not release
 be resumed or retried. See the
 [sanitized incident record](../benchmarks/results/2026-07-20-native-alias-pilot-v1-incident.json).
 A future corrected pilot requires a new immutable runner identity and explicit approval.
-The corrected v2 oracle canonicalizes the disposable fixture used as the tool-context worktree and
-keeps canonical-path confinement tied to that same root. It inspects the unsanitized export only in
-memory for session consistency, while persisted evidence remains sanitized. Pilot v2 has not been
-approved.
+The corrected v3 oracle physically confines files to the disposable fixture and separately uses the one
+strictly attested export worktree for renderer paths. It exactly correlates trace and unsanitized export
+terminal records, validates complete history, and assigns every expected file mutation to the required
+executor. The unsanitized export remains memory-only; persisted evidence is sanitized. Model-free
+preflight records the same oracle's normalized v1-topology fixture and a packed one-request retry-abort probe. The fixture declares the private incident trace hash but is topology evidence, not a cryptographic replay of untracked raw bytes.
+Pilot v2 was never executed and is retired. Pilot v3 remains hard-disabled and has not been approved.
+Candidate commit A must retain the null anchor and produce the exact schema-v6 receipt, tarball,
+package-tree manifest, and runner. External bundle B binds those artifacts to auth, provider endpoint,
+hard-budget, exact user approval, toolchain, schedule, and broker evidence. Direct-child commit C may
+change only the anchor to B's hash. The approved broker must atomically consume a durable one-time
+reservation outside every repository and disposable worktree before any model process.
 
 ## Result Vocabulary
 

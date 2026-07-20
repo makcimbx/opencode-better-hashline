@@ -7,13 +7,25 @@ export const modelAdapterSets = {
 
 export type AdapterSetId = keyof typeof modelAdapterSets;
 
-export const nativeAliasPilotV2 = {
-  id: "native-alias-pilot-v2",
-  paidExecutionApproved: false,
+export const nativeAliasPilotV3 = {
+  id: "native-alias-pilot-v3",
+  approvalAnchorPath: "benchmarks/model/native-alias-pilot-v3.approval.json",
+  approvalRequirements: {
+    externalBudgetReceipt: true,
+    providerEndpointAttestation: true,
+    exactPreflightReceipt: true,
+    durablePilotReservation: true,
+  },
   taskSet: "baseline-v1",
   adapterSet: "native-aliases-v1",
   repeats: 1,
   maxAgentSteps: 12,
+  sessionTimeoutMs: 5 * 60_000,
+  requestedOutputTokenLimit: 2_048,
+  requiredBunVersion: "1.3.14",
+  requiredNpmVersion: "11.18.0",
+  requiredOpenCodeVersion: "1.18.3",
+  traceByteLimit: 8 * 1024 * 1024,
   sessionLimit: 96,
   requestLimit: 1_152,
   totalCostLimitUsd: 4,
@@ -27,10 +39,12 @@ export const nativeAliasPilotV2 = {
     {
       model: "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
       credential: "api",
+      endpoint: { providerOrder: ["nvidia"], allowFallbacks: false },
     },
     {
       model: "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
       credential: "api",
+      endpoint: { providerOrder: ["nvidia"], allowFallbacks: false },
     },
   ],
 } as const;
@@ -54,5 +68,28 @@ export function adapterPluginConfig(
   if (adapter === "better-hashline") return { plugin: [packageUrl] };
   return {
     plugin: [[packageUrl, { enforce: true, toolSurface: "native-aliases" }]],
+  };
+}
+
+export function pilotProviderConfig(model: string): Record<string, unknown> {
+  const separator = model.indexOf("/");
+  const provider = model.slice(0, separator);
+  const modelID = model.slice(separator + 1);
+  if (provider === "openai") return {};
+  if (provider !== "openrouter" || !modelID) {
+    throw new Error(`Unsupported native-alias pilot provider model: ${model}`);
+  }
+  return {
+    provider: {
+      openrouter: {
+        models: {
+          [modelID]: {
+            options: {
+              provider: { order: ["nvidia"], allow_fallbacks: false },
+            },
+          },
+        },
+      },
+    },
   };
 }

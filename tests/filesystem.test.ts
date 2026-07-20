@@ -126,6 +126,24 @@ describe("filesystem resolution and permissions", () => {
     }
   });
 
+  test("does not treat OpenCode's root worktree sentinel as containment", async () => {
+    const outsideRoot = await mkdtemp(join(tmpdir(), "better-hashline-sentinel-external-"));
+    try {
+      await writeFile(join(outsideRoot, "outside"), "outside");
+      const resolved = await resolveExistingFile(join(outsideRoot, "outside"), root);
+      const asks: unknown[] = [];
+      const context = fakeContext(asks);
+      context.worktree = "/";
+
+      await authorizeExternal(context, resolved);
+
+      expect(asks).toHaveLength(1);
+      expect(asks[0]).toMatchObject({ permission: "external_directory" });
+    } finally {
+      await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
   test("rejects aborted reads and hard-linked edit targets", async () => {
     const path = join(root, "file");
     await writeFile(path, "content");

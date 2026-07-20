@@ -45,7 +45,7 @@
     "test:coverage": "bun test --coverage",
     "verify": "bun ./src/cli.ts verify",
     "bench": "bun ./benchmarks/run.ts",
-    "bench:model": "bun ./benchmarks/model/run.ts",
+    "bench:model": "bun ./benchmarks/model/stage.ts",
     "pack:check": "bun run build && bun ./scripts/package-smoke.ts",
     "release:pack": "bun run build && bun ./scripts/package-smoke.ts --keep-tarball",
     "ci": "bun run check && bun run test:coverage && bun run build",

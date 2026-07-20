@@ -4,43 +4,67 @@ import {
   inspectJsonlTrace,
   inspectNativeAliasTrace,
   inspectSessionExport,
-  worktreeFromSessionExport,
 } from "../benchmarks/model/trace.js";
 import { buildNativeAliasMetadata } from "../src/presentation.js";
 
+function boundToolTrace(output: string): string {
+  let index = 0;
+  return output
+    .split("\n")
+    .map((line) => {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      if (event.type !== "tool_use" || typeof event.part !== "object" || !event.part) return line;
+      const part = event.part as Record<string, unknown>;
+      const state = part.state as Record<string, unknown> | undefined;
+      index += 1;
+      event.part = {
+        id: `part-${index}`,
+        sessionID: event.sessionID,
+        messageID: `message-${index}`,
+        type: "tool",
+        ...part,
+        state: state ? { input: {}, ...state } : state,
+      };
+      return JSON.stringify(event);
+    })
+    .join("\n");
+}
+
 describe("model benchmark trace inspection", () => {
   test("extracts completed tools, errors, tokens, cost, and finish reasons", () => {
-    const output = [
-      JSON.stringify({
-        type: "tool_use",
-        sessionID: "session",
-        part: {
+    const output = boundToolTrace(
+      [
+        JSON.stringify({
+          type: "tool_use",
           sessionID: "session",
-          tool: "hashline_read",
-          callID: "call-read",
-          state: { status: "completed" },
-        },
-      }),
-      JSON.stringify({
-        type: "tool_use",
-        sessionID: "session",
-        part: {
+          part: {
+            sessionID: "session",
+            tool: "hashline_read",
+            callID: "call-read",
+            state: { status: "completed" },
+          },
+        }),
+        JSON.stringify({
+          type: "tool_use",
           sessionID: "session",
-          tool: "hashline_edit",
-          callID: "call-edit",
-          state: { status: "error" },
-        },
-      }),
-      JSON.stringify({
-        type: "step_finish",
-        sessionID: "session",
-        part: {
-          reason: "stop",
-          cost: 0.0125,
-          tokens: { input: 100, output: 25, reasoning: 5, cache: { read: 40, write: 2 } },
-        },
-      }),
-    ].join("\n");
+          part: {
+            sessionID: "session",
+            tool: "hashline_edit",
+            callID: "call-edit",
+            state: { status: "error" },
+          },
+        }),
+        JSON.stringify({
+          type: "step_finish",
+          sessionID: "session",
+          part: {
+            reason: "stop",
+            cost: 0.0125,
+            tokens: { input: 100, output: 25, reasoning: 5, cache: { read: 40, write: 2 } },
+          },
+        }),
+      ].join("\n"),
+    );
 
     expect(inspectJsonlTrace(output)).toEqual({
       eventCount: 3,
@@ -54,6 +78,9 @@ describe("model benchmark trace inspection", () => {
       toolErrors: { hashline_edit: 1 },
       toolEvents: [
         {
+          sequence: 0,
+          partID: "part-1",
+          messageID: "message-1",
           tool: "hashline_read",
           callID: "call-read",
           status: "completed",
@@ -62,12 +89,16 @@ describe("model benchmark trace inspection", () => {
           protocolMarker: "absent",
         },
         {
+          sequence: 1,
+          partID: "part-2",
+          messageID: "message-2",
           tool: "hashline_edit",
           callID: "call-edit",
           status: "error",
           argumentShape: "other",
           errorCode: null,
           protocolMarker: "absent",
+          rebase: "none",
         },
       ],
       finishReasons: { stop: 1 },
@@ -77,7 +108,7 @@ describe("model benchmark trace inspection", () => {
   });
 
   test("classifies native-shaped retries and native-alias protocol markers", () => {
-    const allowedPathRoot = resolve("benchmark-fixture");
+    const allowedPathRoot = resolve(".");
     const identity = {
       packageVersion: "0.3.0",
       schemaSha256: "a".repeat(64),
@@ -85,57 +116,59 @@ describe("model benchmark trace inspection", () => {
     };
     const metadata = buildNativeAliasMetadata({
       surface: "edit",
-      canonicalPath: resolve(allowedPathRoot, "a.ts"),
-      relativePath: "a.ts",
-      unifiedDiff: "--- a.ts\tbefore\n+++ a.ts\tafter\n@@ -1 +1 @@\n-a\n+b\n",
+      canonicalPath: resolve(allowedPathRoot, "package.json"),
+      relativePath: "package.json",
+      unifiedDiff: "--- package.json\tbefore\n+++ package.json\tafter\n@@ -1 +1 @@\n-a\n+b\n",
       additions: 1,
       deletions: 1,
       ...identity,
     });
-    const output = [
-      JSON.stringify({
-        type: "tool_use",
-        sessionID: "session",
-        part: {
+    const output = boundToolTrace(
+      [
+        JSON.stringify({
+          type: "tool_use",
           sessionID: "session",
-          tool: "edit",
-          callID: "native-call",
-          state: {
-            status: "error",
-            input: { filePath: "a.ts", oldString: "a", newString: "b" },
-            error: "INVALID_ARGUMENT: Invalid edit arguments.",
+          part: {
+            sessionID: "session",
+            tool: "edit",
+            callID: "native-call",
+            state: {
+              status: "error",
+              input: { filePath: "a.ts", oldString: "a", newString: "b" },
+              error: "INVALID_ARGUMENT: Invalid edit arguments.",
+            },
           },
-        },
-      }),
-      JSON.stringify({
-        type: "tool_use",
-        sessionID: "session",
-        part: {
+        }),
+        JSON.stringify({
+          type: "tool_use",
           sessionID: "session",
-          tool: "edit",
-          callID: "hashline-call",
-          state: {
-            status: "completed",
-            input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
-            metadata,
+          part: {
+            sessionID: "session",
+            tool: "edit",
+            callID: "hashline-call",
+            state: {
+              status: "completed",
+              input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+              metadata,
+            },
           },
-        },
-      }),
-      JSON.stringify({
-        type: "tool_use",
-        sessionID: "session",
-        part: {
+        }),
+        JSON.stringify({
+          type: "tool_use",
           sessionID: "session",
-          tool: "apply_patch",
-          callID: "bad-marker",
-          state: {
-            status: "completed",
-            input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
-            metadata: { betterHashline: { protocol: "native-aliases/v0" } },
+          part: {
+            sessionID: "session",
+            tool: "apply_patch",
+            callID: "bad-marker",
+            state: {
+              status: "completed",
+              input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+              metadata: { betterHashline: { protocol: "native-aliases/v0" } },
+            },
           },
-        },
-      }),
-    ].join("\n");
+        }),
+      ].join("\n"),
+    );
 
     expect(
       inspectJsonlTrace(output, {
@@ -143,28 +176,47 @@ describe("model benchmark trace inspection", () => {
       }).toolEvents,
     ).toEqual([
       {
+        sequence: 0,
+        partID: "part-1",
+        messageID: "message-1",
         tool: "edit",
         callID: "native-call",
         status: "error",
         argumentShape: "native",
         errorCode: "INVALID_ARGUMENT",
         protocolMarker: "absent",
+        targetPath: "a.ts",
+        rebase: "none",
       },
       {
+        sequence: 1,
+        partID: "part-2",
+        messageID: "message-2",
         tool: "edit",
         callID: "hashline-call",
         status: "completed",
         argumentShape: "better-hashline",
         errorCode: null,
         protocolMarker: "valid",
+        protocolReason: "valid",
+        targetPath: "package.json",
+        snapshotId: "s_123",
+        rebase: "none",
       },
       {
+        sequence: 2,
+        partID: "part-3",
+        messageID: "message-3",
         tool: "apply_patch",
         callID: "bad-marker",
         status: "completed",
         argumentShape: "better-hashline",
         errorCode: null,
         protocolMarker: "invalid",
+        protocolReason: "canonical-path-unreadable",
+        targetPath: "a.ts",
+        snapshotId: "s_123",
+        rebase: "none",
       },
     ]);
   });
@@ -185,20 +237,22 @@ describe("model benchmark trace inspection", () => {
       deletions: 1,
       ...identity,
     });
-    const output = JSON.stringify({
-      type: "tool_use",
-      sessionID: "session",
-      part: {
+    const output = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
         sessionID: "session",
-        tool: "edit",
-        callID: "call",
-        state: {
-          status: "completed",
-          input: { filePath: "nested/a.ts", snapshotId: "s_123", operations: [] },
-          metadata,
+        part: {
+          sessionID: "session",
+          tool: "edit",
+          callID: "call",
+          state: {
+            status: "completed",
+            input: { filePath: "nested/a.ts", snapshotId: "s_123", operations: [] },
+            metadata,
+          },
         },
-      },
-    });
+      }),
+    );
 
     expect(
       inspectJsonlTrace(output, {
@@ -207,10 +261,10 @@ describe("model benchmark trace inspection", () => {
     ).toBe("invalid");
   });
 
-  test("separates drive-root worktree paths from fixture confinement", () => {
+  test("attests one exported drive-root worktree and correlates its terminal event", async () => {
     const worktree = parse(resolve(".")).root;
-    const allowedPathRoot = resolve(worktree, "Users", "runner", "Temp", "benchmark-fixture");
-    const canonicalPath = resolve(allowedPathRoot, "a.ts");
+    const allowedPathRoot = resolve(".");
+    const canonicalPath = resolve(allowedPathRoot, "package.json");
     const shownPath = relative(worktree, canonicalPath).replaceAll("\\", "/");
     const identity = {
       packageVersion: "0.3.0",
@@ -226,20 +280,32 @@ describe("model benchmark trace inspection", () => {
       deletions: 1,
       ...identity,
     });
-    const output = JSON.stringify({
-      type: "tool_use",
-      sessionID: "session",
-      part: {
+    const output = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
         sessionID: "session",
-        tool: "apply_patch",
-        callID: "call",
-        state: {
-          status: "completed",
-          input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
-          metadata,
+        part: {
+          id: "part-call",
+          sessionID: "session",
+          messageID: "message-call",
+          type: "tool",
+          tool: "apply_patch",
+          callID: "call",
+          state: {
+            status: "completed",
+            input: {
+              filePath: "package.json",
+              snapshotId: "s_1234567890123456789012",
+              operations: [{ op: "replace_file", lines: [] }],
+            },
+            output: "Applied 1 operation.",
+            title: "Edit package.json",
+            metadata,
+            time: { start: 1, end: 2 },
+          },
         },
-      },
-    });
+      }),
+    );
 
     expect(
       inspectJsonlTrace(output, {
@@ -248,19 +314,169 @@ describe("model benchmark trace inspection", () => {
     ).toBe("valid");
     const sessionExport = JSON.stringify({
       info: {
+        id: "session",
         directory: allowedPathRoot,
         path: relative(worktree, allowedPathRoot).replaceAll("\\", "/"),
       },
+      messages: [
+        {
+          info: { id: "message-call", sessionID: "session", role: "assistant" },
+          parts: [JSON.parse(output).part],
+        },
+      ],
     });
-    expect(worktreeFromSessionExport(sessionExport, allowedPathRoot)).toBe(worktree);
-    expect(
-      inspectNativeAliasTrace(output, sessionExport, {
+    const trace = await inspectNativeAliasTrace(output, sessionExport, {
+      ...identity,
+      allowedPathRoot,
+      expectedDirectory: allowedPathRoot,
+      expectedWorktree: worktree,
+    });
+    expect(trace.oracleDecision).toBe("valid");
+    expect(trace.oracleReason).toBe("valid");
+    expect(trace.toolEvents[0]).toMatchObject({
+      protocolMarker: "valid",
+      targetPath: "package.json",
+    });
+
+    const mismatchedExport = JSON.parse(sessionExport) as {
+      messages: Array<{ parts: Array<{ state: Record<string, unknown> }> }>;
+    };
+    const mismatchedPart = mismatchedExport.messages[0]?.parts[0];
+    if (!mismatchedPart) throw new Error("Expected one exported tool part");
+    mismatchedPart.state.output = null;
+    const mismatch = await inspectNativeAliasTrace(output, JSON.stringify(mismatchedExport), {
+      ...identity,
+      allowedPathRoot,
+      expectedDirectory: allowedPathRoot,
+      expectedWorktree: worktree,
+    });
+    expect(mismatch.oracleReason).toBe("trace-export-mismatch");
+
+    const malformedPart = JSON.parse(output) as { part: { type: string } };
+    malformedPart.part.type = "text";
+    const malformedTrace = await inspectNativeAliasTrace(
+      JSON.stringify(malformedPart),
+      sessionExport,
+      {
         ...identity,
         allowedPathRoot,
         expectedDirectory: allowedPathRoot,
+        expectedWorktree: worktree,
+      },
+    );
+    expect(malformedTrace.oracleReason).toBe("trace-evidence-invalid");
+
+    const erroredTrace = await inspectNativeAliasTrace(
+      `${output}\n${JSON.stringify({ type: "error", sessionID: "session" })}`,
+      sessionExport,
+      {
+        ...identity,
+        allowedPathRoot,
+        expectedDirectory: allowedPathRoot,
+        expectedWorktree: worktree,
+      },
+    );
+    expect(erroredTrace.oracleReason).toBe("trace-evidence-invalid");
+
+    const pendingExport = JSON.parse(sessionExport) as {
+      messages: Array<{ parts: Array<unknown> }>;
+    };
+    pendingExport.messages[0]?.parts.push({
+      id: "part-pending",
+      sessionID: "session",
+      messageID: "message-call",
+      type: "tool",
+      tool: "read",
+      callID: "call-pending",
+      state: { status: "pending", input: { filePath: "package.json" }, raw: "" },
+    });
+    const pending = await inspectNativeAliasTrace(output, JSON.stringify(pendingExport), {
+      ...identity,
+      allowedPathRoot,
+      expectedDirectory: allowedPathRoot,
+      expectedWorktree: worktree,
+    });
+    expect(pending.oracleDecision).toBe("invalid");
+  });
+
+  test("binds absolute hashline paths to their physical fixture target", () => {
+    const allowedPathRoot = resolve(".");
+    const canonicalPath = resolve(allowedPathRoot, "package.json");
+    const output = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session",
+        part: {
+          tool: "hashline_read",
+          callID: "read-call",
+          state: { status: "completed", input: { filePath: canonicalPath } },
+        },
+      }),
+    );
+    const trace = inspectJsonlTrace(output, {
+      nativeAlias: {
+        packageVersion: "0.3.0",
+        schemaSha256: "a".repeat(64),
+        hostVersion: "1.18.3",
+        allowedPathRoot,
         worktree: allowedPathRoot,
-      }).toolEvents[0]?.protocolMarker,
-    ).toBe("valid");
+      },
+    });
+    expect(trace.toolEvents[0]?.targetPath).toBe("package.json");
+  });
+
+  test("does not accept a fixture worktree when the export attests a broader worktree", async () => {
+    const worktree = parse(resolve(".")).root;
+    const allowedPathRoot = resolve(".");
+    const canonicalPath = resolve(allowedPathRoot, "package.json");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const metadata = buildNativeAliasMetadata({
+      surface: "edit",
+      canonicalPath,
+      relativePath: "package.json",
+      unifiedDiff: "--- package.json\tbefore\n+++ package.json\tafter\n@@ -1 +1 @@\n-a\n+b\n",
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    const part = {
+      id: "part-call",
+      sessionID: "session",
+      messageID: "message-call",
+      type: "tool",
+      tool: "edit",
+      callID: "call",
+      state: {
+        status: "completed",
+        input: { filePath: "package.json", snapshotId: "s_123", operations: [] },
+        output: "Applied 1 operation.",
+        metadata,
+      },
+    };
+    const output = JSON.stringify({ type: "tool_use", sessionID: "session", part });
+    const sessionExport = JSON.stringify({
+      info: {
+        id: "session",
+        directory: allowedPathRoot,
+        path: relative(worktree, allowedPathRoot).replaceAll("\\", "/"),
+      },
+      messages: [
+        { info: { id: "message-call", sessionID: "session", role: "assistant" }, parts: [part] },
+      ],
+    });
+
+    const trace = await inspectNativeAliasTrace(output, sessionExport, {
+      ...identity,
+      allowedPathRoot,
+      expectedDirectory: allowedPathRoot,
+      expectedWorktree: allowedPathRoot,
+    });
+    expect(trace.oracleDecision).toBe("invalid");
+    expect(trace.toolEvents[0]?.protocolMarker).toBe("invalid");
   });
 
   test("rejects paths outside the fixture even when they are inside the worktree", () => {
@@ -282,20 +498,22 @@ describe("model benchmark trace inspection", () => {
       deletions: 1,
       ...identity,
     });
-    const output = JSON.stringify({
-      type: "tool_use",
-      sessionID: "session",
-      part: {
+    const output = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
         sessionID: "session",
-        tool: "apply_patch",
-        callID: "call",
-        state: {
-          status: "completed",
-          input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
-          metadata,
+        part: {
+          sessionID: "session",
+          tool: "apply_patch",
+          callID: "call",
+          state: {
+            status: "completed",
+            input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+            metadata,
+          },
         },
-      },
-    });
+      }),
+    );
 
     expect(
       inspectJsonlTrace(output, {
@@ -304,7 +522,7 @@ describe("model benchmark trace inspection", () => {
     ).toBe("invalid");
   });
 
-  test("keeps trace accounting when exported worktree attestation fails", () => {
+  test("keeps trace accounting when exported worktree attestation fails", async () => {
     const allowedPathRoot = resolve("benchmark-fixture");
     const identity = {
       packageVersion: "0.3.0",
@@ -320,25 +538,28 @@ describe("model benchmark trace inspection", () => {
       deletions: 1,
       ...identity,
     });
-    const output = JSON.stringify({
-      type: "tool_use",
-      sessionID: "session",
-      part: {
+    const output = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
         sessionID: "session",
-        tool: "edit",
-        callID: "call",
-        state: {
-          status: "completed",
-          input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
-          metadata,
+        part: {
+          sessionID: "session",
+          tool: "edit",
+          callID: "call",
+          state: {
+            status: "completed",
+            input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+            metadata,
+          },
         },
-      },
-    });
+      }),
+    );
 
-    const trace = inspectNativeAliasTrace(output, "not json", {
+    const trace = await inspectNativeAliasTrace(output, "not json", {
       ...identity,
       allowedPathRoot,
       expectedDirectory: allowedPathRoot,
+      expectedWorktree: allowedPathRoot,
     });
     expect(trace.eventCount).toBe(1);
     expect(trace.sessionIds).toEqual(["session"]);
@@ -366,16 +587,18 @@ describe("model benchmark trace inspection", () => {
   });
 
   test("deduplicates terminal call events and inspects observed session identity", () => {
-    const terminal = JSON.stringify({
-      type: "tool_use",
-      sessionID: "session",
-      part: {
+    const terminal = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
         sessionID: "session",
-        tool: "hashline_edit",
-        callID: "call",
-        state: { status: "completed" },
-      },
-    });
+        part: {
+          sessionID: "session",
+          tool: "hashline_edit",
+          callID: "call",
+          state: { status: "completed" },
+        },
+      }),
+    );
     expect(inspectJsonlTrace(`${terminal}\n${terminal}`).duplicateToolEvents).toBe(1);
 
     const exported = inspectSessionExport(
@@ -384,6 +607,8 @@ describe("model benchmark trace inspection", () => {
         messages: [
           {
             info: {
+              id: "message-user",
+              sessionID: "session",
               role: "user",
               agent: "build",
               model: { providerID: "provider", modelID: "model" },
@@ -392,6 +617,8 @@ describe("model benchmark trace inspection", () => {
           },
           {
             info: {
+              id: "message-assistant",
+              sessionID: "session",
               role: "assistant",
               providerID: "provider",
               modelID: "model",
@@ -404,7 +631,14 @@ describe("model benchmark trace inspection", () => {
                 cache: { read: 2, write: 3 },
               },
             },
-            parts: [{ type: "retry" }],
+            parts: [
+              {
+                id: "part-retry",
+                type: "retry",
+                sessionID: "session",
+                messageID: "message-assistant",
+              },
+            ],
           },
         ],
       }),
@@ -450,7 +684,7 @@ describe("model benchmark trace inspection", () => {
       eventCount: 5,
       schemaErrors: 6,
       errorEvents: 1,
-      tools: { hashline_edit: 1 },
+      tools: {},
     });
 
     expect(inspectSessionExport("not json").parseError).toBeTrue();
@@ -466,6 +700,44 @@ describe("model benchmark trace inspection", () => {
         ],
       }),
     );
-    expect(exported).toMatchObject({ schemaErrors: 5, messageErrors: 1 });
+    expect(exported).toMatchObject({ schemaErrors: 8, messageErrors: 1 });
+  });
+
+  test("rejects negative and unsafe accounting values", () => {
+    const trace = inspectJsonlTrace(
+      [
+        JSON.stringify({
+          type: "step_finish",
+          sessionID: "session",
+          part: {
+            reason: "stop",
+            cost: -0.1,
+            tokens: {
+              input: -1,
+              output: 0,
+              reasoning: 0,
+              cache: { read: 0, write: 0 },
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "step_finish",
+          sessionID: "session",
+          part: {
+            reason: "stop",
+            cost: 0,
+            tokens: {
+              input: Number.MAX_SAFE_INTEGER,
+              output: 1,
+              reasoning: 0,
+              cache: { read: 0, write: 0 },
+            },
+          },
+        }),
+      ].join("\n"),
+    );
+    expect(trace.schemaErrors).toBeGreaterThan(0);
+    expect(trace.cost).toBe(0);
+    expect(trace.tokens.input).toBe(Number.MAX_SAFE_INTEGER);
   });
 });

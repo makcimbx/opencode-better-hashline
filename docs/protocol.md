@@ -211,7 +211,10 @@ path SHA-256. Serialized metadata is measured before permission and publication 
 
 Each plugin instance binds a session to one protocol fingerprint. Before the first edit it reads a
 bounded history of at most 200 messages, 2,000 parts, and 1 MiB, then validates every historical
-mutator. Unmarked, malformed, sanitized, conflicting, unreadable, or cross-surface history returns
+mutator. Message, part, call, session, input path, metadata keys, single-file unified-diff hunks, counts,
+and renderer path must agree exactly. Native `write`, `hashline_edit`, unknown fields, malformed hunks,
+and anything except the exact known native-shaped `INVALID_ARGUMENT` rejection are incompatible.
+Unmarked, malformed, sanitized, conflicting, unreadable, or cross-surface history returns
 `SESSION_PROTOCOL_MISMATCH`. Only the exact current running call is excluded. A restart clears
 snapshots and process bindings; resume requires compatible unsanitized history plus a fresh
 `hashline_read`. Changing surfaces requires a restart and a new session.

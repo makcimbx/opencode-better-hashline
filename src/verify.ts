@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, parse, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tool } from "@opencode-ai/plugin";
+import { evaluateExactTree } from "./exact-tree.js";
+import { inspectNativeAliasTrace } from "./model-trace.js";
 import { openCode1183ProviderSchema } from "./native-alias.js";
 import { hashlineEditArgumentsSchema } from "./plugin.js";
 import {
@@ -12,23 +14,32 @@ import {
   NATIVE_ALIAS_PROTOCOL,
   nativeAliasProtocolFingerprint,
 } from "./presentation.js";
+import { captureBoundedProcess } from "./process-capture.js";
+import { attestSessionExport } from "./session-export.js";
 import { assertNativeAliasHistory } from "./session-protocol.js";
+import {
+  assertFullVerificationReport,
+  PINNED_OPENCODE_VERSION,
+  TERMINAL_RENDERER_SHA256,
+  VERIFIER_RENDERED_BYTES,
+  type VerificationCaseReport,
+  type VerificationReport,
+} from "./verification-report.js";
+import { retainSanitizedVerifierArtifacts } from "./verifier-retention.js";
 import { PACKAGE_VERSION } from "./version.js";
 
-const PINNED_HOST_VERSION = "1.18.3";
+export type { VerificationCaseReport, VerificationReport } from "./verification-report.js";
+export { assertFullVerificationReport, PINNED_OPENCODE_VERSION } from "./verification-report.js";
+export { retainSanitizedVerifierArtifacts } from "./verifier-retention.js";
+
 const COMMAND_TIMEOUT_MS = process.platform === "win32" ? 240_000 : 120_000;
 const INITIAL_BYTES = "alpha\nbeta\ngamma\n";
 const FINAL_BYTES = "alpha\nBETA\ngamma\n";
 const CONTINUED_BYTES = "alpha\nGAMMA\ngamma\n";
 const FORKED_BYTES = "alpha\nFORKED\ngamma\n";
 const REOPENED_BYTES = "alpha\nDELTA\ngamma\n";
-const RENDERED_BYTES = "alpha\nRENDER\ngamma\n";
+const RENDERED_BYTES = VERIFIER_RENDERED_BYTES;
 const PRIVATE_CANARY = "BH_PRIVATE_CANARY_8f149f0a";
-const TERMINAL_RENDERER_SHA256: Record<VerificationCaseReport["route"], string> = {
-  hashline: "cc314f125f2cb87d36099a6503374a83d381f6ce09b0ae224869838d07092e8d",
-  "native-edit": "d40a50dbfe64e8989066dba98a3922ba5aafe956128e6d8652998bf04419d94c",
-  "native-apply-patch": "d9c6cef2282fac727d819bfecca836d90965dae5f7f691088bcc304fee310046",
-};
 const RELEVANT_TOOLS = new Set([
   "apply_patch",
   "edit",
@@ -45,39 +56,6 @@ export interface VerifyInstallationOptions {
   packageDirectory?: string;
   surface?: VerificationSurface;
   keepTemporaryFiles?: boolean;
-}
-
-export interface VerificationCaseReport {
-  route: "hashline" | "native-edit" | "native-apply-patch";
-  model: string;
-  editTool: "hashline_edit" | "edit" | "apply_patch";
-  schemaSha256: string;
-  protocolFingerprint?: string;
-  finalBytesSha256: string;
-  providerRequests: number;
-  malformedRejected: true;
-  continuationVerified: true;
-  forkVerified: true;
-  exportVerified: true;
-  reopenVerified: true;
-  sanitizedExportVerified: true;
-  terminalRendererVerified: true;
-  modelRoutingVerified: boolean;
-  editPermissionMatrixVerified: boolean;
-  metadataSnapshotSha256: string;
-  rendererSnapshotSha256: string;
-  rendererSnapshot: string;
-}
-
-export interface VerificationReport {
-  ok: true;
-  packageVersion: string;
-  hostVersion: string;
-  protocol: typeof NATIVE_ALIAS_PROTOCOL;
-  rollbackVerified: boolean;
-  modelRoutingVerified: boolean;
-  editPermissionMatrixVerified: boolean;
-  cases: VerificationCaseReport[];
 }
 
 interface CommandResult {
@@ -144,81 +122,26 @@ function sha256(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-type SpawnedProcess = ReturnType<typeof Bun.spawn>;
-
-async function exitsWithin(child: SpawnedProcess, milliseconds: number): Promise<boolean> {
-  return new Promise((resolveExit) => {
-    const timeout = setTimeout(() => resolveExit(false), milliseconds);
-    child.exited.then(() => {
-      clearTimeout(timeout);
-      resolveExit(true);
-    });
-  });
-}
-
-async function terminateProcessTree(child: SpawnedProcess): Promise<void> {
-  if (process.platform === "win32") {
-    const killer = Bun.spawn(["taskkill", "/PID", String(child.pid), "/T", "/F"], {
-      stderr: "ignore",
-      stdout: "ignore",
-    });
-    if (!(await exitsWithin(killer, 5_000))) killer.kill();
-  } else {
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      child.kill("SIGTERM");
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {
-      child.kill("SIGKILL");
-    }
-  }
-  if (!(await exitsWithin(child, 5_000))) {
-    child.kill("SIGKILL");
-    if (!(await exitsWithin(child, 5_000))) {
-      throw new Error(`Process tree ${child.pid} did not terminate`);
-    }
-  }
-}
-
 async function capture(
   command: string[],
   cwd: string,
   environment: Record<string, string>,
 ): Promise<CommandResult> {
-  const child = Bun.spawn(command, {
+  const result = await captureBoundedProcess({
+    command,
     cwd,
-    detached: process.platform !== "win32",
     env: environment,
-    stderr: "pipe",
-    stdout: "pipe",
+    timeoutMs: COMMAND_TIMEOUT_MS,
+    stdoutLimit: 16 * 1024 * 1024,
+    stderrLimit: 4 * 1024 * 1024,
   });
-  const completion = Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const outcome = await Promise.race([
-    completion.then((value) => ({ kind: "completed" as const, value })),
-    new Promise<{ kind: "timeout" }>((resolveTimeout) => {
-      timeout = setTimeout(() => resolveTimeout({ kind: "timeout" }), COMMAND_TIMEOUT_MS);
-    }),
-  ]);
-  if (timeout) clearTimeout(timeout);
-  if (outcome.kind === "timeout") {
-    await terminateProcessTree(child);
-    await Promise.race([
-      completion.catch(() => undefined),
-      new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, 5_000)),
-    ]);
+  if (result.timedOut) {
     throw new Error(`Command timed out: ${command.join(" ")}`);
   }
-  const [stdout, stderr, exitCode] = outcome.value;
-  return { exitCode, stdout, stderr };
+  if (result.stdoutOverflow || result.stderrOverflow) {
+    throw new Error(`Command output exceeded the verifier limit: ${command.join(" ")}`);
+  }
+  return result;
 }
 
 async function run(command: string[], cwd: string, environment: Record<string, string>) {
@@ -409,57 +332,6 @@ function assertSanitizedExport(value: unknown, secrets: string[]): void {
   }
 }
 
-async function exportedWorktree(value: unknown, expectedDirectory: string) {
-  invariant(
-    value !== null && typeof value === "object" && !Array.isArray(value),
-    "Session export is unreadable",
-  );
-  const info = (value as Record<string, unknown>).info;
-  invariant(
-    info !== null && typeof info === "object" && !Array.isArray(info),
-    "Session info is unreadable",
-  );
-  const directory = (info as Record<string, unknown>).directory;
-  const path = (info as Record<string, unknown>).path;
-  const [canonicalDirectory, canonicalExpectedDirectory] = await Promise.all([
-    typeof directory === "string" ? realpath(directory) : Promise.resolve(""),
-    realpath(expectedDirectory),
-  ]);
-  invariant(
-    typeof directory === "string" && canonicalDirectory === canonicalExpectedDirectory,
-    "Session directory is inconsistent",
-  );
-  invariant(typeof path === "string", "Session worktree path is unreadable");
-  const segments = path.split(/[\\/]/u).filter(Boolean);
-  invariant(
-    segments.every((segment) => segment !== "." && segment !== ".." && !segment.includes(":")),
-    "Session worktree path is unsafe",
-  );
-  const worktree = resolve(directory, ...segments.map(() => ".."));
-  invariant(
-    relative(worktree, directory).replaceAll("\\", "/") === segments.join("/"),
-    "Session worktree path is inconsistent",
-  );
-  return worktree;
-}
-
-function assertNativeAliasHistoryForWorktrees(
-  messages: unknown[],
-  identity: Omit<Parameters<typeof assertNativeAliasHistory>[1], "worktree">,
-  worktrees: string[],
-) {
-  let lastError: unknown;
-  for (const worktree of new Set(worktrees.map((value) => resolve(value)))) {
-    try {
-      assertNativeAliasHistory(messages, { ...identity, worktree });
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
-}
-
 function normalizeRendererValue(value: unknown, roots: string[]): unknown {
   if (typeof value === "string") {
     let result = value;
@@ -605,11 +477,9 @@ async function verifyScenario(
   scenario: Scenario,
   opencode: string,
   packageDirectory: string,
-  keepTemporaryFiles: boolean,
-  sharedRoot?: string,
+  root: string,
+  retainedArtifacts: Map<string, string>,
 ): Promise<VerificationCaseReport> {
-  const root =
-    sharedRoot ?? (await mkdtemp(join(tmpdir(), `better-hashline-verify-${scenario.route}-`)));
   let server: ReturnType<typeof Bun.serve> | undefined;
   try {
     const workspace = join(root, "workspace");
@@ -619,6 +489,8 @@ async function verifyScenario(
     const providerLog = join(root, "provider.jsonl");
     const firstObserver = join(root, "observer-first.ts");
     const lastObserver = join(root, "observer-last.ts");
+    const retryGuard = join(root, "provider-retry-guard.ts");
+    const retryGuardState = join(root, "provider-retry.json");
     const betterPlugin = join(root, "better-hashline-plugin");
     const serverModuleUrl = pathToFileURL(join(packageDirectory, "dist", "server.js")).href;
     const home = join(root, "home");
@@ -649,6 +521,16 @@ async function verifyScenario(
       writeFile(firstObserver, observerSource("first"), "utf8"),
       writeFile(lastObserver, observerSource("last"), "utf8"),
       writeFile(
+        retryGuard,
+        `export default async () => ({ event: async ({ event }) => {
+  if (event?.type === "session.status" && event.properties?.status?.type === "retry") {
+    await Bun.write(${JSON.stringify(retryGuardState)}, JSON.stringify({ retry: true }));
+    process.exit(86);
+  }
+} });\n`,
+        "utf8",
+      ),
+      writeFile(
         join(betterPlugin, "package.json"),
         `${JSON.stringify({
           name: `better-hashline-verifier-${randomUUID()}`,
@@ -666,7 +548,9 @@ async function verifyScenario(
     ]);
 
     const providerRequests: RequestBody[] = [];
-    const providerModelIDs = [scenario.modelID, "gpt-4-scripted", "gpt-oss-scripted"];
+    const providerModelIDs = [
+      ...new Set([scenario.modelID, "gpt-4-scripted", "gpt-oss-scripted", "retry-scripted"]),
+    ];
     server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -689,6 +573,12 @@ async function verifyScenario(
         const body = (await request.json()) as RequestBody;
         providerRequests.push(body);
         await writeFile(providerLog, `${JSON.stringify(body)}\n`, { encoding: "utf8", flag: "a" });
+        if (body.model === "retry-scripted") {
+          return Response.json(
+            { error: { message: "Deterministic retry guard verification" } },
+            { status: 429, headers: { "retry-after": "0" } },
+          );
+        }
         const serialized = JSON.stringify(body.messages ?? []);
         if (serialized.includes("Inspect the effective model tool routing")) {
           return streamResponse({ kind: "text", text: "Routing verified." }, scenario.modelID);
@@ -815,7 +705,7 @@ async function verifyScenario(
         return streamResponse(
           {
             kind: "tool",
-            id: "call_hashline-read",
+            id: `call_hashline-read_${phase.target.toLowerCase()}`,
             name: "hashline_read",
             args: { filePath: "probe.txt", limit: 3 },
           },
@@ -851,6 +741,7 @@ async function verifyScenario(
         pathToFileURL(firstObserver).href,
         [pathToFileURL(betterPlugin).href, { enforce: true, toolSurface: scenario.surface }],
         pathToFileURL(lastObserver).href,
+        pathToFileURL(retryGuard).href,
       ],
       permission: {
         read: "allow",
@@ -891,7 +782,36 @@ async function verifyScenario(
 
     let modelRoutingVerified = false;
     let editPermissionMatrixVerified = false;
+    let retryAbortVerified = scenario.route !== "native-edit";
+    let retryProviderRequests = 0;
     if (scenario.route === "native-edit") {
+      const retryRequestStart = providerRequests.length;
+      const retryResult = await capture(
+        [
+          opencode,
+          "run",
+          "--model",
+          "scripted/retry-scripted",
+          "--agent",
+          "build",
+          "--format",
+          "json",
+          "--title",
+          "Better Hashline retry guard verification",
+          "Trigger the deterministic retry guard exactly once.",
+        ],
+        workspace,
+        environment,
+      );
+      invariant(retryResult.exitCode === 86, "Retry guard did not terminate OpenCode");
+      invariant(
+        providerRequests.length === retryRequestStart + 1,
+        "Retry guard allowed another request",
+      );
+      invariant(await Bun.file(retryGuardState).exists(), "Retry guard did not persist its signal");
+      retryAbortVerified = true;
+      retryProviderRequests = 1;
+
       for (const modelID of ["gpt-4-scripted", "gpt-oss-scripted"]) {
         const requestStart = providerRequests.length;
         await run(
@@ -1230,8 +1150,13 @@ async function verifyScenario(
 
     const exported = await run([opencode, "export", sessionID], workspace, environment);
     const exportValue = JSON.parse(exported.stdout) as unknown;
-    const reportedWorktree = await exportedWorktree(exportValue, workspace);
-    const worktree = await realpath(workspace);
+    const expectedWorktree = parse(resolve(workspace)).root;
+    const attestedExport = await attestSessionExport(
+      exported.stdout,
+      workspace,
+      sessionID,
+      expectedWorktree,
+    );
     const exportedToolParts = collectToolParts(exportValue);
     const completedEditParts = exportedToolParts.filter(
       (part) => part.tool === scenario.editTool && part.state.status === "completed",
@@ -1245,19 +1170,42 @@ async function verifyScenario(
       openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
     );
     let fingerprint: string | undefined;
+    let benchmarkOracleVerified = scenario.surface === "hashline";
     if (scenario.surface === "native-aliases") {
-      assertNativeAliasHistoryForWorktrees(
-        [{ parts: completedEditParts }],
-        { packageVersion: PACKAGE_VERSION, schemaSha256, hostVersion: PINNED_HOST_VERSION },
-        [worktree, reportedWorktree],
+      assertNativeAliasHistory(
+        attestedExport.messages,
+        {
+          packageVersion: PACKAGE_VERSION,
+          schemaSha256,
+          hostVersion: PINNED_OPENCODE_VERSION,
+          worktree: attestedExport.worktree,
+        },
+        { sessionId: attestedExport.sessionId, directory: attestedExport.directory },
       );
       const marker = toolPart.state.metadata.betterHashline as Record<string, unknown>;
       invariant(marker.protocol === NATIVE_ALIAS_PROTOCOL, "Exported protocol marker is invalid");
       fingerprint = nativeAliasProtocolFingerprint({
         packageVersion: PACKAGE_VERSION,
         schemaSha256,
-        hostVersion: PINNED_HOST_VERSION,
+        hostVersion: PINNED_OPENCODE_VERSION,
       });
+      const oracleInspection = await inspectNativeAliasTrace(
+        `${firstRun.stdout}\n${continuation.stdout}`,
+        exported.stdout,
+        {
+          packageVersion: PACKAGE_VERSION,
+          schemaSha256,
+          hostVersion: PINNED_OPENCODE_VERSION,
+          allowedPathRoot: workspace,
+          expectedDirectory: workspace,
+          expectedWorktree,
+        },
+      );
+      invariant(
+        oracleInspection.oracleDecision === "valid",
+        `Benchmark oracle rejected stock OpenCode evidence: ${oracleInspection.oracleReason ?? "unknown"}`,
+      );
+      benchmarkOracleVerified = true;
     } else {
       invariant(
         !("betterHashline" in toolPart.state.metadata),
@@ -1301,7 +1249,12 @@ async function verifyScenario(
       XDG_STATE_HOME: importStateHome,
       OPENCODE_CONFIG_DIR: importConfigDirectory,
     };
-    const imported = await run([opencode, "import", exportFile], workspace, importEnvironment);
+    let imported: CommandResult;
+    try {
+      imported = await run([opencode, "import", exportFile], workspace, importEnvironment);
+    } finally {
+      await rm(exportFile, { force: true });
+    }
     const importedSessionID = imported.stdout.match(/ses_[A-Za-z0-9_-]+/u)?.[0];
     invariant(importedSessionID, `Imported session ID was not reported: ${imported.stdout}`);
     const reopenRequestStart = providerRequests.length;
@@ -1347,11 +1300,21 @@ async function verifyScenario(
     invariant(reopenedEdit?.state.metadata, "Reopened session lost completed edit metadata");
     invariant(reopenedEdits.length === 3, "Reopened session is missing a fresh edit result");
     if (scenario.surface === "native-aliases") {
-      const reportedWorktree = await exportedWorktree(reopenedValue, workspace);
-      assertNativeAliasHistoryForWorktrees(
-        [{ parts: reopenedEdits }],
-        { packageVersion: PACKAGE_VERSION, schemaSha256, hostVersion: PINNED_HOST_VERSION },
-        [await realpath(workspace), reportedWorktree],
+      const reopenedExport = await attestSessionExport(
+        reopened.stdout,
+        workspace,
+        importedSessionID,
+        expectedWorktree,
+      );
+      assertNativeAliasHistory(
+        reopenedExport.messages,
+        {
+          packageVersion: PACKAGE_VERSION,
+          schemaSha256,
+          hostVersion: PINNED_OPENCODE_VERSION,
+          worktree: reopenedExport.worktree,
+        },
+        { sessionId: reopenedExport.sessionId, directory: reopenedExport.directory },
       );
       invariant(
         (reopenedEdit.state.metadata.betterHashline as { protocol?: unknown } | undefined)
@@ -1359,7 +1322,6 @@ async function verifyScenario(
         "Reopened session lost the native-alias protocol marker",
       );
     }
-
     const sanitized = await run(
       [opencode, "export", sessionID, "--sanitize"],
       workspace,
@@ -1382,6 +1344,7 @@ async function verifyScenario(
         "Sanitized export retained protocol metadata",
       );
     }
+    retainedArtifacts.set(`${scenario.route}.session.sanitized.json`, sanitized.stdout);
 
     const rendererRequestStart = providerRequests.length;
     const rendererRun = await run(
@@ -1422,12 +1385,25 @@ async function verifyScenario(
       `Terminal renderer snapshot changed (${rendererSha256} != ${expectedRendererSha256}):\n${rendererSnapshot}`,
     );
 
-    const workspaceEntries = await readdir(workspace);
+    const finalTree = await evaluateExactTree(workspace, {
+      id: `verification-${scenario.route}`,
+      category: "verification",
+      prompt: "verification",
+      files: {},
+      expectedFiles: {
+        "malformed.txt": `${PRIVATE_CANARY}\n`,
+        "probe.txt": RENDERED_BYTES,
+      },
+    });
     invariant(
-      JSON.stringify(workspaceEntries.sort()) === JSON.stringify(["malformed.txt", "probe.txt"]),
-      `Verification created collateral workspace files: ${JSON.stringify(workspaceEntries)}`,
+      finalTree.exactFiles,
+      `Verification workspace is not exact: ${finalTree.mismatches.join(", ")}`,
     );
 
+    const metadataSnapshot = normalizedRendererSnapshot(
+      `${malformedRun.stdout}\n${firstRun.stdout}`,
+      [root, workspace],
+    );
     return {
       route: scenario.route,
       model: providerModel,
@@ -1445,15 +1421,16 @@ async function verifyScenario(
       terminalRendererVerified: true,
       modelRoutingVerified,
       editPermissionMatrixVerified,
-      metadataSnapshotSha256: sha256(
-        normalizedRendererSnapshot(`${malformedRun.stdout}\n${firstRun.stdout}`, [root, workspace]),
-      ),
+      benchmarkOracleVerified,
+      retryAbortVerified,
+      retryProviderRequests,
+      metadataSnapshotSha256: sha256(metadataSnapshot),
+      metadataSnapshot,
       rendererSnapshotSha256: rendererSha256,
       rendererSnapshot,
     };
   } finally {
     server?.stop(true);
-    if (!sharedRoot && !keepTemporaryFiles) await rm(root, { force: true, recursive: true });
   }
 }
 
@@ -1469,28 +1446,24 @@ export async function verifyInstallation(
   const version = await run([opencode, "--version"], packageDirectory, versionEnvironment);
   const hostVersion = version.stdout.trim();
   invariant(
-    hostVersion === PINNED_HOST_VERSION,
-    `Unsupported OpenCode version ${JSON.stringify(hostVersion)}; expected ${PINNED_HOST_VERSION}`,
+    hostVersion === PINNED_OPENCODE_VERSION,
+    `Unsupported OpenCode version ${JSON.stringify(hostVersion)}; expected ${PINNED_OPENCODE_VERSION}`,
   );
 
   const cases: VerificationCaseReport[] = [];
   const keepTemporaryFiles = options.keepTemporaryFiles ?? false;
-  const sharedRoot =
-    surface === "all"
-      ? await mkdtemp(join(tmpdir(), "better-hashline-verify-rollback-"))
-      : undefined;
+  const sharedRoot = await mkdtemp(join(tmpdir(), `better-hashline-verify-${surface}-`));
+  const retainedArtifacts = new Map<string, string>();
   try {
     for (const scenario of scenariosFor(surface)) {
       cases.push(
-        await verifyScenario(scenario, opencode, packageDirectory, keepTemporaryFiles, sharedRoot),
+        await verifyScenario(scenario, opencode, packageDirectory, sharedRoot, retainedArtifacts),
       );
     }
   } finally {
-    if (sharedRoot && !keepTemporaryFiles) {
-      await rm(sharedRoot, { force: true, recursive: true });
-    }
+    await retainSanitizedVerifierArtifacts(sharedRoot, retainedArtifacts, keepTemporaryFiles);
   }
-  return {
+  const report: VerificationReport = {
     ok: true,
     packageVersion: PACKAGE_VERSION,
     hostVersion,
@@ -1504,6 +1477,18 @@ export async function verifyInstallation(
       cases
         .filter((verificationCase) => verificationCase.route !== "hashline")
         .every((verificationCase) => verificationCase.editPermissionMatrixVerified),
+    benchmarkOracleVerified:
+      surface === "hashline" ||
+      cases
+        .filter((verificationCase) => verificationCase.route !== "hashline")
+        .every((verificationCase) => verificationCase.benchmarkOracleVerified),
+    retryAbortVerified: cases.every((verificationCase) => verificationCase.retryAbortVerified),
+    retryProviderRequests: cases.reduce(
+      (sum, verificationCase) => sum + verificationCase.retryProviderRequests,
+      0,
+    ),
     cases,
   };
+  if (surface === "all") assertFullVerificationReport(report, PACKAGE_VERSION, hostVersion);
+  return report;
 }

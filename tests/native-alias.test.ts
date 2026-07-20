@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   detectOpenCodeVersion,
   HOST_HEALTH_MAX_BYTES,
@@ -171,7 +173,6 @@ describe("native alias session protocol", () => {
             parts: [
               completedPart("edit"),
               completedPart("apply_patch"),
-              { type: "tool", tool: "write", state: { status: "completed", metadata: {} } },
               { type: "tool", tool: "edit", callID: "current", state: { status: "running" } },
               { type: "text", text: "ok" },
             ],
@@ -183,12 +184,17 @@ describe("native alias session protocol", () => {
     ).not.toThrow();
   });
 
-  test("rejects reused, completed, cross-tool, and duplicate current call IDs", () => {
+  test("rejects historical native write calls", () => {
+    expect(() =>
+      assertNativeAliasHistory(
+        [{ parts: [{ type: "tool", tool: "write", state: { status: "completed" } }] }],
+        identity,
+      ),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("rejects completed, cross-tool, and duplicate current calls", () => {
     const cases = [
-      [
-        completedPart("edit"),
-        { type: "tool", tool: "edit", callID: "current", state: { status: "running" } },
-      ],
       [{ type: "tool", tool: "apply_patch", callID: "current", state: { status: "running" } }],
       [
         {
@@ -203,7 +209,6 @@ describe("native alias session protocol", () => {
         { type: "tool", tool: "edit", callID: "current", state: { status: "running" } },
       ],
     ];
-    (cases[0]?.[0] as Record<string, unknown>).callID = "current";
 
     for (const parts of cases) {
       expect(() =>
@@ -217,6 +222,69 @@ describe("native alias session protocol", () => {
       assertNativeAliasHistory([{ parts: [completedPart("edit")] }], identity, {
         currentCall: { id: "missing", tool: "edit" },
       }),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("scopes provider call IDs to their assistant messages", () => {
+    const sessionID = "session";
+    const input = {
+      filePath: "src/a.ts",
+      snapshotId: "s_0000000000000000000000",
+      operations: [{ op: "replace_file", lines: [] }],
+    };
+    const toolPart = (
+      messageID: string,
+      id: string,
+      state: Record<string, unknown>,
+    ): Record<string, unknown> => ({
+      id,
+      sessionID,
+      messageID,
+      type: "tool",
+      tool: "edit",
+      callID: "reused",
+      state,
+    });
+    const completed = toolPart("message-old", "part-old", {
+      status: "completed",
+      input,
+      output: "Applied",
+      title: "Edit",
+      metadata: validMetadata("edit"),
+      time: { start: 1, end: 2 },
+    });
+    const running = toolPart("message-current", "part-current", {
+      status: "running",
+      input,
+      time: { start: 3 },
+    });
+    const messages = [
+      { info: { id: "message-old", sessionID }, parts: [completed] },
+      { info: { id: "message-current", sessionID }, parts: [running] },
+    ];
+
+    expect(() =>
+      assertNativeAliasHistory(messages, identity, {
+        sessionId: sessionID,
+        directory: worktree,
+        currentCall: { id: "reused", tool: "edit", input },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertNativeAliasHistory(
+        [
+          {
+            info: { id: "message-current", sessionID },
+            parts: [{ ...completed, messageID: "message-current" }, running],
+          },
+        ],
+        identity,
+        {
+          sessionId: sessionID,
+          directory: worktree,
+          currentCall: { id: "reused", tool: "edit", input },
+        },
+      ),
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
@@ -241,6 +309,163 @@ describe("native alias session protocol", () => {
         identity,
       ),
     ).not.toThrow();
+
+    expect(() =>
+      assertNativeAliasHistory(
+        [
+          {
+            parts: [
+              {
+                type: "tool",
+                tool: "edit",
+                state: {
+                  status: "error",
+                  input: {
+                    filePath: "src/a.ts",
+                    oldString: "old",
+                    newString: "new",
+                    unexpected: true,
+                  },
+                  error: "INVALID_ARGUMENT: Invalid edit arguments.",
+                },
+              },
+            ],
+          },
+        ],
+        identity,
+      ),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("enforces exact metadata keys and unified-diff hunk arithmetic", () => {
+    const extraMetadata = { ...validMetadata("edit"), unexpected: true };
+    const malformedPatch = validMetadata("apply_patch");
+    if (!("files" in malformedPatch)) throw new Error("Expected apply_patch metadata");
+    const file = malformedPatch.files[0];
+    if (!file) throw new Error("Expected apply_patch file metadata");
+    file.patch = "--- src/a.ts\tbefore\n+++ src/a.ts\tafter\n@@ -1,2 +1 @@\n-old\n+new\n";
+    const extraFileKey = validMetadata("apply_patch");
+    if (!("files" in extraFileKey) || !extraFileKey.files[0]) {
+      throw new Error("Expected apply_patch file metadata");
+    }
+    (extraFileKey.files[0] as Record<string, unknown>).unexpected = true;
+    const overlappingPatch = buildNativeAliasMetadata({
+      surface: "apply_patch",
+      canonicalPath,
+      relativePath: "src/a.ts",
+      unifiedDiff:
+        "--- src/a.ts\tbefore\n+++ src/a.ts\tafter\n@@ -1 +1 @@\n-a\n+b\n@@ -1 +1 @@\n-b\n+c\n",
+      additions: 2,
+      deletions: 2,
+      ...identity,
+    });
+
+    for (const [tool, metadata] of [
+      ["edit", extraMetadata],
+      ["apply_patch", malformedPatch],
+      ["apply_patch", extraFileKey],
+      ["apply_patch", overlappingPatch],
+    ] as const) {
+      expect(() =>
+        assertNativeAliasHistory(
+          [{ parts: [completedPart(tool, metadata as Record<string, unknown>)] }],
+          identity,
+        ),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    }
+  });
+
+  test("treats dot-prefixed names segment-wise", () => {
+    const dotCachePath = resolve(worktree, "..cache");
+    const dotCacheDiff = "--- ..cache\tbefore\n+++ ..cache\tafter\n@@ -1 +1 @@\n-old\n+new\n";
+    const dotCacheMetadata = buildNativeAliasMetadata({
+      surface: "edit",
+      canonicalPath: dotCachePath,
+      relativePath: "..cache",
+      unifiedDiff: dotCacheDiff,
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    expect(() =>
+      assertNativeAliasHistory([{ parts: [completedPart("edit", dotCacheMetadata)] }], identity),
+    ).not.toThrow();
+
+    const parentPath = resolve(worktree, "..");
+    const parentMetadata = buildNativeAliasMetadata({
+      surface: "edit",
+      canonicalPath: parentPath,
+      relativePath: "..",
+      unifiedDiff: "--- ..\tbefore\n+++ ..\tafter\n@@ -1 +1 @@\n-old\n+new\n",
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    expect(() =>
+      assertNativeAliasHistory([{ parts: [completedPart("edit", parentMetadata)] }], identity),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("accepts replace_file history through the aggregate payload limit", () => {
+    const part = completedPart("edit");
+    (part.state as Record<string, unknown>).input = {
+      filePath: "src/a.ts",
+      snapshotId: "s_0000000000000000000000",
+      operations: [{ op: "replace_file", lines: Array.from({ length: 20_001 }, () => "x") }],
+    };
+
+    expect(() =>
+      assertNativeAliasHistory([{ parts: [part] }], identity, { directory: worktree }),
+    ).not.toThrow();
+  });
+
+  test("resolves a surviving symlink parent for deleted historical files", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "better-hashline-history-symlink-"));
+    try {
+      const realDirectory = join(fixture, "real");
+      const otherDirectory = join(fixture, "other");
+      const linkedDirectory = join(fixture, "link");
+      await mkdir(realDirectory);
+      await mkdir(otherDirectory);
+      try {
+        await symlink(realDirectory, linkedDirectory, "dir");
+      } catch {
+        return;
+      }
+      const requestedPath = join(linkedDirectory, "file.txt");
+      await writeFile(requestedPath, "old\n");
+      const historicalCanonicalPath = await realpath(requestedPath);
+      const localIdentity = { ...identity, worktree: fixture };
+      const metadata = buildNativeAliasMetadata({
+        surface: "edit",
+        canonicalPath: historicalCanonicalPath,
+        relativePath: "real/file.txt",
+        unifiedDiff:
+          "--- real/file.txt\tbefore\n+++ real/file.txt\tafter\n@@ -1 +1 @@\n-old\n+new\n",
+        additions: 1,
+        deletions: 1,
+        ...localIdentity,
+      });
+      const part = completedPart("edit", metadata);
+      (part.state as Record<string, unknown>).input = {
+        filePath: "link/file.txt",
+        snapshotId: "s_0000000000000000000000",
+        operations: [{ op: "replace_file", lines: ["new"] }],
+      };
+      await unlink(historicalCanonicalPath);
+
+      expect(() =>
+        assertNativeAliasHistory([{ parts: [part] }], localIdentity, { directory: fixture }),
+      ).not.toThrow();
+
+      await unlink(linkedDirectory);
+      await symlink(otherDirectory, linkedDirectory, "dir");
+      expect(() =>
+        assertNativeAliasHistory([{ parts: [part] }], localIdentity, { directory: fixture }),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
   });
 
   test("rejects sanitized, malformed, conflicting, ambiguous, and unbounded history", () => {

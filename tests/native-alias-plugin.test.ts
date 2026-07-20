@@ -73,6 +73,7 @@ function context(
     metadata?: Array<Record<string, unknown>>;
     denyEdit?: boolean;
     worktree?: string;
+    onAsk?: (request: AskRecord) => Promise<void> | void;
   } = {},
 ): ToolContext {
   return {
@@ -86,7 +87,9 @@ function context(
       input.metadata?.push(value as Record<string, unknown>);
     },
     async ask(request) {
-      input.asks?.push(request as AskRecord);
+      const value = request as AskRecord;
+      input.asks?.push(value);
+      await input.onAsk?.(value);
       if (input.denyEdit && request.permission === "edit") throw new Error("edit denied");
     },
   } as ToolContext;
@@ -110,10 +113,71 @@ async function aliasHarness(options: AliasHarnessOptions = {}) {
       const sessionId = decodeURIComponent(match[1]);
       historyCalls.push(sessionId);
       if (options.historyError) return new Response("unavailable", { status: 500 });
-      return Response.json(
+      const history =
         typeof options.history === "function"
           ? options.history(sessionId)
-          : (options.history ?? []),
+          : (options.history ?? []);
+      return Response.json(
+        !Array.isArray(history)
+          ? history
+          : history.map((message: unknown, messageIndex: number) => {
+              const value = message as Record<string, unknown>;
+              const info = (value.info ?? {}) as Record<string, unknown>;
+              const messageID = typeof info.id === "string" ? info.id : `message-${messageIndex}`;
+              const parts = Array.isArray(value.parts)
+                ? value.parts.map((part, partIndex) => {
+                    const record = part as Record<string, unknown>;
+                    if (record.type !== "tool") return record;
+                    const state = record.state as Record<string, unknown> | undefined;
+                    const metadata = state?.metadata as Record<string, unknown> | undefined;
+                    const filediff = metadata?.filediff as Record<string, unknown> | undefined;
+                    const files = metadata?.files as Array<Record<string, unknown>> | undefined;
+                    const canonicalPath =
+                      typeof filediff?.file === "string"
+                        ? filediff.file
+                        : typeof files?.[0]?.filePath === "string"
+                          ? files[0].filePath
+                          : undefined;
+                    let boundState =
+                      state?.status === "completed" && state.input === undefined && canonicalPath
+                        ? {
+                            ...state,
+                            input: {
+                              filePath: canonicalPath,
+                              snapshotId: "s_0000000000000000000000",
+                              operations: [{ op: "replace_file", lines: [] }],
+                            },
+                          }
+                        : state;
+                    if (boundState?.status === "completed") {
+                      boundState = {
+                        ...boundState,
+                        output:
+                          typeof boundState.output === "string" ? boundState.output : "Applied",
+                        title: typeof boundState.title === "string" ? boundState.title : "Edit",
+                        time: boundState.time ?? { start: 1, end: 2 },
+                      };
+                    } else if (boundState?.status === "running") {
+                      boundState = { ...boundState, time: boundState.time ?? { start: 1 } };
+                    }
+                    return {
+                      ...record,
+                      id:
+                        typeof record.id === "string"
+                          ? record.id
+                          : `part-${messageIndex}-${partIndex}`,
+                      callID:
+                        typeof record.callID === "string"
+                          ? record.callID
+                          : `call-${messageIndex}-${partIndex}`,
+                      sessionID: sessionId,
+                      messageID,
+                      state: boundState,
+                    };
+                  })
+                : value.parts;
+              return { ...value, info: { ...info, id: messageID, sessionID: sessionId }, parts };
+            }),
       );
     },
   });
@@ -330,12 +394,44 @@ describe("native alias argument and mutation contract", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
+  test("rejects a current history call whose input differs from the before-hook arguments", async () => {
+    await writeFile(join(root, "file.txt"), "one\ntwo\n");
+    const sessionID = "current-input-mismatch";
+    const callID = "edit-call";
+    const { value } = await aliasHarness({
+      history: [
+        {
+          parts: [
+            {
+              type: "tool",
+              tool: "edit",
+              callID,
+              state: {
+                status: "running",
+                input: replaceArgs("other.txt", "s_0000000000000000000000"),
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const toolContext = context({ sessionID });
+    const snapshot = await issueSnapshot(value, toolContext, "file.txt");
+    const args = replaceArgs("file.txt", String(snapshot.metadata.snapshotId));
+
+    await expect(
+      value["tool.execute.before"]?.({ tool: "edit", sessionID, callID }, { args }),
+    ).rejects.toThrow("SESSION_PROTOCOL_MISMATCH:");
+    expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\ntwo\n");
+  });
+
   for (const surface of ["edit", "apply_patch"] as const) {
     test(`${surface} reaches the shared snapshot executor and emits renderer metadata`, async () => {
       await writeFile(join(root, "file.txt"), "one\ntwo\nthree\n");
       const asks: AskRecord[] = [];
       const metadataUpdates: Array<Record<string, unknown>> = [];
       const toolContext = context({ asks, metadata: metadataUpdates });
+      let currentInput: unknown;
       const { value, historyCalls } = await aliasHarness({
         history: () => [
           {
@@ -344,7 +440,7 @@ describe("native alias argument and mutation contract", () => {
                 type: "tool",
                 tool: surface,
                 callID: "edit-call",
-                state: { status: "running" },
+                state: { status: "running", input: currentInput },
               },
             ],
           },
@@ -353,6 +449,7 @@ describe("native alias argument and mutation contract", () => {
       const tools = aliasRegistry(value);
       const readResult = await issueSnapshot(value, toolContext, "file.txt");
       const args = replaceArgs("file.txt", String(readResult.metadata.snapshotId));
+      currentInput = args;
 
       await value["tool.execute.before"]?.(
         { tool: surface, sessionID: toolContext.sessionID, callID: "edit-call" },
@@ -402,6 +499,7 @@ describe("native alias argument and mutation contract", () => {
   test("resolves a root worktree sentinel on the fixture drive", async () => {
     await writeFile(join(root, "file.txt"), "one\ntwo\n");
     const toolContext = context({ worktree: "/" });
+    let currentInput: unknown;
     const { value } = await aliasHarness({
       worktree: "/",
       history: () => [
@@ -411,7 +509,7 @@ describe("native alias argument and mutation contract", () => {
               type: "tool",
               tool: "edit",
               callID: "edit-call",
-              state: { status: "running" },
+              state: { status: "running", input: currentInput },
             },
           ],
         },
@@ -420,6 +518,7 @@ describe("native alias argument and mutation contract", () => {
     const { edit } = aliasRegistry(value);
     const snapshot = await issueSnapshot(value, toolContext, "file.txt");
     const args = replaceArgs("file.txt", String(snapshot.metadata.snapshotId));
+    currentInput = args;
 
     await value["tool.execute.before"]?.(
       { tool: "edit", sessionID: toolContext.sessionID, callID: "edit-call" },
@@ -428,6 +527,79 @@ describe("native alias argument and mutation contract", () => {
     await edit.execute(args, toolContext);
 
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\nTWO\n");
+  });
+
+  test("does not transfer snapshots between case-distinct canonical files", async () => {
+    if (process.platform === "win32") {
+      const enabled = Bun.spawnSync(["fsutil", "file", "SetCaseSensitiveInfo", root, "enable"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      if (enabled.exitCode !== 0) return;
+    }
+    const upperPath = join(root, "Case.txt");
+    const lowerPath = join(root, "case.txt");
+    await writeFile(upperPath, "one\ntwo\n");
+    await writeFile(lowerPath, "alpha\nbeta\n");
+    if ((await realpath(upperPath)) === (await realpath(lowerPath))) return;
+    const toolContext = context();
+    const { value } = await aliasHarness();
+    const snapshot = await issueSnapshot(value, toolContext, "Case.txt");
+    const { edit } = aliasRegistry(value);
+
+    await expect(
+      edit.execute(
+        replaceArgs("case.txt", String(snapshot.metadata.snapshotId), "BETA"),
+        toolContext,
+      ),
+    ).rejects.toThrow("PATH_MISMATCH:");
+    expect(await readFile(upperPath, "utf8")).toBe("one\ntwo\n");
+    expect(await readFile(lowerPath, "utf8")).toBe("alpha\nbeta\n");
+  });
+
+  test("rechecks a concurrently invalidated snapshot after acquiring the path lock", async () => {
+    await writeFile(join(root, "concurrent.txt"), "one\ntwo\n");
+    let releaseApproval = () => {};
+    let markApproval = () => {};
+    const approvalStarted = new Promise<void>((resolve) => {
+      markApproval = resolve;
+    });
+    const approvalGate = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    let editApprovals = 0;
+    const toolContext = context({
+      async onAsk(request) {
+        if (request.permission !== "edit") return;
+        editApprovals += 1;
+        if (editApprovals === 1) {
+          markApproval();
+          await approvalGate;
+        }
+      },
+    });
+    const { value } = await aliasHarness();
+    const snapshot = await issueSnapshot(value, toolContext, "concurrent.txt");
+    const snapshotId = String(snapshot.metadata.snapshotId);
+    const { edit } = aliasRegistry(value);
+    const first = edit.execute(replaceArgs("concurrent.txt", snapshotId, "FIRST"), toolContext);
+    await approvalStarted;
+    const second = edit.execute(
+      { ...replaceArgs("concurrent.txt", snapshotId, "SECOND"), rebase: "unique" },
+      toolContext,
+    );
+    const secondOutcome = second.then(
+      (value) => ({ value, error: undefined }),
+      (error: unknown) => ({ value: undefined, error }),
+    );
+    releaseApproval();
+
+    await expect(first).resolves.toBeDefined();
+    const outcome = await secondOutcome;
+    expect(outcome.value).toBeUndefined();
+    expect(String(outcome.error)).toContain("SNAPSHOT_UNKNOWN:");
+    expect(editApprovals).toBe(1);
+    expect(await readFile(join(root, "concurrent.txt"), "utf8")).toBe("one\nFIRST\n");
   });
 
   test("rejects oversized renderer metadata before edit permission and publication", async () => {
@@ -659,6 +831,7 @@ describe("native alias continuation safety", () => {
     });
     const sessionID = "synthetic-compaction";
     const callID = "compacted-edit";
+    let currentInput: unknown;
     const { value, historyCalls } = await aliasHarness({
       history: () => [
         {
@@ -674,7 +847,14 @@ describe("native alias continuation safety", () => {
         },
         {
           info: { role: "assistant", synthetic: true },
-          parts: [{ type: "tool", tool: "edit", callID, state: { status: "running" } }],
+          parts: [
+            {
+              type: "tool",
+              tool: "edit",
+              callID,
+              state: { status: "running", input: currentInput },
+            },
+          ],
         },
       ],
     });
@@ -682,6 +862,7 @@ describe("native alias continuation safety", () => {
     const toolContext = context({ sessionID });
     const snapshot = await issueSnapshot(value, toolContext, "compacted.txt");
     const args = replaceArgs("compacted.txt", String(snapshot.metadata.snapshotId), "COMPACTED");
+    currentInput = args;
     await value["tool.execute.before"]?.({ tool: "edit", sessionID, callID }, { args });
     await aliasRegistry(value).edit.execute(args, toolContext);
 

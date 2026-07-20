@@ -2,13 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
-export interface PilotReservation {
-  pilot: string;
-  sourceCommit: string;
-  runnerSourceSha256: string;
-  scheduleManifestSha256: string;
-}
-
 async function syncDirectory(path: string): Promise<void> {
   try {
     const directory = await open(path, "r");
@@ -43,7 +36,6 @@ export async function reservePilotOutput(
   path: string,
   root: string,
   repository: string,
-  reservation?: PilotReservation,
 ): Promise<void> {
   if (dirname(path) !== root) {
     throw new Error("--native-alias-pilot output must be a direct child of its results root.");
@@ -79,57 +71,23 @@ export async function reservePilotOutput(
   const canonicalRepository = await realpath(repository);
   const canonicalRoot = await realpath(root);
   const expectedRoot = join(canonicalRepository, repositoryRelative);
-  const sameRoot =
-    process.platform === "win32"
-      ? canonicalRoot.toLowerCase() === expectedRoot.toLowerCase()
-      : canonicalRoot === expectedRoot;
-  if (!sameRoot) {
+  if (canonicalRoot !== expectedRoot) {
     throw new Error("The native-alias pilot results root must not traverse links or junctions.");
   }
-
-  const reservationPath = reservation
-    ? join(root, `.${reservation.pilot}.reservation.json`)
-    : undefined;
-  if (reservationPath && reservation) {
-    try {
-      const reservationFile = await open(reservationPath, "wx");
-      try {
-        await reservationFile.writeFile(
-          `${JSON.stringify({ schemaVersion: 1, reservedAt: new Date().toISOString(), ...reservation }, null, 2)}\n`,
-        );
-        await reservationFile.sync();
-      } finally {
-        await reservationFile.close();
-      }
-      await syncDirectory(root);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new Error(
-          `${reservation.pilot} already has a paid execution reservation and cannot be resumed or retried.`,
-        );
-      }
-      throw error;
-    }
-  }
-
-  try {
-    await reserveOutput(path);
-  } catch (error) {
-    if (reservationPath) {
-      await rm(reservationPath, { force: true });
-      await syncDirectory(root);
-    }
-    throw error;
-  }
+  await reserveOutput(path);
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  await writeBytesAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export async function writeBytesAtomic(path: string, value: Uint8Array | string): Promise<void> {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let renamed = false;
   try {
     const file = await open(temporary, "wx");
     try {
-      await file.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+      await file.writeFile(value);
       await file.sync();
     } finally {
       await file.close();
@@ -156,7 +114,6 @@ export function journalAccounting(
   results: ReadonlyArray<{ modelRequests: number; accountedCost: number }>,
   activeSession: unknown,
   activeRequestLimit: number,
-  activeCostLimitUsd: number,
 ) {
   const accountedRequests = results.reduce((sum, row) => sum + row.modelRequests, 0);
   const accountedCostUsd = results.reduce((sum, row) => sum + row.accountedCost, 0);
@@ -166,8 +123,7 @@ export function journalAccounting(
     accountingComplete: activeSession === null,
     accountedRequestsUpperBound:
       accountedRequests + (activeSession === null ? 0 : activeRequestLimit),
-    accountedCostUpperBoundUsd:
-      accountedCostUsd + (activeSession === null ? 0 : activeCostLimitUsd),
+    accountedCostUpperBoundUsd: activeSession === null ? accountedCostUsd : null,
   };
 }
 

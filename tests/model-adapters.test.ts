@@ -4,7 +4,8 @@ import {
   adapterPluginConfig,
   adapterSetManifest,
   modelAdapterSets,
-  nativeAliasPilotV2,
+  nativeAliasPilotV3,
+  pilotProviderConfig,
   verificationSurfaceForAdapterSet,
 } from "../benchmarks/model/adapters.js";
 import { modelTaskSets } from "../benchmarks/model/tasks.js";
@@ -35,13 +36,25 @@ describe("model benchmark adapters", () => {
   });
 
   test("freezes the unapproved 96-session native alias pilot proposal", () => {
-    expect(nativeAliasPilotV2).toEqual({
-      id: "native-alias-pilot-v2",
-      paidExecutionApproved: false,
+    expect(nativeAliasPilotV3).toEqual({
+      id: "native-alias-pilot-v3",
+      approvalAnchorPath: "benchmarks/model/native-alias-pilot-v3.approval.json",
+      approvalRequirements: {
+        externalBudgetReceipt: true,
+        providerEndpointAttestation: true,
+        exactPreflightReceipt: true,
+        durablePilotReservation: true,
+      },
       taskSet: "baseline-v1",
       adapterSet: "native-aliases-v1",
       repeats: 1,
       maxAgentSteps: 12,
+      sessionTimeoutMs: 300000,
+      requestedOutputTokenLimit: 2048,
+      requiredBunVersion: "1.3.14",
+      requiredNpmVersion: "11.18.0",
+      requiredOpenCodeVersion: "1.18.3",
+      traceByteLimit: 8388608,
       sessionLimit: 96,
       requestLimit: 1152,
       totalCostLimitUsd: 4,
@@ -55,16 +68,34 @@ describe("model benchmark adapters", () => {
         {
           model: "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
           credential: "api",
+          endpoint: { providerOrder: ["nvidia"], allowFallbacks: false },
         },
         {
           model: "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
           credential: "api",
+          endpoint: { providerOrder: ["nvidia"], allowFallbacks: false },
         },
       ],
     });
-    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV2.taskManifestSha256);
+    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV3.taskManifestSha256);
     expect(sha256(adapterSetManifest("native-aliases-v1"))).toBe(
-      nativeAliasPilotV2.adapterManifestSha256,
+      nativeAliasPilotV3.adapterManifestSha256,
     );
+  });
+
+  test("disables OpenRouter fallback for the proposed pilot", () => {
+    expect(pilotProviderConfig("openai/gpt-5.6-sol")).toEqual({});
+    expect(pilotProviderConfig("openrouter/nvidia/model:free")).toEqual({
+      provider: {
+        openrouter: {
+          models: {
+            "nvidia/model:free": {
+              options: { provider: { order: ["nvidia"], allow_fallbacks: false } },
+            },
+          },
+        },
+      },
+    });
+    expect(() => pilotProviderConfig("other/model")).toThrow();
   });
 });

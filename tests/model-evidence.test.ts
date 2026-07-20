@@ -19,39 +19,19 @@ afterEach(async () => {
 });
 
 describe("model evidence durability", () => {
-  test("permanently reserves a paid pilot identity", async () => {
+  test("confines pilot output without claiming an in-repository reservation", async () => {
     const repository = await mkdtemp(join(tmpdir(), "better-hashline-evidence-"));
     temporaryRoots.push(repository);
     const root = join(repository, "benchmarks", "results", "model");
-    const reservation = {
-      pilot: "pilot-v2",
-      sourceCommit: "a".repeat(40),
-      runnerSourceSha256: "b".repeat(64),
-      scheduleManifestSha256: "c".repeat(64),
-    };
-
-    await reservePilotOutput(join(root, "first"), root, repository, reservation);
-    const stored = JSON.parse(
-      await readFile(join(root, ".pilot-v2.reservation.json"), "utf8"),
-    ) as Record<string, unknown>;
-    expect(stored).toMatchObject({ schemaVersion: 1, ...reservation });
-
-    await expect(
-      reservePilotOutput(join(root, "second"), root, repository, reservation),
-    ).rejects.toThrow("cannot be resumed or retried");
+    await reservePilotOutput(join(root, "first"), root, repository);
+    await reservePilotOutput(join(root, "second"), root, repository);
+    await expect(access(join(root, ".native-alias-pilot-v3.reservation.json"))).rejects.toThrow();
   });
 
-  test("rejects unsafe roots and rolls back a failed reservation", async () => {
+  test("rejects unsafe roots and occupied output paths", async () => {
     const repository = await mkdtemp(join(tmpdir(), "better-hashline-evidence-"));
     temporaryRoots.push(repository);
     const root = join(repository, "benchmarks", "results", "model");
-    const reservation = {
-      pilot: "pilot-v2",
-      sourceCommit: "a".repeat(40),
-      runnerSourceSha256: "b".repeat(64),
-      scheduleManifestSha256: "c".repeat(64),
-    };
-
     await expect(reservePilotOutput(join(root, "nested", "run"), root, repository)).rejects.toThrow(
       "direct child",
     );
@@ -71,10 +51,7 @@ describe("model evidence durability", () => {
     await mkdir(root, { recursive: true });
     const occupied = join(root, "occupied");
     await mkdir(occupied);
-    await expect(reservePilotOutput(occupied, root, repository, reservation)).rejects.toThrow(
-      "already exists",
-    );
-    await expect(access(join(root, ".pilot-v2.reservation.json"))).rejects.toThrow();
+    await expect(reservePilotOutput(occupied, root, repository)).rejects.toThrow("already exists");
   });
 
   test("writes JSON atomically and fails closed for an unavailable parent", async () => {
@@ -88,19 +65,19 @@ describe("model evidence durability", () => {
   });
 
   test("bounds active accounting and hashes private failures", () => {
-    expect(journalAccounting([{ modelRequests: 4, accountedCost: 0.25 }], null, 12, 1)).toEqual({
+    expect(journalAccounting([{ modelRequests: 4, accountedCost: 0.25 }], null, 12)).toEqual({
       accountedRequests: 4,
       accountedCostUsd: 0.25,
       accountingComplete: true,
       accountedRequestsUpperBound: 4,
       accountedCostUpperBoundUsd: 0.25,
     });
-    expect(journalAccounting([{ modelRequests: 4, accountedCost: 0.25 }], {}, 12, 1)).toEqual({
+    expect(journalAccounting([{ modelRequests: 4, accountedCost: 0.25 }], {}, 12)).toEqual({
       accountedRequests: 4,
       accountedCostUsd: 0.25,
       accountingComplete: false,
       accountedRequestsUpperBound: 16,
-      accountedCostUpperBoundUsd: 1.25,
+      accountedCostUpperBoundUsd: null,
     });
 
     const failure = journalFailure(new Error("private C:\\Users\\name\\auth.json"));

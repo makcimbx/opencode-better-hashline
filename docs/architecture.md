@@ -12,6 +12,11 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/presentation.ts` | Experimental native-alias metadata, canonical fingerprints, and serialized-size measurement |
 | `src/native-alias.ts` | Bounded exact-host detection through OpenCode's configured SDK transport |
 | `src/session-protocol.ts` | Bounded persisted-history validation and instance-local alias session binding |
+| `src/session-export.ts` | Strict bounded export identity and independently bound worktree-locator attestation |
+| `src/model-trace.ts` | Shared trace/export correlation and native-alias benchmark oracle |
+| `src/path-identity.ts` | Exact canonical path equality, containment, and filesystem-root identity |
+| `src/process-capture.ts` | Bounded subprocess capture and process-tree termination |
+| `src/exact-tree.ts` | Race-resistant physical tree, file-identity, reparse, and stream evaluation |
 | `src/rebase.ts` | Exact unique range/boundary relocation with a cumulative comparison budget |
 | `src/edits.ts` | Operation validation, transfer effect analysis, immutable planning, bounded projection, final bytes |
 | `src/filesystem.ts` | Canonicalization, OpenCode permissions, stable reads, locks, publication |

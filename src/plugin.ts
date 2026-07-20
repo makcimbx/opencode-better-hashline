@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { isAbsolute, parse, relative, resolve } from "node:path";
+import { isAbsolute, parse, resolve } from "node:path";
 import { type Plugin, type ToolContext, type ToolResult, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
 import type { EditOperation, RebaseMode } from "./edits.js";
@@ -27,6 +27,7 @@ import {
   SUPPORTED_OPENCODE_VERSIONS,
 } from "./native-alias.js";
 import { type ResolvedOptions, resolveOptions } from "./options.js";
+import { exactRelativePath, sameFilesystemRoot } from "./path-identity.js";
 import {
   buildNativeAliasMetadata,
   countUnifiedDiffChanges,
@@ -190,15 +191,20 @@ function scopeFor(context: { sessionID: string; worktree: string }): SnapshotSco
 }
 
 function sameCanonicalPath(left: string, right: string): boolean {
-  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+  return left === right;
 }
 
 function displayPath(worktree: string, canonicalPath: string): string {
-  return relative(worktree, canonicalPath) || canonicalPath;
+  return exactRelativePath(worktree, canonicalPath) ?? canonicalPath;
 }
 
 function hostWorktreePath(worktree: string, directory: string): string {
-  return worktree === "/" || worktree === "\\" ? parse(resolve(directory)).root : resolve(worktree);
+  if (worktree === "/") return parse(resolve(directory)).root;
+  return resolve(worktree);
+}
+
+function samePathRoot(left: string, right: string): boolean {
+  return sameFilesystemRoot(left, right);
 }
 
 function unifiedDiff(path: string, before: string, after: string): string {
@@ -489,12 +495,18 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     sessionId: string,
     directory: string,
     worktree: string,
-    currentCall?: { id: string; tool: "edit" | "apply_patch" },
+    currentCall?: { id: string; tool: "edit" | "apply_patch"; input?: unknown },
   ): Promise<string> {
     const alias = assertAliasAvailable();
     let canonicalWorktree: string;
     try {
       const candidate = hostWorktreePath(worktree, directory);
+      if (!samePathRoot(candidate, resolve(directory))) {
+        fail(
+          "SESSION_PROTOCOL_MISMATCH",
+          "OpenCode worktree and directory use different filesystem roots. Start a new session before editing.",
+        );
+      }
       canonicalWorktree =
         parse(candidate).root === candidate ? candidate : await realpath(candidate);
     } catch {
@@ -524,7 +536,8 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         "OpenCode session history could not be inspected. Start a new session before editing.",
       );
     }
-    const historyOptions = currentCall === undefined ? {} : { currentCall };
+    const historyOptions =
+      currentCall === undefined ? { sessionId, directory } : { currentCall, sessionId, directory };
     assertNativeAliasHistory(messages, identity, historyOptions);
     sessions.bind(sessionId, fingerprint);
     return canonicalWorktree;
@@ -612,7 +625,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     const resolved = await resolveExistingFile(args.filePath, context.directory);
     const shownPath = displayPath(aliasWorktree ?? context.worktree, resolved.canonicalPath);
     const aliasPath = shownPath.replaceAll("\\", "/");
-    if (toolName !== "hashline_edit" && (isAbsolute(shownPath) || aliasPath.startsWith("../"))) {
+    if (
+      toolName !== "hashline_edit" &&
+      (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
+    ) {
       fail("UNSUPPORTED_FILE", "Native aliases cannot edit files outside the current worktree.");
     }
     const scope = scopeFor(context);
@@ -626,6 +642,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       await authorizeExternal(context, resolved);
 
       return await withPathLock(resolved.canonicalPath, async () => {
+        snapshots.peek(scope, snapshot.id);
         const stable = await readStableFile(resolved, options.maxFileBytes, true, context.abort);
         const current = decodeTextDocument(stable.bytes, options.maxLines);
         const plan = planEdits({
@@ -804,6 +821,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       await assertAliasSession(hookInput.sessionID, input.directory, input.worktree, {
         id: hookInput.callID,
         tool: hookInput.tool,
+        input: output.args,
       });
     },
     async "tool.execute.after"(input, output) {

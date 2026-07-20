@@ -9,7 +9,7 @@ Options:
   --surface <all|hashline|native-aliases>  Verification surface (default: all)
   --opencode <path>                        OpenCode executable (default: PATH)
   --json                                   Emit a machine-readable report
-  --keep-temporary-files                   Retain isolated verification fixtures
+  --keep-temporary-files                   Retain only validated sanitized exports
   --help                                   Show this help
 `;
 }

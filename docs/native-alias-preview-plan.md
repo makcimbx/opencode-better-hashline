@@ -440,7 +440,8 @@ No error may cause automatic execution by a built-in tool or silent surface fall
 ## Implementation Phases
 
 Phases 0-5 and the Phase 6 harness were implemented on the feature branch on 2026-07-20. The Phase 6
-behavioral gate is incomplete: pilot v1 failed closed and corrected v2 is unapproved and hard-disabled.
+behavioral gate is incomplete: pilot v1 failed closed, v2 was retired without execution, and corrected
+v3 is unapproved and hard-disabled.
 The default production registry
 remains exactly `hashline_read`, `hashline_edit`, and `hashline_write`. The explicit alias preview,
 deterministic matrix, collision fixtures, credential-free packed verifier, and model adapter are
@@ -567,7 +568,7 @@ Add a separate benchmark adapter:
 better-hashline-native-aliases
 ```
 
-Pilot v1 compared unique and alias surfaces, not native OpenCode. The corrected, unapproved v2
+Pilot v1 compared unique and alias surfaces, not native OpenCode. The corrected, unapproved v3
 manifest is hard-disabled and retains these proposed bounds:
 
 | Dimension | Value |
@@ -578,7 +579,10 @@ manifest is hard-disabled and retains these proposed bounds:
 | Repeats | 1 |
 | Sessions | 96 |
 | Maximum model requests | 1,152 (12 per session) |
-| Maximum reported cost | USD 4 total (USD 1 per model run) |
+| Session timeout | 300,000 ms |
+| Requested host output-token limit | 2,048 per model request; not independently proven as a provider cap |
+| Maximum retained JSONL | 8 MiB per session |
+| Reported-cost stop thresholds | USD 4 total (USD 1 per model run) |
 | Authentication | One isolated copy of the approved OpenCode auth file |
 
 The exact model IDs are `openai/gpt-5.6-luna` (`medium`), `openai/gpt-5.6-sol`
@@ -587,18 +591,33 @@ The exact model IDs are `openai/gpt-5.6-luna` (`medium`), `openai/gpt-5.6-sol`
 models, variants, tasks, adapter order, 96 sessions, 1,152 requests, and the USD 4 stop threshold.
 The manifest pins task SHA-256 `8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a`
 and adapter-behavior SHA-256 `cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8`.
-If v2 is separately approved, only the approved auth-file copy and a clean committed worktree are
-accepted; dirty overrides are forbidden. Paid execution also approves the exact committed HEAD and runner-source SHA-256, confines
+If v3 is separately approved, only the approved auth-file copy and a clean approval commit C are
+accepted; dirty overrides are forbidden. Paid execution binds candidate A, approval commit C, bundle B,
+and A's staged runner-executable SHA-256, confines
 output to ignored model results, and snapshots authentication once before the first session. Provider
 retry status terminates the session before another request, every completed
 session is atomically journaled, and the first process, identity, protocol, request, cost, or exact-file
 failure stops the entire pilot without substitution or retry.
 
-The v2 oracle canonicalizes the disposable fixture used as the tool-context worktree and keeps both
-exact-file confinement and renderer/protocol path validation tied to that root. The unsanitized export
-is inspected only in memory for session consistency; only a sanitized export is persisted. Pilot v2 is
-not approved for paid execution; its manifest sets
-`paidExecutionApproved:false`, and enabling it requires a separate reviewed approval commit.
+The v3 oracle physically confines canonical files to the disposable fixture, but treats the one strictly
+attested worktree from the unsanitized session export as the sole renderer/protocol path authority. It
+requires exact trace-to-export correlation for session, message, part, call, tool, state, input, output,
+error, and metadata; validates the complete persisted history; and binds every expected file mutation to
+the correct executor. The unsanitized export is inspected only in memory; only a sanitized export is
+persisted. A normalized v1-topology fixture exercises the legacy false negative, the corrected valid
+decision, and forged/outside-fixture rejection. It declares the private incident trace hash but does not
+claim cryptographic replay of the untracked raw trace. Packed verification executes this same oracle and a
+one-request retry-abort probe. Pilot v3 is not approved for paid execution; its committed approval anchor
+is null, and activation requires the reviewed A/B/C handoff below.
+
+The proposal also freezes OpenRouter provider order with fallback disabled, the timeout/output/trace
+limits above, exact-tree evaluation without links or special entries, and an exact schema-v6 preflight
+receipt. Candidate commit A retains the null anchor and produces the exact receipt, tarball,
+package-tree manifest, and staged runner. External canonical bundle B binds those hashes to auth,
+provider endpoint, hard-budget, exact user approval, toolchain, schedule, and broker evidence. Reviewed
+direct-child commit C may change only the anchor to B's hash and must reuse A's runner bytes. Before any
+model process, the approved broker must atomically consume the global v3 identity in durable state outside
+every repository and worktree. Those external attestations and broker are not supplied by this repository.
 
 Pilot outcomes:
 
@@ -615,8 +634,9 @@ Pilot outcomes:
 The pilot is transport evidence only. It cannot establish superiority. It runs only after explicit
 user approval and all existing model/auth/cost gates in the model evaluation plan.
 
-Implementation status: the `native-aliases-v1` adapter set, marker/retry metrics, and model-free v2
-harness checks are complete. Any v2 dry run and packed preflight must be repeated from a future
+Implementation status: the `native-aliases-v1` adapter set, authoritative oracle, mutation ledger,
+exact-tree evaluator, marker/retry metrics, and model-free v3 harness checks are implemented. Any v3
+dry run and packed preflight must be repeated from a future
 approval commit before paid execution. Pilot v1 executed one of 96 sessions and then stopped. It consumed
 four requests at USD 0 reported cost and produced no model-comparison result. The failure was a
 benchmark-oracle worktree mismatch, not a runtime, model, exact-file, or retry failure. Raw evidence

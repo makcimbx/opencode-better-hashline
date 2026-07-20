@@ -18,7 +18,7 @@ type StructuredResult = {
 let root = "";
 let values: Hooks[] = [];
 let servers: Array<ReturnType<typeof Bun.serve>> = [];
-let currentCall: { tool: string; callID: string } | undefined;
+let currentCall: { tool: string; callID: string; input: Record<string, unknown> } | undefined;
 
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), "better-hashline-collision-")));
@@ -89,7 +89,7 @@ class CollisionHost {
     toolContext: ToolContext,
   ): Promise<StructuredResult> {
     const callID = `call-${randomUUID()}`;
-    currentCall = { tool: toolName, callID };
+    currentCall = { tool: toolName, callID, input: args };
     try {
       for (const plugin of this.plugins) {
         await plugin["tool.execute.before"]?.(
@@ -149,19 +149,26 @@ async function createBetter(): Promise<Hooks> {
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
-      if (new URL(request.url).pathname === "/global/health") {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/global/health") {
         return Response.json({ healthy: true, version: "1.18.3" });
       }
+      const sessionID = decodeURIComponent(pathname.split("/").at(-2) ?? "");
+      const messageID = "message-current";
       return Response.json(
         currentCall
           ? [
               {
+                info: { id: messageID, sessionID },
                 parts: [
                   {
+                    id: "part-current",
                     type: "tool",
                     tool: currentCall.tool,
                     callID: currentCall.callID,
-                    state: { status: "running" },
+                    sessionID,
+                    messageID,
+                    state: { status: "running", input: currentCall.input, time: { start: 1 } },
                   },
                 ],
               },

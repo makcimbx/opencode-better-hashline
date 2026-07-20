@@ -2,6 +2,11 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { captureBoundedProcess } from "../src/process-capture.js";
+import {
+  assertFullVerificationReport,
+  PINNED_OPENCODE_VERSION,
+} from "../src/verification-report.js";
 
 interface PackFile {
   path: string;
@@ -14,88 +19,22 @@ interface PackResult {
 
 const COMMAND_TIMEOUT_MS = 20 * 60_000;
 
-type SpawnedProcess = ReturnType<typeof Bun.spawn>;
-
-async function exitsWithin(child: SpawnedProcess, milliseconds: number): Promise<boolean> {
-  return new Promise((resolveExit) => {
-    const timeout = setTimeout(() => resolveExit(false), milliseconds);
-    child.exited.then(() => {
-      clearTimeout(timeout);
-      resolveExit(true);
-    });
-  });
-}
-
-async function terminateProcessTree(child: SpawnedProcess): Promise<void> {
-  if (process.platform === "win32") {
-    const killer = Bun.spawn(["taskkill", "/PID", String(child.pid), "/T", "/F"], {
-      stderr: "ignore",
-      stdout: "ignore",
-    });
-    if (!(await exitsWithin(killer, 5_000))) killer.kill();
-  } else {
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      child.kill("SIGTERM");
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {
-      child.kill("SIGKILL");
-    }
-  }
-  if (!(await exitsWithin(child, 5_000))) {
-    child.kill("SIGKILL");
-    if (!(await exitsWithin(child, 5_000))) {
-      throw new Error(`Process tree ${child.pid} did not terminate`);
-    }
-  }
-}
-
 async function capture(command: string[], cwd: string, env?: Record<string, string | undefined>) {
-  const child = Bun.spawn(command, {
+  const result = await captureBoundedProcess({
+    command,
     cwd,
-    detached: process.platform !== "win32",
-    ...(env ? { env } : {}),
-    stderr: "pipe",
-    stdout: "pipe",
+    env: env ?? process.env,
+    timeoutMs: COMMAND_TIMEOUT_MS,
+    stdoutLimit: 32 * 1024 * 1024,
+    stderrLimit: 8 * 1024 * 1024,
   });
-  const output = Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  let commandTimeout: ReturnType<typeof setTimeout> | undefined;
-  const outcome = await Promise.race([
-    child.exited.then((exitCode) => ({ kind: "completed" as const, exitCode })),
-    new Promise<{ kind: "timeout" }>((resolveTimeout) => {
-      commandTimeout = setTimeout(() => resolveTimeout({ kind: "timeout" }), COMMAND_TIMEOUT_MS);
-    }),
-  ]);
-  if (commandTimeout) clearTimeout(commandTimeout);
-  if (outcome.kind === "timeout") {
-    await terminateProcessTree(child);
-  }
-  let outputTimeout: ReturnType<typeof setTimeout> | undefined;
-  const [stdout, stderr] = await Promise.race([
-    output,
-    new Promise<never>((_, reject) => {
-      outputTimeout = setTimeout(
-        () => reject(new Error(`${command.join(" ")} did not close output streams`)),
-        5_000,
-      );
-    }),
-  ]);
-  if (outputTimeout) clearTimeout(outputTimeout);
-
   return {
-    success: outcome.kind === "completed" && outcome.exitCode === 0,
-    stdout,
-    stderr:
-      outcome.kind === "timeout"
-        ? `${stderr}\nCommand timed out after ${COMMAND_TIMEOUT_MS} ms.`
-        : stderr,
+    success:
+      result.exitCode === 0 && !result.timedOut && !result.stdoutOverflow && !result.stderrOverflow,
+    stdout: result.stdout,
+    stderr: result.timedOut
+      ? `${result.stderr}\nCommand timed out after ${COMMAND_TIMEOUT_MS} ms.`
+      : result.stderr,
   };
 }
 
@@ -118,8 +57,10 @@ let primaryError: unknown;
 let successMessage: string | undefined;
 
 try {
+  const npmExecutable = Bun.which("npm");
+  if (!npmExecutable) throw new Error("Unable to resolve npm on PATH");
   const packed = JSON.parse(
-    await run(["npm", "pack", "--json", "--ignore-scripts"], root),
+    await run([npmExecutable, "pack", "--json", "--ignore-scripts"], root),
   ) as PackResult[];
   const result = packed[0];
   if (!result) throw new Error("npm pack returned no package");
@@ -276,27 +217,14 @@ try {
   }
   if (!installedBin) throw new Error("Packed package did not install its CLI bin shim");
   await run([installedBin, "--help"], sandbox, probeEnvironment);
-  const verification = JSON.parse(
+  const verification: unknown = JSON.parse(
     await run(
       [installedBin, "verify", "--surface", "all", "--opencode", opencode, "--json"],
       sandbox,
     ),
-  ) as {
-    ok?: boolean;
-    rollbackVerified?: boolean;
-    modelRoutingVerified?: boolean;
-    editPermissionMatrixVerified?: boolean;
-    cases?: unknown[];
-  };
-  if (
-    !verification.ok ||
-    !verification.rollbackVerified ||
-    !verification.modelRoutingVerified ||
-    !verification.editPermissionMatrixVerified ||
-    verification.cases?.length !== 3
-  ) {
-    throw new Error("Packed verification CLI did not verify all three routes");
-  }
+  );
+  if (!packageJson.version) throw new Error("Packed package has no version");
+  assertFullVerificationReport(verification, packageJson.version, PINNED_OPENCODE_VERSION);
   successMessage = `Verified ${basename(result.filename)} (v${packageJson.version ?? "unknown"})`;
 } catch (error) {
   primaryError = error;

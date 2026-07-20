@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "declaredSourceTraceSha256": "c4805f9c0644a9eb4b7050e892ba07c9800fb278ebebb27f3dd93a4e7dfbf49f",
+  "surface": "apply_patch",
+  "fixtureSegments": ["Users", "$RUNNER", "Temp", "$FIXTURE"],
+  "filePath": "src/config.ts",
+  "legacyDecision": "invalid",
+  "correctedDecision": "valid"
+}
