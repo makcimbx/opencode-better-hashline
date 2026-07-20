@@ -981,7 +981,7 @@ async function verifyScenario(
       invariant(pathDeny.stdout.includes("Path denial verified"), "Path edit denial did not run");
       invariant(
         pathDeny.stdout.includes("PERMISSION_DENIED"),
-        "Path edit denial returned wrong error",
+        `Path edit denial returned wrong error:\n${pathDeny.stdout}`,
       );
       invariant(providerRequests.length === pathDenyStart + 3, "Path denial probe retried");
       invariant((await readFile(fixture, "utf8")) === INITIAL_BYTES, "Path denial changed bytes");
