@@ -1,4 +1,5 @@
-import { isAbsolute, parse, relative, resolve, sep } from "node:path";
+import { statSync } from "node:fs";
+import { basename, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 export function exactRelativePath(root: string, target: string): string | undefined {
   const resolvedRoot = resolve(root);
@@ -13,6 +14,29 @@ export function isInsideCanonicalPath(root: string, target: string): boolean {
     value !== undefined &&
     (value === "" || (!value.startsWith(`..${sep}`) && value !== ".." && !isAbsolute(value)))
   );
+}
+
+export function physicalRelativePath(root: string, target: string): string | undefined {
+  const rootIdentity = statSync(resolve(root));
+  let current = resolve(target);
+  const segments: string[] = [];
+
+  while (true) {
+    const identity = statSync(current);
+    if (
+      rootIdentity.ino !== 0 &&
+      identity.ino !== 0 &&
+      rootIdentity.dev === identity.dev &&
+      rootIdentity.ino === identity.ino
+    ) {
+      return segments.join(sep);
+    }
+
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    segments.unshift(basename(current));
+    current = parent;
+  }
 }
 
 export function sameFilesystemRoot(left: string, right: string): boolean {

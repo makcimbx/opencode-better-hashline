@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
-import { exactRelativePath, isInsideCanonicalPath } from "./path-identity.js";
+import { exactRelativePath, physicalRelativePath } from "./path-identity.js";
 import { canonicalJson } from "./presentation.js";
 import { attestSessionExport } from "./session-export.js";
 import type { NativeAliasProtocolIdentity } from "./session-protocol.js";
@@ -219,11 +219,11 @@ function protocolMarker(
     }
     const root = canonicalPathFn(expected.allowedPathRoot);
     const target = canonicalPathFn(canonicalPath);
-    const confined = exactRelativePath(root, target);
-    if (confined === undefined || !isInsideCanonicalPath(root, target)) {
+    const confined = physicalRelativePath(root, target);
+    if (confined === undefined) {
       return { marker: "invalid", targetPath: null, reason: "canonical-path-outside-fixture" };
     }
-    const expectedShownPath = exactRelativePath(
+    const expectedShownPath = physicalRelativePath(
       canonicalPathFn(expected.worktree),
       target,
     )?.replaceAll("\\", "/");
