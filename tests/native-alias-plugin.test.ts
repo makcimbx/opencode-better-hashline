@@ -33,6 +33,7 @@ type AliasHarnessOptions = {
   history?: unknown | ((sessionId: string) => unknown);
   historyError?: boolean;
   pluginOptions?: Record<string, unknown>;
+  worktree?: string;
 };
 
 let root = "";
@@ -71,6 +72,7 @@ function context(
     asks?: AskRecord[];
     metadata?: Array<Record<string, unknown>>;
     denyEdit?: boolean;
+    worktree?: string;
   } = {},
 ): ToolContext {
   return {
@@ -78,7 +80,7 @@ function context(
     messageID: "message",
     agent: "build",
     directory: root,
-    worktree: root,
+    worktree: input.worktree ?? root,
     abort: new AbortController().signal,
     metadata(value) {
       input.metadata?.push(value as Record<string, unknown>);
@@ -120,7 +122,7 @@ async function aliasHarness(options: AliasHarnessOptions = {}) {
       {
         serverUrl: server.url,
         directory: root,
-        worktree: root,
+        worktree: options.worktree ?? root,
         client: {
           _client: {
             getConfig() {
@@ -396,6 +398,37 @@ describe("native alias argument and mutation contract", () => {
       expect(metadataUpdates.at(-1)?.metadata).toEqual(result.metadata);
     });
   }
+
+  test("resolves a root worktree sentinel on the fixture drive", async () => {
+    await writeFile(join(root, "file.txt"), "one\ntwo\n");
+    const toolContext = context({ worktree: "/" });
+    const { value } = await aliasHarness({
+      worktree: "/",
+      history: () => [
+        {
+          parts: [
+            {
+              type: "tool",
+              tool: "edit",
+              callID: "edit-call",
+              state: { status: "running" },
+            },
+          ],
+        },
+      ],
+    });
+    const { edit } = aliasRegistry(value);
+    const snapshot = await issueSnapshot(value, toolContext, "file.txt");
+    const args = replaceArgs("file.txt", String(snapshot.metadata.snapshotId));
+
+    await value["tool.execute.before"]?.(
+      { tool: "edit", sessionID: toolContext.sessionID, callID: "edit-call" },
+      { args },
+    );
+    await edit.execute(args, toolContext);
+
+    expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\nTWO\n");
+  });
 
   test("rejects oversized renderer metadata before edit permission and publication", async () => {
     await writeFile(join(root, "large.txt"), "one\ntwo\n");

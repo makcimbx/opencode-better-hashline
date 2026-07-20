@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, parse, relative, resolve } from "node:path";
 import { type Plugin, type ToolContext, type ToolResult, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
 import type { EditOperation, RebaseMode } from "./edits.js";
@@ -195,6 +195,10 @@ function sameCanonicalPath(left: string, right: string): boolean {
 
 function displayPath(worktree: string, canonicalPath: string): string {
   return relative(worktree, canonicalPath) || canonicalPath;
+}
+
+function hostWorktreePath(worktree: string, directory: string): string {
+  return worktree === "/" || worktree === "\\" ? parse(resolve(directory)).root : resolve(worktree);
 }
 
 function unifiedDiff(path: string, before: string, after: string): string {
@@ -490,7 +494,9 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     const alias = assertAliasAvailable();
     let canonicalWorktree: string;
     try {
-      canonicalWorktree = await realpath(resolve(worktree));
+      const candidate = hostWorktreePath(worktree, directory);
+      canonicalWorktree =
+        parse(candidate).root === candidate ? candidate : await realpath(candidate);
     } catch {
       fail(
         "SESSION_PROTOCOL_MISMATCH",
