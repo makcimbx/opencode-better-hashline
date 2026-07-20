@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tool } from "@opencode-ai/plugin";
 import { openCode1183ProviderSchema } from "./native-alias.js";
@@ -16,7 +16,7 @@ import { assertNativeAliasHistory } from "./session-protocol.js";
 import { PACKAGE_VERSION } from "./version.js";
 
 const PINNED_HOST_VERSION = "1.18.3";
-const COMMAND_TIMEOUT_MS = 60_000;
+const COMMAND_TIMEOUT_MS = 120_000;
 const INITIAL_BYTES = "alpha\nbeta\ngamma\n";
 const FINAL_BYTES = "alpha\nBETA\ngamma\n";
 const CONTINUED_BYTES = "alpha\nGAMMA\ngamma\n";
@@ -364,11 +364,13 @@ function collectToolParts(value: unknown) {
 }
 
 function assertSanitizedExport(value: unknown, secrets: string[]): void {
-  const pending: unknown[] = [value];
+  const pending: Array<{ value: unknown; path: string[] }> = [{ value, path: [] }];
   let visited = 0;
   const strings: string[] = [];
   while (pending.length > 0) {
-    const current = pending.pop();
+    const currentItem = pending.pop();
+    const current = currentItem?.value;
+    const currentPath = currentItem?.path ?? [];
     visited += 1;
     invariant(visited <= 20_000, "Sanitized export exceeded the verification traversal limit");
     if (typeof current === "string") {
@@ -377,12 +379,23 @@ function assertSanitizedExport(value: unknown, secrets: string[]): void {
     }
     if (!current || typeof current !== "object") continue;
     if (Array.isArray(current)) {
-      pending.push(...current);
+      pending.push(...current.map((nested) => ({ value: nested, path: currentPath })));
       continue;
     }
     for (const [key, nested] of Object.entries(current as Record<string, unknown>)) {
       strings.push(key);
-      pending.push(nested);
+      if (currentPath.length === 1 && currentPath[0] === "info" && key === "path") {
+        invariant(typeof nested === "string", "Sanitized session path is unreadable");
+        const segments = nested.split(/[\\/]/u).filter(Boolean);
+        invariant(
+          !isAbsolute(nested) &&
+            !nested.includes(":") &&
+            segments.every((segment) => segment !== "." && segment !== ".."),
+          "Sanitized session path is unsafe",
+        );
+        continue;
+      }
+      pending.push({ value: nested, path: [...currentPath, key] });
     }
   }
   for (const secret of secrets) {
@@ -453,6 +466,7 @@ function normalizeRendererValue(value: unknown, roots: string[]): unknown {
     const variants = roots
       .flatMap((root) => {
         const withoutDrive = root.replace(/^[A-Za-z]:[\\/]/u, "");
+        const withoutRoot = root.replace(/^[\\/]+/u, "");
         return [
           root,
           root.replaceAll("\\", "\\\\"),
@@ -460,6 +474,9 @@ function normalizeRendererValue(value: unknown, roots: string[]): unknown {
           withoutDrive,
           withoutDrive.replaceAll("\\", "\\\\"),
           withoutDrive.replaceAll("\\", "/"),
+          withoutRoot,
+          withoutRoot.replaceAll("\\", "\\\\"),
+          withoutRoot.replaceAll("\\", "/"),
         ];
       })
       .filter((root) => root.length > 0)
@@ -1389,7 +1406,7 @@ async function verifyScenario(
     );
     const rendererSnapshot = normalizedTerminalRenderer(
       `${rendererRun.stdout}\n${rendererRun.stderr}`,
-      [root, workspace],
+      [root, workspace, await realpath(root), await realpath(workspace)],
     );
     const rendererSha256 = sha256(rendererSnapshot);
     const expectedRendererSha256 = TERMINAL_RENDERER_SHA256[scenario.route];

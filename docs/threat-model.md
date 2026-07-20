@@ -83,8 +83,9 @@ The plugin attempts to preserve executable mode and ownership where supported. I
 Snapshots retain complete file bytes in memory for up to the configured TTL and cache limits. Tool
 output is subject to OpenCode's own transcript/history handling. Native alias metadata contains the
 canonical path, relative path, exact unified diff, and a canonical-path digest because stock renderers
-require those fields. Ordinary exports retain this metadata; OpenCode's sanitized export removes it,
-which also makes that history unusable for alias continuation. Benchmark model traces may contain
+require those fields. Ordinary exports retain this metadata; OpenCode's sanitized export removes the
+tool metadata but retains a safe root-relative session locator. Review even sanitized exports before
+disclosure. Removing the marker also makes that history unusable for alias continuation. Benchmark model traces may contain
 fixture or model output and are ignored by Git by default under `benchmarks/results/model/`; review
 and redact them before publication.
 

@@ -211,8 +211,9 @@ plugins that define `edit` or `apply_patch`.
 Native-looking IDs persist in session history. Removing the plugin or changing surfaces can leave old
 native-looking cards while new calls resolve to OpenCode builtins; do not continue or import that
 session for editing. Rejected native-shaped calls may consume an extra model retry. Unsanitized exports
-and shares contain paths and diffs; use sanitized export for disclosure, noting that its removed marker
-makes alias continuation fail closed. ACP can classify the alias as an edit but cannot reconstruct the
+and shares contain paths and diffs. Sanitized exports remove tool paths, diffs, and protocol markers but
+OpenCode 1.18.3 retains a safe root-relative session locator; review it before disclosure. The removed
+marker makes alias continuation fail closed. ACP can classify the alias as an edit but cannot reconstruct the
 native structured diff from Better Hashline metadata. The unique `hashline` surface remains the
 production recommendation until the paid pilot and release gates in the
 [preview plan](docs/native-alias-preview-plan.md) pass.
