@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Hooks, type ToolContext, tool } from "@opencode-ai/plugin";
@@ -21,7 +21,7 @@ let servers: Array<ReturnType<typeof Bun.serve>> = [];
 let currentCall: { tool: string; callID: string } | undefined;
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "better-hashline-collision-"));
+  root = await realpath(await mkdtemp(join(tmpdir(), "better-hashline-collision-")));
   values = [];
   servers = [];
   currentCall = undefined;

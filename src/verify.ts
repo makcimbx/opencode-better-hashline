@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -26,7 +26,7 @@ const RENDERED_BYTES = "alpha\nRENDER\ngamma\n";
 const PRIVATE_CANARY = "BH_PRIVATE_CANARY_8f149f0a";
 const TERMINAL_RENDERER_SHA256: Record<VerificationCaseReport["route"], string> = {
   hashline: "51216b4c378516b3a7281a74831f871a0b23052a477c08d427fb67d6e544eb06",
-  "native-edit": "58ae7e60ef07bace079b668a40afe9e2e5007f2526f2012185fa2829d66bc903",
+  "native-edit": "f1849a2afe08c81ecd7ad8578560caf20aabe52c441260ad78b5d74a0b0b7f5f",
   "native-apply-patch": "018a8b9a411bd58c92b26c4972b60eae3beac99601013a8ec5ac9861753b93c5",
 };
 const RELEVANT_TOOLS = new Set([
@@ -1183,7 +1183,8 @@ async function verifyScenario(
 
     const exported = await run([opencode, "export", sessionID], workspace, environment);
     const exportValue = JSON.parse(exported.stdout) as unknown;
-    const worktree = exportedWorktree(exportValue, workspace);
+    exportedWorktree(exportValue, workspace);
+    const worktree = await realpath(workspace);
     const exportedToolParts = collectToolParts(exportValue);
     const completedEditParts = exportedToolParts.filter(
       (part) => part.tool === scenario.editTool && part.state.status === "completed",
@@ -1300,11 +1301,12 @@ async function verifyScenario(
     invariant(reopenedEdit?.state.metadata, "Reopened session lost completed edit metadata");
     invariant(reopenedEdits.length === 3, "Reopened session is missing a fresh edit result");
     if (scenario.surface === "native-aliases") {
+      exportedWorktree(reopenedValue, workspace);
       assertNativeAliasHistory([{ parts: reopenedEdits }], {
         packageVersion: PACKAGE_VERSION,
         schemaSha256,
         hostVersion: PINNED_HOST_VERSION,
-        worktree: exportedWorktree(reopenedValue, workspace),
+        worktree: await realpath(workspace),
       });
       invariant(
         (reopenedEdit.state.metadata.betterHashline as { protocol?: unknown } | undefined)

@@ -594,9 +594,10 @@ retry status terminates the session before another request, every completed
 session is atomically journaled, and the first process, identity, protocol, request, cost, or exact-file
 failure stops the entire pilot without substitution or retry.
 
-The v2 oracle keeps exact-file confinement relative to the disposable fixture but validates renderer
-and protocol paths relative to the worktree reported by OpenCode's in-memory session export. Only a
-sanitized export is persisted. Pilot v2 is not approved for paid execution; its manifest sets
+The v2 oracle canonicalizes the disposable fixture used as the tool-context worktree and keeps both
+exact-file confinement and renderer/protocol path validation tied to that root. The unsanitized export
+is inspected only in memory for session consistency; only a sanitized export is persisted. Pilot v2 is
+not approved for paid execution; its manifest sets
 `paidExecutionApproved:false`, and enabling it requires a separate reviewed approval commit.
 
 Pilot outcomes:

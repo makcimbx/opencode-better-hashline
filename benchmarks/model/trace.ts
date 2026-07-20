@@ -194,14 +194,16 @@ export function inspectNativeAliasTrace(
   sessionExport: string,
   expected: Omit<NonNullable<TraceInspectionOptions["nativeAlias"]>, "worktree"> & {
     expectedDirectory: string;
+    worktree?: string;
   },
 ): TraceInspection {
   try {
-    const { expectedDirectory, ...identity } = expected;
+    const { expectedDirectory, worktree, ...identity } = expected;
+    const exportedWorktree = worktreeFromSessionExport(sessionExport, expectedDirectory);
     return inspectJsonlTrace(output, {
       nativeAlias: {
         ...identity,
-        worktree: worktreeFromSessionExport(sessionExport, expectedDirectory),
+        worktree: worktree ?? exportedWorktree,
       },
     });
   } catch {

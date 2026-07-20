@@ -40,9 +40,10 @@ drive-root worktree. It produced no comparison result and cannot be resumed or r
 gate outcome without publishing raw session data. Any corrected pilot needs a new ID, committed
 runner hash, preflight, and explicit approval.
 
-The corrected v2 oracle separates task-fixture confinement from OpenCode's reported worktree. It
-reads the unsanitized export only in memory to recover that worktree and persists only the sanitized
-export. Pilot v2 is not approved for paid execution.
+The corrected v2 oracle canonicalizes the disposable fixture used as the tool-context worktree and
+keeps canonical-path confinement tied to that same root. It inspects the unsanitized export only in
+memory for session consistency and persists only the sanitized export. Pilot v2 is not approved for
+paid execution.
 
 See [the benchmark guide](../README.md), [methodology](../../docs/benchmarks.md), and the
 [staged model evaluation plan](../../docs/model-evaluation-plan.md).

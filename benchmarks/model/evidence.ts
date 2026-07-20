@@ -76,11 +76,13 @@ export async function reservePilotOutput(
     }
   }
 
+  const canonicalRepository = await realpath(repository);
   const canonicalRoot = await realpath(root);
+  const expectedRoot = join(canonicalRepository, repositoryRelative);
   const sameRoot =
     process.platform === "win32"
-      ? canonicalRoot.toLowerCase() === root.toLowerCase()
-      : canonicalRoot === root;
+      ? canonicalRoot.toLowerCase() === expectedRoot.toLowerCase()
+      : canonicalRoot === expectedRoot;
   if (!sameRoot) {
     throw new Error("The native-alias pilot results root must not traverse links or junctions.");
   }

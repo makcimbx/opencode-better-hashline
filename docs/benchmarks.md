@@ -197,9 +197,10 @@ passed, but protocol-marker classification failed closed. The run is not release
 be resumed or retried. See the
 [sanitized incident record](../benchmarks/results/2026-07-20-native-alias-pilot-v1-incident.json).
 A future corrected pilot requires a new immutable runner identity and explicit approval.
-The corrected v2 oracle obtains OpenCode's actual worktree from an unsanitized export held only in
-memory, while persisted evidence remains sanitized and canonical-path confinement remains tied to the
-task fixture. Pilot v2 has not been approved.
+The corrected v2 oracle canonicalizes the disposable fixture used as the tool-context worktree and
+keeps canonical-path confinement tied to that same root. It inspects the unsanitized export only in
+memory for session consistency, while persisted evidence remains sanitized. Pilot v2 has not been
+approved.
 
 ## Result Vocabulary
 

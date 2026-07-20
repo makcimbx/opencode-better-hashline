@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { type Plugin, type ToolContext, type ToolResult, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
@@ -485,14 +486,23 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     directory: string,
     worktree: string,
     currentCall?: { id: string; tool: "edit" | "apply_patch" },
-  ): Promise<void> {
+  ): Promise<string> {
     const alias = assertAliasAvailable();
-    const identity = { ...alias.identity, worktree: resolve(worktree) };
+    let canonicalWorktree: string;
+    try {
+      canonicalWorktree = await realpath(resolve(worktree));
+    } catch {
+      fail(
+        "SESSION_PROTOCOL_MISMATCH",
+        "OpenCode worktree identity could not be inspected. Start a new session before editing.",
+      );
+    }
+    const identity = { ...alias.identity, worktree: canonicalWorktree };
     const fingerprint = jsonSha256({
       protocol: alias.fingerprint,
       worktree: identity.worktree,
     });
-    if (sessions.isBound(sessionId, fingerprint)) return;
+    if (sessions.isBound(sessionId, fingerprint)) return canonicalWorktree;
 
     let messages: unknown;
     try {
@@ -511,6 +521,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     const historyOptions = currentCall === undefined ? {} : { currentCall };
     assertNativeAliasHistory(messages, identity, historyOptions);
     sessions.bind(sessionId, fingerprint);
+    return canonicalWorktree;
   }
 
   function rememberPending(pendingId: string, pending: PendingRead): void {
@@ -581,9 +592,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     throwIfAborted(context.abort);
     const parsed = hashlineEditArgumentsSchema.safeParse(rawArgs);
     if (!parsed.success) invalidArguments(toolName);
-    if (toolName !== "hashline_edit") {
-      await assertAliasSession(context.sessionID, context.directory, context.worktree);
-    }
+    const aliasWorktree =
+      toolName === "hashline_edit"
+        ? undefined
+        : await assertAliasSession(context.sessionID, context.directory, context.worktree);
     const args = parsed.data;
     const operations = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
     const rebase = args.rebase ?? "none";
@@ -592,7 +604,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     }
     if (!args.allowHashlinePrefixes) assertNoDisplayPrefixes(operations);
     const resolved = await resolveExistingFile(args.filePath, context.directory);
-    const shownPath = displayPath(context.worktree, resolved.canonicalPath);
+    const shownPath = displayPath(aliasWorktree ?? context.worktree, resolved.canonicalPath);
     const aliasPath = shownPath.replaceAll("\\", "/");
     if (toolName !== "hashline_edit" && (isAbsolute(shownPath) || aliasPath.startsWith("../"))) {
       fail("UNSUPPORTED_FILE", "Native aliases cannot edit files outside the current worktree.");

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hooks, ToolContext } from "@opencode-ai/plugin";
@@ -39,7 +39,7 @@ let root = "";
 let values: Hooks[] = [];
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "better-hashline-alias-"));
+  root = await realpath(await mkdtemp(join(tmpdir(), "better-hashline-alias-")));
   values = [];
 });
 

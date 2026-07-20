@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -570,7 +571,7 @@ async function runSession(input: {
   hostVersion: string;
   scheduleIndex: number;
 }) {
-  const fixture = await mkdtemp(join(tmpdir(), "better-hashline-model-"));
+  const fixture = await realpath(await mkdtemp(join(tmpdir(), "better-hashline-model-")));
   const environmentRoot = await mkdtemp(join(tmpdir(), "better-hashline-env-"));
   const modelName = input.model.replaceAll(/[^A-Za-z0-9_-]+/gu, "_");
   const rawName = `${String(input.scheduleIndex).padStart(3, "0")}.${modelName}.${input.task.id}.${input.adapter}.${input.repeat}`;
@@ -664,6 +665,7 @@ async function runSession(input: {
           hostVersion: input.hostVersion,
           allowedPathRoot: fixture,
           expectedDirectory: fixture,
+          worktree: fixture,
         })
       : initialTrace;
     const adapterIntegrity = inspectAdapter(input.adapter, input.task, trace);
