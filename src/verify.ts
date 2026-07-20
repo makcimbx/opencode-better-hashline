@@ -694,14 +694,17 @@ async function verifyScenario(
           return streamResponse({ kind: "text", text: "Routing verified." }, scenario.modelID);
         }
         if (serialized.includes("Verify the path-specific edit denial")) {
-          if (serialized.includes("PERMISSION_DENIED")) {
+          const pathDenyRequests = providerRequests.filter((entry) =>
+            JSON.stringify(entry.messages ?? []).includes("Verify the path-specific edit denial"),
+          ).length;
+          if (serialized.includes("Applied 1 operation")) {
+            return streamResponse({ kind: "text", text: "Path denial failed." }, scenario.modelID);
+          }
+          if (pathDenyRequests >= 3) {
             return streamResponse(
               { kind: "text", text: "Path denial verified." },
               scenario.modelID,
             );
-          }
-          if (serialized.includes("Applied 1 operation")) {
-            return streamResponse({ kind: "text", text: "Path denial failed." }, scenario.modelID);
           }
           const snapshotMatches = serialized.match(/s_[A-Za-z0-9_-]{22}/gu);
           const snapshotId = snapshotMatches?.at(-1);
@@ -976,6 +979,10 @@ async function verifyScenario(
         environment,
       );
       invariant(pathDeny.stdout.includes("Path denial verified"), "Path edit denial did not run");
+      invariant(
+        pathDeny.stdout.includes("PERMISSION_DENIED"),
+        "Path edit denial returned wrong error",
+      );
       invariant(providerRequests.length === pathDenyStart + 3, "Path denial probe retried");
       invariant((await readFile(fixture, "utf8")) === INITIAL_BYTES, "Path denial changed bytes");
       editPermissionMatrixVerified = true;
