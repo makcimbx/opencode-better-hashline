@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fail } from "./errors.js";
 import { exactRelativePath } from "./path-identity.js";
 import {
@@ -387,7 +387,7 @@ function assertAliasInput(
       inputPath = realpathSync(requestedPath);
     } catch {
       try {
-        inputPath = resolve(realpathSync(dirname(requestedPath)), basename(requestedPath));
+        inputPath = join(realpathSync(dirname(requestedPath)), basename(requestedPath));
       } catch {
         inputPath = requestedPath;
       }

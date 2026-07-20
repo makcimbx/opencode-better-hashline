@@ -341,51 +341,6 @@ async function readStableRegularFile(
   }
 }
 
-async function assertWindowsPackageEntries(
-  entries: readonly { absolute: string; path: string; directory: boolean }[],
-): Promise<void> {
-  if (process.platform !== "win32") return;
-  const variable = "BETTER_HASHLINE_PACKAGE_PATHS";
-  const { readWindowsPathMetadata } = await import("../../src/windows-metadata.js");
-  for (let offset = 0; offset < entries.length; offset += 64) {
-    const batch = entries.slice(offset, offset + 64);
-    let parsed: unknown;
-    try {
-      parsed = await readWindowsPathMetadata(
-        batch.map((entry) => entry.absolute),
-        variable,
-      );
-    } catch {
-      throw new Error("Unable to attest installed package NTFS metadata");
-    }
-    if (!Array.isArray(parsed) || parsed.length !== batch.length) {
-      throw new Error("Installed package NTFS attestation returned an invalid entry count");
-    }
-    parsed.forEach((value, index) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error("Installed package NTFS attestation returned an invalid entry");
-      }
-      const record = value as Record<string, unknown>;
-      const streams = record.streams;
-      const expected = batch[index];
-      if (
-        !expected ||
-        record.path !== expected.absolute ||
-        record.reparse !== false ||
-        !Array.isArray(streams) ||
-        !streams.every((stream) => typeof stream === "string") ||
-        (expected.directory
-          ? streams.length !== 0
-          : streams.length !== 1 || streams[0] !== ":$DATA")
-      ) {
-        throw new Error(
-          `Installed package contains unsafe NTFS metadata: ${expected?.path ?? "?"}`,
-        );
-      }
-    });
-  }
-}
-
 export async function deriveInstalledPackageManifest(
   directory: string,
   options: { allowHardlinks?: boolean } = {},
@@ -444,7 +399,12 @@ export async function deriveInstalledPackageManifest(
   }
 
   await visit(root, [], rootStats);
-  await assertWindowsPackageEntries(observedEntries);
+  if (process.platform === "win32") {
+    const { assertWindowsPackageEntries } = await import(
+      "../../src/windows-package-attestation.js"
+    );
+    await assertWindowsPackageEntries(observedEntries);
+  }
   if ((await realpath(directory)) !== root || !sameFile(await lstat(directory), rootStats)) {
     throw new Error("Installed package root identity changed");
   }

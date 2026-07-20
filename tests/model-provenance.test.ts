@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -360,11 +360,13 @@ describe("effective tool provenance", () => {
     );
 
     const canonical = {
-      bun: bunPath,
-      node: nodePath,
-      npmCli: npmCliPath,
-      npmPrefixScript,
-      openCode: openCodePath,
+      bun: await realpath(bunPath),
+      node: await realpath(nodePath),
+      npmCli: await realpath(npmCliPath),
+      npmPrefix: await realpath(npmPrefix),
+      npmPrefixScript: await realpath(npmPrefixScript),
+      npmWrapper: await realpath(npmWrapperPath),
+      openCode: await realpath(openCodePath),
     };
     const run: ProvenanceCommandRunner = (command) => {
       const [executable, ...args] = command;
@@ -375,7 +377,7 @@ describe("effective tool provenance", () => {
       if (executable === canonical.node && args[0] === "-p") return `${canonical.node}\n`;
       if (executable === canonical.node && args[0] === "--version") return "v24.0.0\n";
       if (executable === canonical.node && args[0] === canonical.npmPrefixScript) {
-        return `${npmPrefix}\n`;
+        return `${canonical.npmPrefix}\n`;
       }
       if (
         executable === canonical.node &&
@@ -397,7 +399,7 @@ describe("effective tool provenance", () => {
 
     const before = await deriveEffectiveToolIdentities(options);
     expect(before.bun).toMatchObject({ version: "1.3.14", revision: "1.3.14+fixture" });
-    expect(before.npm.discoveryWrapper.path).toBe(npmWrapperPath);
+    expect(before.npm.discoveryWrapper.path).toBe(canonical.npmWrapper);
     expect(before.npm.node).toMatchObject({ version: "v24.0.0" });
     expect(before.npm.cli).toMatchObject({
       path: canonical.npmCli,
