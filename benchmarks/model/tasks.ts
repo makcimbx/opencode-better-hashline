@@ -268,8 +268,21 @@ export const transferModelTasks: ModelTask[] = [
   },
 ];
 
+const nativeAliasProbeTask: ModelTask = {
+  id: "native-alias-probe-single-constant",
+  category: "mechanical",
+  prompt: "In src/config.ts, change DEFAULT_RETRIES from 2 to 5. Make no other changes.",
+  files: {
+    "src/config.ts": "export const DEFAULT_RETRIES = 2;\nexport const TIMEOUT_MS = 5000;\n",
+  },
+  expectedFiles: {
+    "src/config.ts": "export const DEFAULT_RETRIES = 5;\nexport const TIMEOUT_MS = 5000;\n",
+  },
+};
+
 export const modelTaskSets = {
   "baseline-v1": modelTasks,
+  "single-constant-probe-v1": [nativeAliasProbeTask],
   "transfer-v1": transferModelTasks,
 } as const satisfies Record<string, readonly ModelTask[]>;
 

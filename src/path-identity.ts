@@ -17,17 +17,18 @@ export function isInsideCanonicalPath(root: string, target: string): boolean {
 }
 
 export function physicalRelativePath(root: string, target: string): string | undefined {
-  const rootIdentity = statSync(resolve(root));
+  const rootIdentity = statSync(resolve(root), { bigint: true });
   let current = resolve(target);
   const segments: string[] = [];
 
   while (true) {
-    const identity = statSync(current);
+    const identity = statSync(current, { bigint: true });
     if (
-      rootIdentity.ino !== 0 &&
-      identity.ino !== 0 &&
+      rootIdentity.ino !== 0n &&
+      identity.ino !== 0n &&
       rootIdentity.dev === identity.dev &&
-      rootIdentity.ino === identity.ino
+      rootIdentity.ino === identity.ino &&
+      rootIdentity.isDirectory() === identity.isDirectory()
     ) {
       return segments.join(sep);
     }

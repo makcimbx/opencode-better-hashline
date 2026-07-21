@@ -34,9 +34,9 @@ Preflight performs builds, package installation, registry access when needed, Op
 
 `--adapter-set=native-aliases-v1` pairs the unique and experimental alias surfaces. Its preflight
 also runs the credential-free packed verifier through unique `hashline_edit`, non-GPT `edit`, and
-GPT-like `apply_patch`. The corrected v3 proposal freezes four candidate models, one repeat, and 96
-sessions behind `--native-alias-pilot`, but paid v3 execution is currently hard-disabled. The earlier
-v2 proposal is retired without execution.
+GPT-like `apply_patch`. Pilot v4 freezes Luna, Sol, and Nemotron Nano across 72 paired sessions and at
+most 864 requests behind `--native-alias-pilot`; its new committed null anchor hard-disables paid
+execution. Pilot v2 is retired unexecuted and consumed pilot v3 is terminal.
 
 Paid execution requires the exact immutable session/request schedule, a reported-cost stop threshold
 (not a provider billing cap), cost
@@ -62,14 +62,12 @@ bun run bench:model --execute --repeats=2 --approved-sessions=48 `
 
 Instead of an auth file, provider variables can be allowlisted explicitly with `--pass-env=KEY_ONE,KEY_TWO` or `BENCHMARK_PASS_ENV`. The runner refuses OpenCode, home, XDG, configuration, and temporary-directory passthrough variables.
 
-The corrected native-alias pilot v3 is not approved. Its committed approval anchor is null, so no paid
-command is valid. Candidate commit A must retain that null anchor and produce one clean schema-v6
-preflight, tarball, package-tree manifest, and staged runner. External bundle B binds those exact hashes
-to the auth identity, endpoint, hard-budget, user-approval, toolchain, schedule, and external reservation
-broker. A reviewed direct-child commit C may change only the anchor to the hash of B and must reuse A's
-runner bytes. Paid output is fixed at `benchmarks/results/model/native-alias-pilot-v3`; the approved
-external broker must atomically consume the global v3 identity before any model process and never release
-it for resume or retry.
+Native-alias pilot v3 executed one session and stopped fail-closed; its reservation is consumed and it may
+never resume or retry. See the
+[sanitized incident](results/2026-07-21-native-alias-pilot-v3-incident.json). Any pilot v4 requires a new
+ID, null anchor, clean schema-v6 preflight, tarball, package-tree manifest, staged runner, external bundle
+B, anchor-only direct-child commit C, and a new durable broker reservation outside every repository and
+worktree.
 
 Raw outputs are written under `benchmarks/results/model/` and ignored by Git. Review them before moving a result into a publishable location.
 

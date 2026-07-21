@@ -24,16 +24,20 @@ bun run bench:model --native-alias-pilot
 
 The alias trace records native-shaped retries, stable error codes, active alias, and protocol-marker
 validity. It rejects completed native-shaped calls, missing/invalid markers, `hashline_edit`, native
-`write`, shell/task/web transports, or both aliases appearing in one route. The proposed v3 pilot is
-12 tasks x 2 surfaces x 4 candidate models x 1 repeat = 96 sessions. `--native-alias-pilot`
-freezes the four models and variants, all 96 sessions, 1,152 maximum requests, a 300-second timeout,
-2,048 requested host output tokens per request, an 8 MiB trace limit, USD 4 total and USD 1/model reported-cost stop
-thresholds, auth-file-only isolation, and frozen task/adapter SHA-256 manifests. Dirty source overrides
-are forbidden. It writes an atomic journal after every
-session and stops on the first process, identity, retry, protocol, request, cost, or exact-file failure.
-Paid v3 execution is hard-disabled. The v2 proposal is retired without execution. A separate approval commit must enable v3 before exact committed
-HEAD, runner SHA-256, and authentication controls can be used. Output is confined to ignored
-`benchmarks/results/model/`, and authentication bytes are snapshotted once before execution.
+`write`, shell/task/web transports, or both aliases appearing in one route. Pilot v4 freezes 12 tasks x
+2 surfaces x 3 proven models, 72 sessions, 864 maximum requests, and exact
+timeout/output/trace/cost/auth evidence behind a new null anchor. Pilot v3 executed one Luna session,
+stopped fail-closed on current-call history correlation, consumed its reservation, and may never resume
+or retry. The
+[sanitized incident](../results/2026-07-21-native-alias-pilot-v3-incident.json) records five requests,
+USD 0 reported cost, no file mutation, and incomplete conservative accounting.
+
+`--native-alias-probe` is development evidence only. It fixes the task and adapter to one exact
+single-file native-alias edit, accepts the three frozen v4 model/variant pairs, permits 1–20 explicit
+repeats under normal paid approvals,
+requires isolated strict auth, and confines raw output to a new direct child of ignored
+`benchmarks/results/model/`. Probe output is dirty-source, non-publishable evidence and never consumes
+or substitutes for a pilot reservation.
 
 Pilot v1 stopped after session 1 because its oracle used the fixture root where OpenCode reported a
 drive-root worktree. It produced no comparison result and cannot be resumed or retried. The
@@ -46,14 +50,11 @@ strictly attested export worktree as renderer authority. Trace and export termin
 exactly, complete history must validate, and a per-file mutation ledger must bind every expected change
 to the correct executor. The unsanitized export is memory-only; persisted evidence is sanitized. Packed
 preflight executes this same oracle against a normalized v1 topology and proves one-request retry abort.
-Paid execution must consume the exact schema-v6 preflight receipt, tarball, package-tree manifest, and
-staged runner bytes. Candidate commit A retains the null approval anchor and produces those artifacts.
-An external canonical bundle B binds their hashes to the exact auth identity, endpoint, hard-budget,
-user-approval, toolchain, schedule, and reservation broker evidence. A reviewed direct-child commit C
-may change only the anchor from null to the hash of B; it must execute A's retained runner bytes without
-rebuilding. The approved external broker must then atomically consume the global v3 reservation exactly
-once before any model process. The broker and its durable state must remain outside every repository and
-worktree. The checked-in anchor is null, so paid v3 remains hard-disabled.
+Pilot v4 starts from a new ID and null anchor. Candidate A must produce exact schema-v6 receipt,
+tarball, package-tree, and staged-runner bytes. External bundle B must bind them to auth, endpoint,
+hard-budget, user approval, toolchain, schedule, and a new broker reservation. Direct-child commit C may
+change only that anchor and must reuse A's runner bytes. The broker and durable reservation must remain
+outside every repository/worktree and be consumed once before any model process.
 
 See [the benchmark guide](../README.md), [methodology](../../docs/benchmarks.md), and the
 [staged model evaluation plan](../../docs/model-evaluation-plan.md).

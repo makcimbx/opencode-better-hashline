@@ -215,9 +215,13 @@ mutator. Message, part, call, session, input path, metadata keys, single-file un
 and renderer path must agree exactly. Native `write`, `hashline_edit`, unknown fields, malformed hunks,
 and anything except the exact known native-shaped `INVALID_ARGUMENT` rejection are incompatible.
 Unmarked, malformed, sanitized, conflicting, unreadable, or cross-surface history returns
-`SESSION_PROTOCOL_MISMATCH`. Only the exact current running call is excluded. A restart clears
-snapshots and process bindings; resume requires compatible unsanitized history plus a fresh
-`hashline_read`. Changing surfaces requires a restart and a new session.
+`SESSION_PROTOCOL_MISMATCH`. Only the exact current running call is excluded. OpenCode can expose that
+call before its persisted input has caught up with the parsed before-hook arguments. For the same exact
+call ID and tool, the plugin may reread bounded local history five times under one 160 ms stabilization
+deadline after the initial bounded read; exclusion still requires exact input equality. A different call ID, tool, path, snapshot, operation, permanently
+different input, or more than one active alias remains incompatible. A restart clears snapshots and
+process bindings; resume requires compatible unsanitized history plus a fresh `hashline_read`. Changing
+surfaces requires a restart and a new session.
 
 ## Permission and Publication Order
 

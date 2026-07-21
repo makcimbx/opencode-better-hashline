@@ -59,7 +59,7 @@ const artifact = {
 };
 const platform = { name: process.platform, arch: process.arch, osRelease: "test-os" };
 const expected = {
-  pilotId: "native-alias-pilot-v3",
+  pilotId: "native-alias-pilot-v4",
   sourceCommit: "b".repeat(40),
   sourceStatusSha256: hash,
   runnerExecutableSha256: hash,
@@ -68,7 +68,7 @@ const expected = {
   adapterManifestSha256: hash,
   taskSet: "baseline-v1",
   adapterSet: "native-aliases-v1",
-  adapters: ["native", "better-hashline-native-aliases"],
+  adapters: ["better-hashline", "better-hashline-native-aliases"],
   taskCount: 12,
   schedule,
   limits,

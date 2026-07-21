@@ -440,8 +440,8 @@ No error may cause automatic execution by a built-in tool or silent surface fall
 ## Implementation Phases
 
 Phases 0-5 and the Phase 6 harness were implemented on the feature branch on 2026-07-20. The Phase 6
-behavioral gate is incomplete: pilot v1 failed closed, v2 was retired without execution, and corrected
-v3 is unapproved and hard-disabled.
+behavioral gate is incomplete: pilot v1 failed closed, v2 was retired without execution, pilot v3 failed
+closed and consumed its reservation, and pilot v4 is hard-disabled by a new null anchor.
 The default production registry
 remains exactly `hashline_read`, `hashline_edit`, and `hashline_write`. The explicit alias preview,
 deterministic matrix, collision fixtures, credential-free packed verifier, and model adapter are
@@ -568,8 +568,7 @@ Add a separate benchmark adapter:
 better-hashline-native-aliases
 ```
 
-Pilot v1 compared unique and alias surfaces, not native OpenCode. The corrected, unapproved v3
-manifest is hard-disabled and retains these proposed bounds:
+Pilot v1 compared unique and alias surfaces, not native OpenCode. Pilot v3 used these frozen bounds:
 
 | Dimension | Value |
 | --- | --- |
@@ -591,10 +590,10 @@ The exact model IDs are `openai/gpt-5.6-luna` (`medium`), `openai/gpt-5.6-sol`
 models, variants, tasks, adapter order, 96 sessions, 1,152 requests, and the USD 4 stop threshold.
 The manifest pins task SHA-256 `8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a`
 and adapter-behavior SHA-256 `cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8`.
-If v3 is separately approved, only the approved auth-file copy and a clean approval commit C are
-accepted; dirty overrides are forbidden. Paid execution binds candidate A, approval commit C, bundle B,
-and A's staged runner-executable SHA-256, confines
-output to ignored model results, and snapshots authentication once before the first session. Provider
+V3 accepted only the approved auth-file copy and a clean approval commit C; dirty overrides were
+forbidden. Paid execution bound candidate A, approval commit C, bundle B, and A's staged
+runner-executable SHA-256, confined output to ignored model results, and snapshotted authentication
+before the first session. Provider
 retry status terminates the session before another request, every completed
 session is atomically journaled, and the first process, identity, protocol, request, cost, or exact-file
 failure stops the entire pilot without substitution or retry.
@@ -607,17 +606,19 @@ the correct executor. The unsanitized export is inspected only in memory; only a
 persisted. A normalized v1-topology fixture exercises the legacy false negative, the corrected valid
 decision, and forged/outside-fixture rejection. It declares the private incident trace hash but does not
 claim cryptographic replay of the untracked raw trace. Packed verification executes this same oracle and a
-one-request retry-abort probe. Pilot v3 is not approved for paid execution; its committed approval anchor
-is null, and activation requires the reviewed A/B/C handoff below.
+one-request retry-abort probe. Pilot v3 executed one Luna session and stopped fail-closed after five
+requests because persisted current-call input lagged before-hook arguments. It made no file mutation,
+consumed its reservation, and may never resume or retry.
 
-The proposal also freezes OpenRouter provider order with fallback disabled, the timeout/output/trace
-limits above, exact-tree evaluation without links or special entries, and an exact schema-v6 preflight
-receipt. Candidate commit A retains the null anchor and produces the exact receipt, tarball,
-package-tree manifest, and staged runner. External canonical bundle B binds those hashes to auth,
-provider endpoint, hard-budget, exact user approval, toolchain, schedule, and broker evidence. Reviewed
-direct-child commit C may change only the anchor to B's hash and must reuse A's runner bytes. Before any
-model process, the approved broker must atomically consume the global v3 identity in durable state outside
-every repository and worktree. Those external attestations and broker are not supplied by this repository.
+Any pilot v4 must repeat the complete process with a new ID and null anchor. Candidate A produces the
+receipt, tarball, package-tree, and runner; bundle B binds auth, endpoint, hard-budget, user approval,
+toolchain, schedule, and broker evidence; direct-child C changes only the anchor and reuses A's runner.
+A new durable reservation outside every repository/worktree must be consumed before model execution.
+
+The v4 manifest freezes Luna medium, Sol medium, and NVIDIA Nemotron Nano with fallback disabled across
+12 tasks and two surfaces: 72 sessions and at most 864 requests. The timeout, requested 2,048 output
+tokens, 8 MiB trace bound, and USD 4/USD 1 reported-cost stop thresholds remain unchanged. Its schedule
+SHA-256 is `52d9b778c89f2b05619c013d718a4d7522a2aef5971ecf412b798946e3847bd0`.
 
 Pilot outcomes:
 
@@ -634,13 +635,10 @@ Pilot outcomes:
 The pilot is transport evidence only. It cannot establish superiority. It runs only after explicit
 user approval and all existing model/auth/cost gates in the model evaluation plan.
 
-Implementation status: the `native-aliases-v1` adapter set, authoritative oracle, mutation ledger,
-exact-tree evaluator, marker/retry metrics, and model-free v3 harness checks are implemented. Any v3
-dry run and packed preflight must be repeated from a future
-approval commit before paid execution. Pilot v1 executed one of 96 sessions and then stopped. It consumed
-four requests at USD 0 reported cost and produced no model-comparison result. The failure was a
-benchmark-oracle worktree mismatch, not a runtime, model, exact-file, or retry failure. Raw evidence
-remains ignored and unchanged; only the sanitized incident record is included in this review candidate.
+Implementation status: the adapter, oracle, ledger, exact-tree evaluator, marker/retry metrics, and
+model-free harness checks are implemented. Pilot v1 stopped on an oracle worktree false negative. Pilot
+v3 stopped on a bounded current-call persistence race. Both are terminal no-go incidents. Development
+probes are dirty-source, non-publishable diagnostics and cannot substitute for a new v4 approval gate.
 
 ### Phase 7: release decision
 
@@ -665,7 +663,7 @@ closed without npm publication.
 
 ### Required before npm release
 
-- The 96-session pilot shows no material malformed-call or retry regression requiring redesign.
+- The 72-session pilot-v4 run shows no material malformed-call or retry regression requiring redesign.
 - No wrong-target, stale-clobber, overwrite, permission bypass, or false-success outcome occurs.
 - Alias-specific documentation does not inherit unique-ID ownership guarantees.
 - A model-free verification command is available.
@@ -755,7 +753,7 @@ approve this plan
   -> unpublished alias prototype branch
   -> deterministic collision and packed-host evidence
   -> review threat-model delta
-  -> explicit approval for 96-session pilot
+  -> explicit approval for 72-session pilot v4
   -> evaluate go/no-go gates
   -> optional experimental release
 ```

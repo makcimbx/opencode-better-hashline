@@ -181,17 +181,11 @@ The harness:
 
 The harness reports requested and observed identities separately. Reported usage covers the validated parent session and is not asserted to equal a provider invoice. Before publishing model claims, inspect all traces, redact secrets, report malformed calls/retries/tokens/cost with their stated scope, run enough paired tasks for the intended claim, and preregister the primary metric. The default 48-session pilot is useful for harness debugging, not a universal superiority claim.
 
-The proposed native-alias release gate is one frozen 96-session pilot: 12 baseline tasks x 2 surfaces
-x four candidate models x one repeat. Its corrected v3 approval anchor is currently null and the pilot
-is unapproved. If a separate approval commit activates an externally reviewed bundle, the run requires one approved auth-file copy,
-exactly 1,152 maximum requests, a 300-second session timeout, 2,048 requested host output tokens per request, an 8 MiB
-trace limit, a USD 4 total reported-cost stop threshold, and a USD 1 threshold per model. These are
-reported-cost stop thresholds, not hard provider billing caps.
-Its task and adapter-behavior SHA-256 values are frozen in the manifest, and dirty source overrides are
-forbidden. The paid command must execute candidate A's exact staged runner bytes under direct-child
-approval commit C; output is fixed under ignored model results and authentication is snapshotted once.
-Deterministic and packed evidence do not substitute for that paid gate, and no alias
-model-result claim exists until the complete journal is reviewed.
+Native-alias pilot v3 froze 12 baseline tasks x 2 surfaces x four models: 96 sessions and at most 1,152
+requests. It executed one Luna session, stopped fail-closed after five observed requests, consumed its
+reservation, and may never resume or retry. Reported cost was USD 0, but accounting remained incomplete
+with an unknown cost upper bound; no file mutation or model-comparison result exists. See the
+[sanitized incident](../benchmarks/results/2026-07-21-native-alias-pilot-v3-incident.json).
 
 Native-alias pilot v1 stopped after its first session because the benchmark oracle conflated the
 task fixture with OpenCode's worktree. The edit itself, model identity, transport, and exact files
@@ -204,12 +198,16 @@ strictly attested export worktree for renderer paths. It exactly correlates trac
 terminal records, validates complete history, and assigns every expected file mutation to the required
 executor. The unsanitized export remains memory-only; persisted evidence is sanitized. Model-free
 preflight records the same oracle's normalized v1-topology fixture and a packed one-request retry-abort probe. The fixture declares the private incident trace hash but is topology evidence, not a cryptographic replay of untracked raw bytes.
-Pilot v2 was never executed and is retired. Pilot v3 remains hard-disabled and has not been approved.
-Candidate commit A must retain the null anchor and produce the exact schema-v6 receipt, tarball,
-package-tree manifest, and runner. External bundle B binds those artifacts to auth, provider endpoint,
-hard-budget, exact user approval, toolchain, schedule, and broker evidence. Direct-child commit C may
-change only the anchor to B's hash. The approved broker must atomically consume a durable one-time
-reservation outside every repository and disposable worktree before any model process.
+Pilot v2 was never executed and is retired. Any pilot v4 requires a new identity and null anchor.
+Candidate A must produce an exact schema-v6 receipt, tarball, package-tree manifest, and runner. External
+bundle B binds those artifacts to auth, endpoint, hard-budget, exact user approval, toolchain, schedule,
+and broker evidence. Direct-child commit C may change only the anchor to B's hash. A new approved broker
+must atomically consume a durable reservation outside every repository/worktree before any model process.
+
+The frozen v4 proposal uses the same 12 tasks and paired surfaces with three development-proven models:
+OpenAI Luna, OpenAI Sol, and OpenRouter NVIDIA Nemotron Nano. It contains 72 sessions and at most 864
+requests. Ultra was excluded after repeated provider-capacity failures; alternative NVIDIA candidates
+were excluded after model-format or no-tool instability. Development probes are non-publishable evidence.
 
 ## Result Vocabulary
 

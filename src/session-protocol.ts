@@ -23,6 +23,16 @@ export type NativeAliasProtocolIdentity = {
   worktree: string;
 };
 
+export class NativeAliasCurrentCallPendingError extends Error {
+  override readonly name = "NativeAliasCurrentCallPendingError";
+
+  constructor() {
+    super(
+      "SESSION_PROTOCOL_MISMATCH: The current alias call input has not stabilized in session history.",
+    );
+  }
+}
+
 type HistoryOptions = {
   currentCall?: { id: string; tool: NativeAliasSurface; input?: unknown };
   sessionId?: string;
@@ -389,8 +399,8 @@ function assertAliasInput(
       pathMatches = samePath(requestedPath, canonicalPath);
       if (!pathMatches) {
         try {
-          const requestedParent = statSync(realpathSync(dirname(requestedPath)));
-          const canonicalParent = statSync(realpathSync(dirname(canonicalPath)));
+          const requestedParent = statSync(realpathSync(dirname(requestedPath)), { bigint: true });
+          const canonicalParent = statSync(realpathSync(dirname(canonicalPath)), { bigint: true });
           pathMatches =
             basename(requestedPath) === basename(canonicalPath) &&
             requestedParent.dev === canonicalParent.dev &&
@@ -538,6 +548,8 @@ function inspectHistory(
   const inspectedMessages: Record<string, unknown>[] = [];
   let partCount = 0;
   let currentMatches = 0;
+  const currentInput =
+    options.currentCall?.input === undefined ? undefined : canonicalJson(options.currentCall.input);
   const messageIds = new Set<string>();
   const partIds = new Set<string>();
   const callIds = new Set<string>();
@@ -599,13 +611,19 @@ function inspectHistory(
         rejectHistory("OpenCode session history contains a duplicate call identity.");
       }
       if (options.sessionId) callIds.add(callIdentity);
-      const currentCall =
+      const activeCurrentCall =
         options.currentCall &&
         part.callID === options.currentCall.id &&
         part.tool === options.currentCall.tool &&
-        (state.status === "pending" || state.status === "running") &&
-        (options.currentCall.input === undefined ||
-          canonicalJson(state.input) === canonicalJson(options.currentCall.input));
+        (state.status === "pending" || state.status === "running");
+      const currentInputMatches =
+        currentInput === undefined ||
+        ((state.status === "pending" || state.status === "running") &&
+          canonicalJson(state.input) === currentInput);
+      if (activeCurrentCall && !currentInputMatches) {
+        throw new NativeAliasCurrentCallPendingError();
+      }
+      const currentCall = activeCurrentCall && currentInputMatches;
       if (currentCall) {
         currentMatches += 1;
         if (currentMatches !== 1) {
@@ -628,7 +646,12 @@ function inspectHistory(
       }
       if (state?.status === "error" && isKnownRejectedAliasCall(part.tool, state)) continue;
       if (state?.status !== "completed") {
-        rejectHistory(`Historical ${String(part.tool)} has an ambiguous execution state.`);
+        const correlation = options.currentCall
+          ? ` Current correlation: id=${part.callID === options.currentCall.id ? "match" : "mismatch"}, tool=${part.tool === options.currentCall.tool ? "match" : "mismatch"}, input=${currentInputMatches ? "match" : "mismatch"}.`
+          : "";
+        rejectHistory(
+          `Historical ${String(part.tool)} has an ambiguous execution state.${correlation}`,
+        );
       }
       const canonicalPath = assertCompletedMetadata(part.tool, state.metadata, identity);
       if (options.directory) {

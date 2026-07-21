@@ -28,23 +28,23 @@ const commonInput = {
 } satisfies Omit<NativeAliasMetadataInput, "surface">;
 
 describe("native alias presentation contracts", () => {
-  test("fingerprints the unchanged provider schema and protocol identity", () => {
+  test("fingerprints the provider contract and protocol identity", () => {
     const providerContract = {
       description: hashlineEditDescription,
       parameters: schema,
     };
     const serialized = JSON.stringify(providerContract);
 
-    expect(new TextEncoder().encode(serialized)).toHaveLength(2749);
+    expect(new TextEncoder().encode(serialized)).toHaveLength(3048);
     expect(createHash("sha256").update(serialized).digest("hex")).toBe(
-      "59c2d32adc0332e6f1a2b5a6e0db692a474c9a495dbd06979ea643bdab9ecb70",
+      "91950a6e54fb3d8b1bf66fcd2cdc6146f6ef2b86000277fa400af784c77407f6",
     );
     expect(schemaSha256).toBe("fcc372c6be3bee0bf11d25ebc95e4428aa742de94c59ad8cd24f6e491af2ad9e");
     expect(jsonSha256(openCode1183ProviderSchema(schema))).toBe(
       "a7359841f93f0f111d5cb5cab8d747e0cf07cc130b683e97b8b75499a68a63d1",
     );
     expect(jsonSha256(providerContract)).toBe(
-      "ba9298e3db64c22b2e76c54fd6ca1041a8d003eb665e9df2d908565b8233c5e8",
+      "25c8a3347bcc37aa50878a1df43f5e13d64511ebed7a594f78c6e283436a2ed9",
     );
     expect(nativeAliasProtocolFingerprint(commonInput)).toBe(
       "b7fe25d5a9f70c9c033103f6888819550a0f422b4c3804ba1470aad280a2bc61",

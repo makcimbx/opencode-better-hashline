@@ -398,7 +398,7 @@ describe("native alias argument and mutation contract", () => {
     await writeFile(join(root, "file.txt"), "one\ntwo\n");
     const sessionID = "current-input-mismatch";
     const callID = "edit-call";
-    const { value } = await aliasHarness({
+    const { value, historyCalls } = await aliasHarness({
       history: [
         {
           parts: [
@@ -423,6 +423,44 @@ describe("native alias argument and mutation contract", () => {
       value["tool.execute.before"]?.({ tool: "edit", sessionID, callID }, { args }),
     ).rejects.toThrow("SESSION_PROTOCOL_MISMATCH:");
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\ntwo\n");
+    expect(historyCalls.length).toBeGreaterThanOrEqual(1);
+    expect(historyCalls.length).toBeLessThanOrEqual(6);
+  });
+
+  test("rereads one exact current call until its persisted input stabilizes", async () => {
+    await writeFile(join(root, "file.txt"), "one\ntwo\n");
+    const sessionID = "current-input-settles";
+    const callID = "edit-call";
+    let expectedInput: unknown;
+    let reads = 0;
+    const { value, historyCalls } = await aliasHarness({
+      history: () => [
+        {
+          parts: [
+            {
+              type: "tool",
+              tool: "edit",
+              callID,
+              state: {
+                status: "running",
+                input:
+                  reads++ === 0
+                    ? replaceArgs("other.txt", "s_0000000000000000000000")
+                    : expectedInput,
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const toolContext = context({ sessionID });
+    const snapshot = await issueSnapshot(value, toolContext, "file.txt");
+    expectedInput = replaceArgs("file.txt", String(snapshot.metadata.snapshotId));
+
+    await expect(
+      value["tool.execute.before"]?.({ tool: "edit", sessionID, callID }, { args: expectedInput }),
+    ).resolves.toBeUndefined();
+    expect(historyCalls).toEqual([sessionID, sessionID]);
   });
 
   for (const surface of ["edit", "apply_patch"] as const) {

@@ -65,10 +65,10 @@ export async function attestSessionExport(
   const canonicalDirectory = await physicalPath(info.directory);
   const canonicalExpectedDirectory = await physicalPath(expectedDirectory);
   const [directoryIdentity, expectedIdentity] = await Promise.all([
-    stat(canonicalDirectory),
-    stat(canonicalExpectedDirectory),
+    stat(canonicalDirectory, { bigint: true }),
+    stat(canonicalExpectedDirectory, { bigint: true }),
   ]);
-  const stableIdentity = directoryIdentity.ino !== 0 && expectedIdentity.ino !== 0;
+  const stableIdentity = directoryIdentity.ino !== 0n && expectedIdentity.ino !== 0n;
   const sameCanonicalPath = canonicalDirectory === canonicalExpectedDirectory;
   if (
     stableIdentity
@@ -87,10 +87,10 @@ export async function attestSessionExport(
   }
   const canonicalExpectedWorktree = await physicalPath(expectedWorktree);
   const [worktreeIdentity, expectedWorktreeIdentity] = await Promise.all([
-    stat(worktree),
-    stat(canonicalExpectedWorktree),
+    stat(worktree, { bigint: true }),
+    stat(canonicalExpectedWorktree, { bigint: true }),
   ]);
-  const stableWorktreeIdentity = worktreeIdentity.ino !== 0 && expectedWorktreeIdentity.ino !== 0;
+  const stableWorktreeIdentity = worktreeIdentity.ino !== 0n && expectedWorktreeIdentity.ino !== 0n;
   if (
     stableWorktreeIdentity
       ? worktreeIdentity.dev !== expectedWorktreeIdentity.dev ||

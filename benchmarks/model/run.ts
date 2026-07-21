@@ -26,20 +26,21 @@ import {
   adapterPluginConfig,
   adapterSetManifest,
   modelAdapterSets,
-  nativeAliasPilotV3,
+  nativeAliasPilotV4,
   pilotProviderConfig,
   verificationSurfaceForAdapterSet,
 } from "./adapters.js";
 import {
   consumeValidatedExternalReservation,
-  type PilotV3ReservationReceipt,
-  type ValidatedPilotV3Approval,
-  validatePilotV3ApprovalCommit,
-  validatePilotV3ExternalApprovalBundle,
+  type PilotV4ReservationReceipt,
+  type ValidatedPilotV4Approval,
+  validatePilotV4ApprovalCommit,
+  validatePilotV4ExternalApprovalBundle,
 } from "./approval.js";
 import { assertPilotAuthTransition, parsePilotAuth, pilotAuthIdentitySha256 } from "./auth.js";
 import { evaluateExactTree } from "./evaluator.js";
 import {
+  isPublishableModelEvidence,
   journalAccounting,
   journalFailure,
   reserveOutput,
@@ -112,7 +113,7 @@ function excludesSensitivePaths(value: string, paths: string[]): boolean {
   );
 }
 
-const MAX_AGENT_STEPS = nativeAliasPilotV3.maxAgentSteps;
+const MAX_AGENT_STEPS = nativeAliasPilotV4.maxAgentSteps;
 const EDIT_SCHEMA_SHA256 = jsonSha256(
   openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
 );
@@ -780,6 +781,7 @@ async function runSession(input: {
   providerConfig?: Record<string, unknown>;
   outputTokenLimit?: number;
   traceByteLimit?: number;
+  captureProbeHooks?: boolean;
   onAuthState?: (bytes: Uint8Array) => Promise<void>;
   packageVersion: string;
   hostVersion: string;
@@ -794,6 +796,8 @@ async function runSession(input: {
     const expectedWorktree = parse(fixture).root;
     const retryGuardState = join(environmentRoot, "provider-retry.json");
     const retryGuard = join(environmentRoot, "provider-retry-guard.ts");
+    const probeObserver = join(environmentRoot, "probe-observer.ts");
+    const probeHookLog = join(input.output, "raw", `${rawName}.hooks.jsonl`);
     await writeFile(
       retryGuard,
       `export default async () => ({ event: async ({ event }) => {
@@ -801,14 +805,32 @@ async function runSession(input: {
     await Bun.write(${JSON.stringify(retryGuardState)}, JSON.stringify({ retry: true }));
     process.exit(86);
   }
-} });\n`,
+      } });\n`,
     );
+    if (input.captureProbeHooks) {
+      await writeFile(
+        probeObserver,
+        `import { appendFile } from "node:fs/promises";
+const relevant = new Set(["hashline_read", "edit", "apply_patch"]);
+export default async () => ({
+  async "tool.execute.before"(input, output) {
+    if (!relevant.has(input.tool)) return;
+    await appendFile(${JSON.stringify(probeHookLog)}, JSON.stringify({ hook: "before", tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args }) + "\\n", "utf8");
+  },
+});
+`,
+      );
+    }
     const adapterConfig = adapterPluginConfig(input.adapter, input.packageUrl);
     const adapterPlugins = Array.isArray(adapterConfig.plugin) ? adapterConfig.plugin : [];
     const config = {
       ...input.providerConfig,
       ...adapterConfig,
-      plugin: [...adapterPlugins, pathToFileURL(retryGuard).href],
+      plugin: [
+        ...(input.captureProbeHooks ? [pathToFileURL(probeObserver).href] : []),
+        ...adapterPlugins,
+        pathToFileURL(retryGuard).href,
+      ],
       permission: {
         "*": "allow",
         bash: "deny",
@@ -1020,19 +1042,28 @@ async function runSession(input: {
 const execute = hasFlag("execute");
 const preflight = hasFlag("preflight");
 const nativeAliasPilot = hasFlag("native-alias-pilot");
-const repeats = boundedInteger("repeats", option("repeats"), nativeAliasPilot ? 1 : 2, 20);
+const nativeAliasProbe = hasFlag("native-alias-probe");
+const captureProbeHooks = hasFlag("capture-probe-hooks");
+const repeats = boundedInteger(
+  "repeats",
+  option("repeats"),
+  nativeAliasPilot || nativeAliasProbe ? 1 : 2,
+  20,
+);
 const requestedTimeoutMs = option("timeout-ms");
 const timeoutMs = boundedInteger(
   "timeout-ms",
   requestedTimeoutMs,
-  nativeAliasPilot ? nativeAliasPilotV3.sessionTimeoutMs : 5 * 60_000,
+  nativeAliasPilot ? nativeAliasPilotV4.sessionTimeoutMs : 5 * 60_000,
   30 * 60_000,
 );
 const requestedModel = option("model") ?? process.env.BENCHMARK_MODEL;
 const variant = option("variant");
 const agent = option("agent") ?? "build";
 const authFile = option("auth-file") ?? process.env.BENCHMARK_AUTH_FILE;
-const taskSetName = option("task-set") ?? nativeAliasPilotV3.taskSet;
+const taskSetName =
+  option("task-set") ??
+  (nativeAliasProbe ? "single-constant-probe-v1" : nativeAliasPilotV4.taskSet);
 if (!Object.hasOwn(modelTaskSets, taskSetName)) {
   throw new Error(`--task-set must be one of: ${Object.keys(modelTaskSets).sort().join(", ")}.`);
 }
@@ -1040,7 +1071,11 @@ const taskSet = taskSetName as keyof typeof modelTaskSets;
 const modelTasks: readonly ModelTask[] = modelTaskSets[taskSet];
 const adapterSetName =
   option("adapter-set") ??
-  (nativeAliasPilot ? nativeAliasPilotV3.adapterSet : "native-vs-unique-v1");
+  (nativeAliasPilot
+    ? nativeAliasPilotV4.adapterSet
+    : nativeAliasProbe
+      ? "native-alias-probe-v1"
+      : "native-vs-unique-v1");
 if (!Object.hasOwn(modelAdapterSets, adapterSetName)) {
   throw new Error(
     `--adapter-set must be one of: ${Object.keys(modelAdapterSets).sort().join(", ")}.`,
@@ -1049,21 +1084,21 @@ if (!Object.hasOwn(modelAdapterSets, adapterSetName)) {
 const adapterSet = adapterSetName as AdapterSetId;
 const adapters: readonly AdapterId[] = modelAdapterSets[adapterSet];
 if (nativeAliasPilot) {
-  if (requestedTimeoutMs && timeoutMs !== nativeAliasPilotV3.sessionTimeoutMs) {
+  if (requestedTimeoutMs && timeoutMs !== nativeAliasPilotV4.sessionTimeoutMs) {
     throw new Error(
-      `--native-alias-pilot requires --timeout-ms=${nativeAliasPilotV3.sessionTimeoutMs}.`,
+      `--native-alias-pilot requires --timeout-ms=${nativeAliasPilotV4.sessionTimeoutMs}.`,
     );
   }
-  if (taskSet !== nativeAliasPilotV3.taskSet) {
-    throw new Error(`--native-alias-pilot requires --task-set=${nativeAliasPilotV3.taskSet}.`);
+  if (taskSet !== nativeAliasPilotV4.taskSet) {
+    throw new Error(`--native-alias-pilot requires --task-set=${nativeAliasPilotV4.taskSet}.`);
   }
-  if (adapterSet !== nativeAliasPilotV3.adapterSet) {
+  if (adapterSet !== nativeAliasPilotV4.adapterSet) {
     throw new Error(
-      `--native-alias-pilot requires --adapter-set=${nativeAliasPilotV3.adapterSet}.`,
+      `--native-alias-pilot requires --adapter-set=${nativeAliasPilotV4.adapterSet}.`,
     );
   }
-  if (repeats !== nativeAliasPilotV3.repeats) {
-    throw new Error(`--native-alias-pilot requires --repeats=${nativeAliasPilotV3.repeats}.`);
+  if (repeats !== nativeAliasPilotV4.repeats) {
+    throw new Error(`--native-alias-pilot requires --repeats=${nativeAliasPilotV4.repeats}.`);
   }
   if (requestedModel || variant) {
     throw new Error("--native-alias-pilot uses its frozen model and variant manifest.");
@@ -1071,22 +1106,47 @@ if (nativeAliasPilot) {
   if (agent !== "build") throw new Error("--native-alias-pilot requires --agent=build.");
   const taskManifestSha256 = sha256(JSON.stringify(modelTasks));
   const adapterManifestSha256 = sha256(JSON.stringify(adapterSetManifest(adapterSet)));
-  if (taskManifestSha256 !== nativeAliasPilotV3.taskManifestSha256) {
+  if (taskManifestSha256 !== nativeAliasPilotV4.taskManifestSha256) {
     throw new Error(
       "--native-alias-pilot task contents do not match the frozen proposal manifest.",
     );
   }
-  if (adapterManifestSha256 !== nativeAliasPilotV3.adapterManifestSha256) {
+  if (adapterManifestSha256 !== nativeAliasPilotV4.adapterManifestSha256) {
     throw new Error(
       "--native-alias-pilot adapter behavior does not match the frozen proposal manifest.",
     );
   }
 }
-if (execute && adapterSet === "native-aliases-v1" && !nativeAliasPilot) {
+if (nativeAliasProbe) {
+  const probeModel = nativeAliasPilotV4.models.find((entry) => entry.model === requestedModel);
+  if (nativeAliasPilot || preflight) {
+    throw new Error("--native-alias-probe cannot be combined with pilot or preflight modes.");
+  }
+  if (
+    taskSet !== "single-constant-probe-v1" ||
+    adapterSet !== "native-alias-probe-v1" ||
+    !probeModel ||
+    variant !== ("variant" in probeModel ? probeModel.variant : "") ||
+    agent !== "build"
+  ) {
+    throw new Error(
+      "--native-alias-probe requires the single-constant/native-alias configuration and one exact frozen pilot model/variant.",
+    );
+  }
+}
+if (captureProbeHooks && !nativeAliasProbe) {
+  throw new Error("--capture-probe-hooks requires --native-alias-probe.");
+}
+if (
+  execute &&
+  adapters.includes("better-hashline-native-aliases") &&
+  !nativeAliasPilot &&
+  !nativeAliasProbe
+) {
   throw new Error("Paid native alias execution requires --native-alias-pilot.");
 }
 const scheduledModels = nativeAliasPilot
-  ? nativeAliasPilotV3.models
+  ? nativeAliasPilotV4.models
   : requestedModel
     ? [{ model: requestedModel, ...(variant ? { variant } : {}) }]
     : [];
@@ -1131,10 +1191,10 @@ const schedule = scheduledModels
   .map((entry, index) => ({ index: index + 1, ...entry }));
 const scheduleManifestSha256 = sha256(JSON.stringify(schedule));
 if (nativeAliasPilot) {
-  if (schedule.length !== nativeAliasPilotV3.sessionLimit) {
+  if (schedule.length !== nativeAliasPilotV4.sessionLimit) {
     throw new Error("The frozen native-alias pilot schedule is inconsistent.");
   }
-  if (scheduleManifestSha256 !== nativeAliasPilotV3.scheduleManifestSha256) {
+  if (scheduleManifestSha256 !== nativeAliasPilotV4.scheduleManifestSha256) {
     throw new Error("The frozen native-alias pilot schedule does not match its proposal digest.");
   }
 }
@@ -1151,7 +1211,7 @@ const output = resolve(
 const pilotOutputRoot = resolve(repository, "benchmarks", "results", preflight ? "local" : "model");
 const pilotOutputRelative = relative(pilotOutputRoot, output);
 if (
-  nativeAliasPilot &&
+  (nativeAliasPilot || nativeAliasProbe) &&
   (!pilotOutputRelative ||
     pilotOutputRelative === ".." ||
     pilotOutputRelative.startsWith("../") ||
@@ -1160,7 +1220,7 @@ if (
     /[\\/]/u.test(pilotOutputRelative))
 ) {
   throw new Error(
-    `--native-alias-pilot output must be a new direct child of benchmarks/results/${preflight ? "local" : "model"}/.`,
+    `Native-alias pilot and probe output must be a new direct child of benchmarks/results/${preflight ? "local" : "model"}/.`,
   );
 }
 const modelMultiplier = nativeAliasPilot ? scheduledModels.length : 1;
@@ -1176,7 +1236,7 @@ if (!execute && !preflight) {
   );
   console.log(
     nativeAliasPilot
-      ? `Runner executable SHA-256 ${runnerExecutableSha256}; schedule SHA-256 ${scheduleManifestSha256}. ${nativeAliasPilotV3.id} is not approved for paid execution; only dry-run and preflight modes are enabled.`
+      ? `Runner executable SHA-256 ${runnerExecutableSha256}; schedule SHA-256 ${scheduleManifestSha256}. ${nativeAliasPilotV4.id} is not approved for paid execution; only dry-run and preflight modes are enabled.`
       : "Pass --execute, --model, --approved-sessions, --approved-max-requests, --approved-max-cost-usd, exactly one auth source, and BENCHMARK_ACK_COSTS=yes.",
   );
   process.exit(0);
@@ -1204,16 +1264,16 @@ const lockfileSha256 = sha256(await readFile(join(repository, "bun.lock")));
 const toolchain = await deriveEffectiveToolIdentities({ cwd: repository });
 if (
   nativeAliasPilot &&
-  (toolchain.bun.version !== nativeAliasPilotV3.requiredBunVersion ||
-    toolchain.npm.cli.packageVersion !== nativeAliasPilotV3.requiredNpmVersion ||
-    toolchain.opencode.packageVersion !== nativeAliasPilotV3.requiredOpenCodeVersion)
+  (toolchain.bun.version !== nativeAliasPilotV4.requiredBunVersion ||
+    toolchain.npm.cli.packageVersion !== nativeAliasPilotV4.requiredNpmVersion ||
+    toolchain.opencode.packageVersion !== nativeAliasPilotV4.requiredOpenCodeVersion)
 ) {
-  throw new Error("The effective Bun/npm/OpenCode toolchain does not match pilot v3.");
+  throw new Error("The effective Bun/npm/OpenCode toolchain does not match pilot v4.");
 }
 const opencodeSource = toolchain.opencode.binary.path;
 const opencodePackage = { version: toolchain.opencode.packageVersion };
 const osRelease = release();
-let pilotApproval: ValidatedPilotV3Approval | undefined;
+let pilotApproval: ValidatedPilotV4Approval | undefined;
 if (nativeAliasPilot && execute) {
   if (
     stagedApprovalCommit !== sourceCommit ||
@@ -1221,9 +1281,9 @@ if (nativeAliasPilot && execute) {
     !stagedExternalApproval ||
     !/^[a-f0-9]{64}$/u.test(stagedExternalApprovalSha256 ?? "")
   ) {
-    throw new Error("Paid pilot v3 execution requires the staged external approval boundary.");
+    throw new Error("Paid pilot v4 execution requires the staged external approval boundary.");
   }
-  const approvalCommit = await validatePilotV3ApprovalCommit({
+  const approvalCommit = await validatePilotV4ApprovalCommit({
     repository,
     approvalCommit: sourceCommit,
   });
@@ -1237,7 +1297,7 @@ if (nativeAliasPilot && execute) {
   if (sha256(externalApprovalBytes) !== stagedExternalApprovalSha256) {
     throw new Error("Staged external approval bundle hash changed across the launcher boundary.");
   }
-  pilotApproval = validatePilotV3ExternalApprovalBundle(externalApprovalBytes, approvalCommit);
+  pilotApproval = validatePilotV4ExternalApprovalBundle(externalApprovalBytes, approvalCommit);
   if (
     pilotApproval.bundle.hashes.runnerExecutableSha256 !== runnerExecutableSha256 ||
     pilotApproval.bundle.hashes.scheduleManifestSha256 !== scheduleManifestSha256 ||
@@ -1246,11 +1306,11 @@ if (nativeAliasPilot && execute) {
     pilotApproval.bundle.hashes.rootLockfileSha256 !== lockfileSha256 ||
     pilotApproval.bundle.hashes.toolchainSha256 !== jsonSha256(toolchain)
   ) {
-    throw new Error("Pilot v3 executing provenance does not match external approval bundle B.");
+    throw new Error("Pilot v4 executing provenance does not match external approval bundle B.");
   }
   const approvedOutput = resolve(repository, pilotApproval.bundle.outputRelativePath);
   if (output !== approvedOutput) {
-    throw new Error(`Paid pilot v3 output must be exactly ${approvedOutput}.`);
+    throw new Error(`Paid pilot v4 output must be exactly ${approvedOutput}.`);
   }
 }
 
@@ -1299,7 +1359,7 @@ if (preflight) {
       schemaVersion: NATIVE_ALIAS_PREFLIGHT_SCHEMA_VERSION,
       generatedAt: new Date().toISOString(),
       modelCalls: 0,
-      pilotId: nativeAliasPilot ? nativeAliasPilotV3.id : "unscoped-model-preflight",
+      pilotId: nativeAliasPilot ? nativeAliasPilotV4.id : "unscoped-model-preflight",
       sourceCommit,
       sourceDirty,
       sourceEligibleForApproval: !sourceDirty,
@@ -1318,14 +1378,14 @@ if (preflight) {
         timeoutMs,
         maxAgentSteps: MAX_AGENT_STEPS,
         requestedOutputTokenLimit: nativeAliasPilot
-          ? nativeAliasPilotV3.requestedOutputTokenLimit
+          ? nativeAliasPilotV4.requestedOutputTokenLimit
           : null,
-        traceByteLimit: nativeAliasPilot ? nativeAliasPilotV3.traceByteLimit : null,
+        traceByteLimit: nativeAliasPilot ? nativeAliasPilotV4.traceByteLimit : null,
         sessionLimit: sessions,
         requestLimit: maximumModelRequests,
-        totalCostStopThresholdUsd: nativeAliasPilot ? nativeAliasPilotV3.totalCostLimitUsd : null,
+        totalCostStopThresholdUsd: nativeAliasPilot ? nativeAliasPilotV4.totalCostLimitUsd : null,
         perModelCostStopThresholdUsd: nativeAliasPilot
-          ? nativeAliasPilotV3.perModelCostLimitUsd
+          ? nativeAliasPilotV4.perModelCostLimitUsd
           : null,
       },
       sideEffects: nativeAliasPilot
@@ -1364,13 +1424,13 @@ if (!nativeAliasPilot && !requestedModel) {
 }
 for (const scheduledModel of scheduledModels) requestedModelIdentity(scheduledModel.model);
 const approvedSessions = nativeAliasPilot
-  ? nativeAliasPilotV3.sessionLimit
+  ? nativeAliasPilotV4.sessionLimit
   : boundedInteger("approved-sessions", option("approved-sessions"), 1, 10_000);
 const approvedMaxRequests = nativeAliasPilot
-  ? nativeAliasPilotV3.requestLimit
+  ? nativeAliasPilotV4.requestLimit
   : boundedInteger("approved-max-requests", option("approved-max-requests"), 1, 100_000);
 const approvedMaxCostUsd = nativeAliasPilot
-  ? nativeAliasPilotV3.totalCostLimitUsd
+  ? nativeAliasPilotV4.totalCostLimitUsd
   : positiveNumber("approved-max-cost-usd", option("approved-max-cost-usd"));
 const approvedPreflightPath = option("approved-preflight-receipt");
 if (approvedSessions !== sessions) {
@@ -1383,15 +1443,15 @@ if (approvedMaxRequests !== maximumModelRequests) {
 }
 if (nativeAliasPilot) {
   if (
-    approvedSessions !== nativeAliasPilotV3.sessionLimit ||
-    approvedMaxRequests !== nativeAliasPilotV3.requestLimit ||
-    approvedMaxCostUsd !== nativeAliasPilotV3.totalCostLimitUsd
+    approvedSessions !== nativeAliasPilotV4.sessionLimit ||
+    approvedMaxRequests !== nativeAliasPilotV4.requestLimit ||
+    approvedMaxCostUsd !== nativeAliasPilotV4.totalCostLimitUsd
   ) {
     throw new Error(
-      `--native-alias-pilot requires approvals of ${nativeAliasPilotV3.sessionLimit} sessions, ${nativeAliasPilotV3.requestLimit} requests, and USD ${nativeAliasPilotV3.totalCostLimitUsd}.`,
+      `--native-alias-pilot requires approvals of ${nativeAliasPilotV4.sessionLimit} sessions, ${nativeAliasPilotV4.requestLimit} requests, and USD ${nativeAliasPilotV4.totalCostLimitUsd}.`,
     );
   }
-  if (!pilotApproval) throw new Error("Pilot v3 external approval was not established.");
+  if (!pilotApproval) throw new Error("Pilot v4 external approval was not established.");
 }
 if (process.env.BENCHMARK_ACK_COSTS !== "yes") {
   throw new Error(
@@ -1410,13 +1470,18 @@ const authSourceBytes = authFile
 let endpointAttestationSha256: string | undefined;
 let budgetAttestationSha256: string | undefined;
 let userApprovalSha256: string | undefined;
-if (nativeAliasPilot) {
+if (nativeAliasPilot || nativeAliasProbe) {
   if (!authFile || passthroughEnvironment.length > 0) {
-    throw new Error("--native-alias-pilot requires exactly one isolated --auth-file source.");
+    throw new Error(
+      "Native alias model execution requires exactly one isolated --auth-file source.",
+    );
   }
-  if (!authSourceBytes) throw new Error("The frozen native-alias pilot auth file is unreadable.");
+  if (!authSourceBytes) throw new Error("The native-alias auth file is unreadable.");
   parsePilotAuth(authSourceBytes);
-  if (!pilotApproval) throw new Error("Pilot v3 external approval was not established.");
+}
+if (nativeAliasPilot) {
+  if (!pilotApproval) throw new Error("Pilot v4 external approval was not established.");
+  if (!authSourceBytes) throw new Error("The frozen native-alias pilot auth file is unreadable.");
   if (
     sha256(authSourceBytes) !== pilotApproval.bundle.hashes.authFileSha256 ||
     pilotAuthIdentitySha256(authSourceBytes) !== pilotApproval.bundle.hashes.authIdentitySha256
@@ -1428,7 +1493,7 @@ if (nativeAliasPilot) {
   const userApproval = option("user-approval-attestation");
   if (!endpointAttestation || !budgetAttestation || !userApproval) {
     throw new Error(
-      "Pilot v3 requires endpoint, hard-budget, and exact user-approval attestation files.",
+      "Pilot v4 requires endpoint, hard-budget, and exact user-approval attestation files.",
     );
   }
   endpointAttestationSha256 = sha256(
@@ -1478,7 +1543,7 @@ if (nativeAliasPilot) {
   const receiptArtifact = (receipt as NativeAliasPreflightReceipt | undefined)?.artifact;
   if (!receiptArtifact) throw new Error("The approved preflight receipt has no artifact.");
   assertNativeAliasPreflightReceipt(receipt, {
-    pilotId: nativeAliasPilotV3.id,
+    pilotId: nativeAliasPilotV4.id,
     sourceCommit: pilotApproval.candidateCommit,
     sourceStatusSha256,
     runnerExecutableSha256,
@@ -1493,12 +1558,12 @@ if (nativeAliasPilot) {
     limits: {
       timeoutMs,
       maxAgentSteps: MAX_AGENT_STEPS,
-      requestedOutputTokenLimit: nativeAliasPilotV3.requestedOutputTokenLimit,
-      traceByteLimit: nativeAliasPilotV3.traceByteLimit,
+      requestedOutputTokenLimit: nativeAliasPilotV4.requestedOutputTokenLimit,
+      traceByteLimit: nativeAliasPilotV4.traceByteLimit,
       sessionLimit: sessions,
       requestLimit: maximumModelRequests,
-      totalCostStopThresholdUsd: nativeAliasPilotV3.totalCostLimitUsd,
-      perModelCostStopThresholdUsd: nativeAliasPilotV3.perModelCostLimitUsd,
+      totalCostStopThresholdUsd: nativeAliasPilotV4.totalCostLimitUsd,
+      perModelCostStopThresholdUsd: nativeAliasPilotV4.perModelCostLimitUsd,
     },
     artifact: receiptArtifact,
     rootLockfileSha256: lockfileSha256,
@@ -1525,11 +1590,11 @@ if (nativeAliasPilot) {
   }
 }
 
-let reservationReceipt: PilotV3ReservationReceipt | undefined;
+let reservationReceipt: PilotV4ReservationReceipt | undefined;
 if (nativeAliasPilot) {
-  if (!pilotApproval) throw new Error("Pilot v3 external approval was not established.");
+  if (!pilotApproval) throw new Error("Pilot v4 external approval was not established.");
   const brokerPath = option("reservation-broker");
-  if (!brokerPath) throw new Error("Pilot v3 requires --reservation-broker.");
+  if (!brokerPath) throw new Error("Pilot v4 requires --reservation-broker.");
   await reservePilotOutput(output, pilotOutputRoot, repository);
   const worktreeRoots = (await run(["git", "worktree", "list", "--porcelain"], repository))
     .split(/\r?\n/u)
@@ -1542,6 +1607,8 @@ if (nativeAliasPilot) {
     repositoryAndWorktreeRoots: worktreeRoots,
   });
   await writeJsonAtomic(join(output, "reservation.json"), reservationReceipt);
+} else if (nativeAliasProbe) {
+  await reservePilotOutput(output, pilotOutputRoot, repository);
 } else {
   await reserveOutput(output);
 }
@@ -1565,17 +1632,21 @@ const writeJournal = async (
     sourceCommit,
     taskSet,
     adapterSet,
-    pilot: nativeAliasPilot ? nativeAliasPilotV3.id : null,
+    pilot: nativeAliasPilot
+      ? nativeAliasPilotV4.id
+      : nativeAliasProbe
+        ? "native-alias-development-probe/v1"
+        : null,
     approvals: {
       approvedSessions,
       approvedMaxRequests,
       approvedMaxCostUsd,
       timeoutMs,
       maxAgentSteps: MAX_AGENT_STEPS,
-      requestedOutputTokenLimit: nativeAliasPilot
-        ? nativeAliasPilotV3.requestedOutputTokenLimit
-        : null,
-      traceByteLimit: nativeAliasPilot ? nativeAliasPilotV3.traceByteLimit : null,
+      requestedOutputTokenLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV4.requestedOutputTokenLimit : null,
+      traceByteLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV4.traceByteLimit : null,
     },
     provenance: {
       runnerExecutableSha256,
@@ -1655,7 +1726,7 @@ try {
     if (
       requestsBeforeSession >= approvedMaxRequests ||
       costBeforeSession >= approvedMaxCostUsd ||
-      (nativeAliasPilot && modelCostBeforeSession >= nativeAliasPilotV3.perModelCostLimitUsd)
+      (nativeAliasPilot && modelCostBeforeSession >= nativeAliasPilotV4.perModelCostLimitUsd)
     ) {
       throw new Error("An approved request or cost ceiling was reached before the next session.");
     }
@@ -1679,7 +1750,7 @@ try {
         ? {
             onAuthState: async (nextAuthBytes: Uint8Array) => {
               const previousAuthBytes = await readFile(sessionAuthFile);
-              if (nativeAliasPilot) {
+              if (nativeAliasPilot || nativeAliasProbe) {
                 assertPilotAuthTransition(previousAuthBytes, nextAuthBytes);
               }
               await writeBytesAtomic(sessionAuthFile, nextAuthBytes);
@@ -1690,11 +1761,12 @@ try {
       passthroughEnvironment,
       output,
       timeoutMs,
-      ...(nativeAliasPilot
+      ...(nativeAliasPilot || nativeAliasProbe
         ? {
             providerConfig: pilotProviderConfig(entry.model),
-            outputTokenLimit: nativeAliasPilotV3.requestedOutputTokenLimit,
-            traceByteLimit: nativeAliasPilotV3.traceByteLimit,
+            outputTokenLimit: nativeAliasPilotV4.requestedOutputTokenLimit,
+            traceByteLimit: nativeAliasPilotV4.traceByteLimit,
+            captureProbeHooks,
           }
         : {}),
       packageVersion: artifact.packageVersion,
@@ -1715,7 +1787,7 @@ try {
       result.retryGuardTriggered ||
       accountedRequests > approvedMaxRequests ||
       accountedCost > approvedMaxCostUsd ||
-      (nativeAliasPilot && modelAccountedCost > nativeAliasPilotV3.perModelCostLimitUsd)
+      (nativeAliasPilot && modelAccountedCost > nativeAliasPilotV4.perModelCostLimitUsd)
     ) {
       throw new Error(
         `Pilot stopped after session ${entry.index}: process, identity, protocol, request, or cost integrity failed.`,
@@ -1756,7 +1828,11 @@ try {
       reservationReceipt,
     },
     protocol: {
-      pilot: nativeAliasPilot ? nativeAliasPilotV3.id : null,
+      pilot: nativeAliasPilot
+        ? nativeAliasPilotV4.id
+        : nativeAliasProbe
+          ? "native-alias-development-probe/v1"
+          : null,
       scheduledModels,
       requestedAgent: agent,
       taskSet,
@@ -1767,10 +1843,10 @@ try {
       adapterOrder: "alternating",
       timeoutMs,
       maximumAgentSteps: MAX_AGENT_STEPS,
-      requestedOutputTokenLimit: nativeAliasPilot
-        ? nativeAliasPilotV3.requestedOutputTokenLimit
-        : null,
-      traceByteLimit: nativeAliasPilot ? nativeAliasPilotV3.traceByteLimit : null,
+      requestedOutputTokenLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV4.requestedOutputTokenLimit : null,
+      traceByteLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV4.traceByteLimit : null,
       approvedSessions,
       approvedMaxRequests,
       approvedMaxCostUsd,
@@ -1783,7 +1859,7 @@ try {
       evaluator: "exact bytes, expected absence, and no unexpected files",
       usage:
         "observed sanitized parent-session export; provider retries are process-aborted; output tokens and trace bytes are bounded; reported-cost thresholds stop later sessions but are not hard billing caps",
-      publishable: !sourceDirty,
+      publishable: isPublishableModelEvidence(sourceDirty, nativeAliasProbe),
     },
     results,
   };

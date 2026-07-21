@@ -124,6 +124,7 @@ export async function readOpenCodeSessionHistory(
   sessionId: string,
   directory: string,
   limit: number,
+  timeoutMs = SESSION_HISTORY_TIMEOUT_MS,
 ): Promise<unknown> {
   const transport = hostTransport(client);
   const url = new URL(`/session/${encodeURIComponent(sessionId)}/message`, transport.baseUrl);
@@ -134,7 +135,9 @@ export async function readOpenCodeSessionHistory(
       cache: "no-store",
       headers: transport.headers,
       redirect: "error",
-      signal: AbortSignal.timeout(SESSION_HISTORY_TIMEOUT_MS),
+      signal: AbortSignal.timeout(
+        Math.max(1, Math.min(SESSION_HISTORY_TIMEOUT_MS, Math.floor(timeoutMs))),
+      ),
     }),
   );
   if (!response.ok) throw new Error(`OpenCode session history returned HTTP ${response.status}.`);

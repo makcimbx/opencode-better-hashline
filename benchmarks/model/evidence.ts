@@ -16,6 +16,13 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
+export function isPublishableModelEvidence(
+  sourceDirty: boolean,
+  developmentProbe: boolean,
+): boolean {
+  return !sourceDirty && !developmentProbe;
+}
+
 export async function reserveOutput(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await syncDirectory(dirname(path));

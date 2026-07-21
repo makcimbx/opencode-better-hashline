@@ -3,48 +3,48 @@ import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, isAbsolute, join, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { isInsideCanonicalPath } from "../../src/path-identity.js";
 import { canonicalJson } from "../../src/presentation.js";
 import { type BoundedProcessResult, captureBoundedProcess } from "./process.js";
 
-export const PILOT_V3_ID = "native-alias-pilot-v3" as const;
-export const PILOT_V3_APPROVAL_ANCHOR_PATH =
-  "benchmarks/model/native-alias-pilot-v3.approval.json" as const;
-export const PILOT_V3_OUTPUT_RELATIVE_PATH =
-  "benchmarks/results/model/native-alias-pilot-v3" as const;
-export const PILOT_V3_PREFLIGHT_SCHEMA_VERSION = 6 as const;
-export const PILOT_V3_TASK_MANIFEST_SHA256 =
+export const PILOT_V4_ID = "native-alias-pilot-v4" as const;
+export const PILOT_V4_APPROVAL_ANCHOR_PATH =
+  "benchmarks/model/native-alias-pilot-v4.approval.json" as const;
+export const PILOT_V4_OUTPUT_RELATIVE_PATH =
+  "benchmarks/results/model/native-alias-pilot-v4" as const;
+export const PILOT_V4_PREFLIGHT_SCHEMA_VERSION = 6 as const;
+export const PILOT_V4_TASK_MANIFEST_SHA256 =
   "8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a" as const;
-export const PILOT_V3_ADAPTER_MANIFEST_SHA256 =
+export const PILOT_V4_ADAPTER_MANIFEST_SHA256 =
   "cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8" as const;
-export const PILOT_V3_SCHEDULE_MANIFEST_SHA256 =
-  "488392f98a0a130642f1a171c8df315ca1a54014ec750ad898c62dbc61b0a75c" as const;
-export const PILOT_V3_PACKAGE_VERSION = "0.2.1" as const;
+export const PILOT_V4_SCHEDULE_MANIFEST_SHA256 =
+  "52d9b778c89f2b05619c013d718a4d7522a2aef5971ecf412b798946e3847bd0" as const;
+export const PILOT_V4_PACKAGE_VERSION = "0.2.1" as const;
 
-export const PILOT_V3_LIMITS = {
+export const PILOT_V4_LIMITS = {
   repeats: 1,
   maxAgentSteps: 12,
   sessionTimeoutMs: 300_000,
   requestedOutputTokenLimit: 2_048,
   traceByteLimit: 8 * 1024 * 1024,
-  sessionLimit: 96,
-  requestLimit: 1_152,
+  sessionLimit: 72,
+  requestLimit: 864,
   totalCostStopThresholdUsd: 4,
   perModelCostStopThresholdUsd: 1,
 } as const;
 
-export const PILOT_V3_RESERVATION_PROTOCOL =
+export const PILOT_V4_RESERVATION_PROTOCOL =
   "opencode-better-hashline-paid-pilot-reservation/v1" as const;
-export const PILOT_V3_RESERVATION_NAMESPACE =
+export const PILOT_V4_RESERVATION_NAMESPACE =
   "io.github.makcimbx.opencode-better-hashline" as const;
-export const PILOT_V3_RESERVATION_KEY = PILOT_V3_ID;
-export const PILOT_V3_RESERVATION_ID =
-  `${PILOT_V3_RESERVATION_NAMESPACE}/${PILOT_V3_RESERVATION_KEY}` as const;
+export const PILOT_V4_RESERVATION_KEY = PILOT_V4_ID;
+export const PILOT_V4_RESERVATION_ID =
+  `${PILOT_V4_RESERVATION_NAMESPACE}/${PILOT_V4_RESERVATION_KEY}` as const;
 
-export const PILOT_V3_BROKER_TIMEOUT_MS = 10_000 as const;
-export const PILOT_V3_BROKER_STDOUT_LIMIT = 64 * 1024;
-export const PILOT_V3_BROKER_STDERR_LIMIT = 16 * 1024;
+export const PILOT_V4_BROKER_TIMEOUT_MS = 10_000 as const;
+export const PILOT_V4_BROKER_STDOUT_LIMIT = 64 * 1024;
+export const PILOT_V4_BROKER_STDERR_LIMIT = 16 * 1024;
 
 const APPROVAL_SCHEMA_VERSION = 1 as const;
 const EXTERNAL_BUNDLE_SCHEMA_VERSION = 1 as const;
@@ -53,29 +53,29 @@ const RESERVATION_RESPONSE_SCHEMA_VERSION = 1 as const;
 const ANCHOR_BYTE_LIMIT = 4 * 1024;
 const BUNDLE_BYTE_LIMIT = 64 * 1024;
 
-export interface ActivePilotV3ApprovalAnchor {
+export interface ActivePilotV4ApprovalAnchor {
   schemaVersion: typeof APPROVAL_SCHEMA_VERSION;
-  pilotId: typeof PILOT_V3_ID;
+  pilotId: typeof PILOT_V4_ID;
   approval: {
     candidateCommit: string;
     externalBundleSha256: string;
   };
 }
 
-export type PilotV3ApprovalAnchor =
+export type PilotV4ApprovalAnchor =
   | {
       schemaVersion: typeof APPROVAL_SCHEMA_VERSION;
-      pilotId: typeof PILOT_V3_ID;
+      pilotId: typeof PILOT_V4_ID;
       approval: null;
     }
-  | ActivePilotV3ApprovalAnchor;
+  | ActivePilotV4ApprovalAnchor;
 
-export interface PilotV3ExternalApprovalBundle {
+export interface PilotV4ExternalApprovalBundle {
   schemaVersion: typeof EXTERNAL_BUNDLE_SCHEMA_VERSION;
-  pilotId: typeof PILOT_V3_ID;
+  pilotId: typeof PILOT_V4_ID;
   candidateCommit: string;
-  packageVersion: typeof PILOT_V3_PACKAGE_VERSION;
-  preflightSchemaVersion: typeof PILOT_V3_PREFLIGHT_SCHEMA_VERSION;
+  packageVersion: typeof PILOT_V4_PACKAGE_VERSION;
+  preflightSchemaVersion: typeof PILOT_V4_PREFLIGHT_SCHEMA_VERSION;
   hashes: {
     preflightReceiptSha256: string;
     runnerExecutableSha256: string;
@@ -93,48 +93,48 @@ export interface PilotV3ExternalApprovalBundle {
     userApprovalSha256: string;
     brokerExecutableSha256: string;
   };
-  outputRelativePath: typeof PILOT_V3_OUTPUT_RELATIVE_PATH;
-  limits: typeof PILOT_V3_LIMITS;
+  outputRelativePath: typeof PILOT_V4_OUTPUT_RELATIVE_PATH;
+  limits: typeof PILOT_V4_LIMITS;
   reservation: {
-    protocol: typeof PILOT_V3_RESERVATION_PROTOCOL;
-    namespace: typeof PILOT_V3_RESERVATION_NAMESPACE;
-    key: typeof PILOT_V3_RESERVATION_KEY;
+    protocol: typeof PILOT_V4_RESERVATION_PROTOCOL;
+    namespace: typeof PILOT_V4_RESERVATION_NAMESPACE;
+    key: typeof PILOT_V4_RESERVATION_KEY;
     authority: string;
   };
 }
 
-export interface ValidatedPilotV3ApprovalCommit {
+export interface ValidatedPilotV4ApprovalCommit {
   approvalCommit: string;
   candidateCommit: string;
-  anchor: ActivePilotV3ApprovalAnchor;
+  anchor: ActivePilotV4ApprovalAnchor;
 }
 
-export interface ValidatedPilotV3Approval extends ValidatedPilotV3ApprovalCommit {
+export interface ValidatedPilotV4Approval extends ValidatedPilotV4ApprovalCommit {
   externalBundleSha256: string;
-  bundle: PilotV3ExternalApprovalBundle;
+  bundle: PilotV4ExternalApprovalBundle;
 }
 
-export interface PilotV3ReservationRequest {
+export interface PilotV4ReservationRequest {
   schemaVersion: typeof RESERVATION_REQUEST_SCHEMA_VERSION;
   operation: "consume";
-  protocol: typeof PILOT_V3_RESERVATION_PROTOCOL;
-  namespace: typeof PILOT_V3_RESERVATION_NAMESPACE;
-  key: typeof PILOT_V3_RESERVATION_KEY;
-  reservationId: typeof PILOT_V3_RESERVATION_ID;
+  protocol: typeof PILOT_V4_RESERVATION_PROTOCOL;
+  namespace: typeof PILOT_V4_RESERVATION_NAMESPACE;
+  key: typeof PILOT_V4_RESERVATION_KEY;
+  reservationId: typeof PILOT_V4_RESERVATION_ID;
   authority: string;
-  pilotId: typeof PILOT_V3_ID;
+  pilotId: typeof PILOT_V4_ID;
   candidateCommit: string;
   approvalCommit: string;
   externalBundleSha256: string;
 }
 
-export interface PilotV3ReservationReceipt {
+export interface PilotV4ReservationReceipt {
   schemaVersion: typeof RESERVATION_RESPONSE_SCHEMA_VERSION;
   status: "reserved";
-  protocol: typeof PILOT_V3_RESERVATION_PROTOCOL;
-  namespace: typeof PILOT_V3_RESERVATION_NAMESPACE;
-  key: typeof PILOT_V3_RESERVATION_KEY;
-  reservationId: typeof PILOT_V3_RESERVATION_ID;
+  protocol: typeof PILOT_V4_RESERVATION_PROTOCOL;
+  namespace: typeof PILOT_V4_RESERVATION_NAMESPACE;
+  key: typeof PILOT_V4_RESERVATION_KEY;
+  reservationId: typeof PILOT_V4_RESERVATION_ID;
   authority: string;
   requestSha256: string;
   signature: string;
@@ -152,7 +152,7 @@ export type GitRunner = (
 export interface BrokerInvocation {
   command: readonly [executablePath: string, canonicalRequest: string];
   cwd: string;
-  timeoutMs: typeof PILOT_V3_BROKER_TIMEOUT_MS;
+  timeoutMs: typeof PILOT_V4_BROKER_TIMEOUT_MS;
   stdoutLimit: number;
   stderrLimit: number;
 }
@@ -256,18 +256,47 @@ function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+async function statusIfPresent(path: string): Promise<Stats | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function assertOutsideGitRepositories(path: string): Promise<void> {
+  let directory = dirname(path);
+  while (true) {
+    if (await statusIfPresent(join(directory, ".git"))) {
+      throw new Error("External reservation broker must be outside every repository and worktree.");
+    }
+    const [head, objects, refs] = await Promise.all([
+      statusIfPresent(join(directory, "HEAD")),
+      statusIfPresent(join(directory, "objects")),
+      statusIfPresent(join(directory, "refs")),
+    ]);
+    if (head?.isFile() && objects?.isDirectory() && refs?.isDirectory()) {
+      throw new Error("External reservation broker must be outside every repository and worktree.");
+    }
+    const parent = dirname(directory);
+    if (parent === directory) return;
+    directory = parent;
+  }
+}
+
 function committedAnchorEncoding(value: unknown): string {
   const root = record(value);
   if (
     !root ||
     !exactKeys(root, ANCHOR_KEYS) ||
     root.schemaVersion !== APPROVAL_SCHEMA_VERSION ||
-    root.pilotId !== PILOT_V3_ID
+    root.pilotId !== PILOT_V4_ID
   ) {
     return `${canonicalJson(value)}\n`;
   }
   if (root.approval === null) {
-    return `{ "approval": null, "pilotId": "${PILOT_V3_ID}", "schemaVersion": 1 }\n`;
+    return `{ "approval": null, "pilotId": "${PILOT_V4_ID}", "schemaVersion": 1 }\n`;
   }
   const approval = record(root.approval);
   if (
@@ -283,7 +312,7 @@ function committedAnchorEncoding(value: unknown): string {
     "candidateCommit": "${approval.candidateCommit}",
     "externalBundleSha256": "${approval.externalBundleSha256}"
   },
-  "pilotId": "${PILOT_V3_ID}",
+  "pilotId": "${PILOT_V4_ID}",
   "schemaVersion": 1
 }\n`;
 }
@@ -316,11 +345,11 @@ function parseCanonicalJson(
   return value;
 }
 
-export function parsePilotV3ApprovalAnchor(bytes: Uint8Array): PilotV3ApprovalAnchor {
+export function parsePilotV4ApprovalAnchor(bytes: Uint8Array): PilotV4ApprovalAnchor {
   const value = record(
     parseCanonicalJson(
       bytes,
-      "Pilot v3 approval anchor",
+      "Pilot v4 approval anchor",
       ANCHOR_BYTE_LIMIT,
       committedAnchorEncoding,
     ),
@@ -329,11 +358,11 @@ export function parsePilotV3ApprovalAnchor(bytes: Uint8Array): PilotV3ApprovalAn
     !value ||
     !exactKeys(value, ANCHOR_KEYS) ||
     value.schemaVersion !== APPROVAL_SCHEMA_VERSION ||
-    value.pilotId !== PILOT_V3_ID
+    value.pilotId !== PILOT_V4_ID
   ) {
-    throw new Error("Pilot v3 approval anchor has an invalid exact-key schema.");
+    throw new Error("Pilot v4 approval anchor has an invalid exact-key schema.");
   }
-  if (value.approval === null) return value as unknown as PilotV3ApprovalAnchor;
+  if (value.approval === null) return value as unknown as PilotV4ApprovalAnchor;
 
   const approval = record(value.approval);
   if (
@@ -342,16 +371,16 @@ export function parsePilotV3ApprovalAnchor(bytes: Uint8Array): PilotV3ApprovalAn
     !isCommit(approval.candidateCommit) ||
     !isSha256(approval.externalBundleSha256)
   ) {
-    throw new Error("Pilot v3 active approval anchor has an invalid exact-key schema.");
+    throw new Error("Pilot v4 active approval anchor has an invalid exact-key schema.");
   }
-  return value as unknown as ActivePilotV3ApprovalAnchor;
+  return value as unknown as ActivePilotV4ApprovalAnchor;
 }
 
-export function parsePilotV3ExternalApprovalBundle(
+export function parsePilotV4ExternalApprovalBundle(
   bytes: Uint8Array,
-): PilotV3ExternalApprovalBundle {
+): PilotV4ExternalApprovalBundle {
   const value = record(
-    parseCanonicalJson(bytes, "Pilot v3 external approval bundle", BUNDLE_BYTE_LIMIT),
+    parseCanonicalJson(bytes, "Pilot v4 external approval bundle", BUNDLE_BYTE_LIMIT),
   );
   const hashes = record(value?.hashes);
   const limits = record(value?.limits);
@@ -360,33 +389,33 @@ export function parsePilotV3ExternalApprovalBundle(
     !value ||
     !exactKeys(value, BUNDLE_KEYS) ||
     value.schemaVersion !== EXTERNAL_BUNDLE_SCHEMA_VERSION ||
-    value.pilotId !== PILOT_V3_ID ||
+    value.pilotId !== PILOT_V4_ID ||
     !isCommit(value.candidateCommit) ||
-    value.packageVersion !== PILOT_V3_PACKAGE_VERSION ||
-    value.preflightSchemaVersion !== PILOT_V3_PREFLIGHT_SCHEMA_VERSION ||
-    value.outputRelativePath !== PILOT_V3_OUTPUT_RELATIVE_PATH ||
+    value.packageVersion !== PILOT_V4_PACKAGE_VERSION ||
+    value.preflightSchemaVersion !== PILOT_V4_PREFLIGHT_SCHEMA_VERSION ||
+    value.outputRelativePath !== PILOT_V4_OUTPUT_RELATIVE_PATH ||
     !hashes ||
     !exactKeys(hashes, HASH_KEYS) ||
     !HASH_KEYS.every((key) => isSha256(hashes[key])) ||
-    hashes.taskManifestSha256 !== PILOT_V3_TASK_MANIFEST_SHA256 ||
-    hashes.adapterManifestSha256 !== PILOT_V3_ADAPTER_MANIFEST_SHA256 ||
-    hashes.scheduleManifestSha256 !== PILOT_V3_SCHEDULE_MANIFEST_SHA256 ||
+    hashes.taskManifestSha256 !== PILOT_V4_TASK_MANIFEST_SHA256 ||
+    hashes.adapterManifestSha256 !== PILOT_V4_ADAPTER_MANIFEST_SHA256 ||
+    hashes.scheduleManifestSha256 !== PILOT_V4_SCHEDULE_MANIFEST_SHA256 ||
     !limits ||
     !exactKeys(limits, LIMIT_KEYS) ||
-    !LIMIT_KEYS.every((key) => limits[key] === PILOT_V3_LIMITS[key]) ||
+    !LIMIT_KEYS.every((key) => limits[key] === PILOT_V4_LIMITS[key]) ||
     !reservation ||
     !exactKeys(reservation, RESERVATION_KEYS) ||
-    reservation.protocol !== PILOT_V3_RESERVATION_PROTOCOL ||
-    reservation.namespace !== PILOT_V3_RESERVATION_NAMESPACE ||
-    reservation.key !== PILOT_V3_RESERVATION_KEY ||
+    reservation.protocol !== PILOT_V4_RESERVATION_PROTOCOL ||
+    reservation.namespace !== PILOT_V4_RESERVATION_NAMESPACE ||
+    reservation.key !== PILOT_V4_RESERVATION_KEY ||
     typeof reservation.authority !== "string" ||
     !/^[\x21-\x7e]{1,256}$/u.test(reservation.authority)
   ) {
     throw new Error(
-      "Pilot v3 external approval bundle does not match the frozen exact-key schema.",
+      "Pilot v4 external approval bundle does not match the frozen exact-key schema.",
     );
   }
-  return value as unknown as PilotV3ExternalApprovalBundle;
+  return value as unknown as PilotV4ExternalApprovalBundle;
 }
 
 async function defaultGitRunner(invocation: GitInvocation): Promise<string> {
@@ -421,33 +450,33 @@ async function gitText(
   return (await gitBytes(repository, args, runGit)).toString("utf8");
 }
 
-export async function loadCommittedPilotV3ApprovalAnchor(
+export async function loadCommittedPilotV4ApprovalAnchor(
   input: { repository: string; commit: string },
   dependencies: ApprovalDependencies = {},
-): Promise<PilotV3ApprovalAnchor> {
+): Promise<PilotV4ApprovalAnchor> {
   if (!isCommit(input.commit)) throw new Error("Approval anchor commit must be exact 40-hex.");
   const runGit = dependencies.runGit ?? defaultGitRunner;
   const bytes = await gitBytes(
     input.repository,
-    ["show", `${input.commit}:${PILOT_V3_APPROVAL_ANCHOR_PATH}`],
+    ["show", `${input.commit}:${PILOT_V4_APPROVAL_ANCHOR_PATH}`],
     runGit,
   );
-  return parsePilotV3ApprovalAnchor(bytes);
+  return parsePilotV4ApprovalAnchor(bytes);
 }
 
-export async function validatePilotV3ApprovalCommit(
+export async function validatePilotV4ApprovalCommit(
   input: { repository: string; approvalCommit: string },
   dependencies: ApprovalDependencies = {},
-): Promise<ValidatedPilotV3ApprovalCommit> {
+): Promise<ValidatedPilotV4ApprovalCommit> {
   if (!isCommit(input.approvalCommit)) {
-    throw new Error("Pilot v3 approval commit must be exact 40-hex.");
+    throw new Error("Pilot v4 approval commit must be exact 40-hex.");
   }
   const runGit = dependencies.runGit ?? defaultGitRunner;
   const head = (
     await gitText(input.repository, ["rev-parse", "--verify", "HEAD^{commit}"], runGit)
   ).trim();
   if (head !== input.approvalCommit) {
-    throw new Error("Pilot v3 approval commit must be the checked-out HEAD.");
+    throw new Error("Pilot v4 approval commit must be the checked-out HEAD.");
   }
   const status = await gitText(
     input.repository,
@@ -455,13 +484,13 @@ export async function validatePilotV3ApprovalCommit(
     runGit,
   );
   if (status.length !== 0) {
-    throw new Error("Pilot v3 approval commit requires a clean worktree.");
+    throw new Error("Pilot v4 approval commit requires a clean worktree.");
   }
   const hiddenIndexFlags = (await gitText(input.repository, ["ls-files", "-v"], runGit))
     .split(/\r?\n/u)
     .filter((line) => /^[a-zS]/u.test(line));
   if (hiddenIndexFlags.length !== 0) {
-    throw new Error("Pilot v3 approval commit forbids hidden index flags.");
+    throw new Error("Pilot v4 approval commit forbids hidden index flags.");
   }
 
   const lineage = (
@@ -474,7 +503,7 @@ export async function validatePilotV3ApprovalCommit(
     .trim()
     .split(/\s+/u);
   if (lineage.length !== 2 || lineage[0] !== input.approvalCommit || !isCommit(lineage[1])) {
-    throw new Error("Pilot v3 approval commit must have exactly one parent candidate A.");
+    throw new Error("Pilot v4 approval commit must have exactly one parent candidate A.");
   }
   const candidateCommit = lineage[1];
 
@@ -487,41 +516,41 @@ export async function validatePilotV3ApprovalCommit(
   )
     .split(/\r?\n/u)
     .filter((path) => path.length > 0);
-  if (changedPaths.length !== 1 || changedPaths[0] !== `M\t${PILOT_V3_APPROVAL_ANCHOR_PATH}`) {
-    throw new Error("Candidate A..approval C must change only the pilot v3 approval anchor.");
+  if (changedPaths.length !== 1 || changedPaths[0] !== `M\t${PILOT_V4_APPROVAL_ANCHOR_PATH}`) {
+    throw new Error("Candidate A..approval C must change only the pilot v4 approval anchor.");
   }
 
-  const anchor = await loadCommittedPilotV3ApprovalAnchor(
+  const anchor = await loadCommittedPilotV4ApprovalAnchor(
     { repository: input.repository, commit: input.approvalCommit },
     { runGit },
   );
   if (anchor.approval === null) {
-    throw new Error("Pilot v3 remains hard-disabled by its committed null approval anchor.");
+    throw new Error("Pilot v4 remains hard-disabled by its committed null approval anchor.");
   }
   if (anchor.approval.candidateCommit !== candidateCommit) {
-    throw new Error("Pilot v3 approval anchor candidate does not match parent A.");
+    throw new Error("Pilot v4 approval anchor candidate does not match parent A.");
   }
-  const candidateAnchor = await loadCommittedPilotV3ApprovalAnchor(
+  const candidateAnchor = await loadCommittedPilotV4ApprovalAnchor(
     { repository: input.repository, commit: candidateCommit },
     { runGit },
   );
   if (candidateAnchor.approval !== null) {
-    throw new Error("Candidate A must contain the hard-disabled null pilot v3 approval anchor.");
+    throw new Error("Candidate A must contain the hard-disabled null pilot v4 approval anchor.");
   }
   return { approvalCommit: input.approvalCommit, candidateCommit, anchor };
 }
 
-export function validatePilotV3ExternalApprovalBundle(
+export function validatePilotV4ExternalApprovalBundle(
   bytes: Uint8Array,
-  approval: ValidatedPilotV3ApprovalCommit,
-): ValidatedPilotV3Approval {
+  approval: ValidatedPilotV4ApprovalCommit,
+): ValidatedPilotV4Approval {
   const externalBundleSha256 = sha256(bytes);
   if (externalBundleSha256 !== approval.anchor.approval.externalBundleSha256) {
-    throw new Error("Pilot v3 external approval bundle hash does not match the committed anchor.");
+    throw new Error("Pilot v4 external approval bundle hash does not match the committed anchor.");
   }
-  const bundle = parsePilotV3ExternalApprovalBundle(bytes);
+  const bundle = parsePilotV4ExternalApprovalBundle(bytes);
   if (bundle.candidateCommit !== approval.candidateCommit) {
-    throw new Error("Pilot v3 external approval bundle candidate does not match parent A.");
+    throw new Error("Pilot v4 external approval bundle candidate does not match parent A.");
   }
   return { ...approval, externalBundleSha256, bundle };
 }
@@ -558,6 +587,7 @@ async function validateBrokerPath(
       throw new Error("External reservation broker must be outside every repository and worktree.");
     }
   }
+  await assertOutsideGitRepositories(canonicalBroker);
   const bytes = new Uint8Array(await readFile(canonicalBroker));
   const finalCanonicalBroker = await realpath(resolvedBroker);
   const finalBrokerStatus = await lstat(finalCanonicalBroker);
@@ -570,16 +600,16 @@ async function validateBrokerPath(
   return { bytes, canonicalPath: canonicalBroker };
 }
 
-function reservationRequest(approval: ValidatedPilotV3Approval): PilotV3ReservationRequest {
+function reservationRequest(approval: ValidatedPilotV4Approval): PilotV4ReservationRequest {
   return {
     schemaVersion: RESERVATION_REQUEST_SCHEMA_VERSION,
     operation: "consume",
-    protocol: PILOT_V3_RESERVATION_PROTOCOL,
-    namespace: PILOT_V3_RESERVATION_NAMESPACE,
-    key: PILOT_V3_RESERVATION_KEY,
-    reservationId: PILOT_V3_RESERVATION_ID,
+    protocol: PILOT_V4_RESERVATION_PROTOCOL,
+    namespace: PILOT_V4_RESERVATION_NAMESPACE,
+    key: PILOT_V4_RESERVATION_KEY,
+    reservationId: PILOT_V4_RESERVATION_ID,
     authority: approval.bundle.reservation.authority,
-    pilotId: PILOT_V3_ID,
+    pilotId: PILOT_V4_ID,
     candidateCommit: approval.candidateCommit,
     approvalCommit: approval.approvalCommit,
     externalBundleSha256: approval.externalBundleSha256,
@@ -589,19 +619,19 @@ function reservationRequest(approval: ValidatedPilotV3Approval): PilotV3Reservat
 function parseReservationReceipt(
   bytes: Uint8Array,
   expected: { authority: string; requestSha256: string },
-): PilotV3ReservationReceipt {
+): PilotV4ReservationReceipt {
   const value = record(
-    parseCanonicalJson(bytes, "External reservation broker response", PILOT_V3_BROKER_STDOUT_LIMIT),
+    parseCanonicalJson(bytes, "External reservation broker response", PILOT_V4_BROKER_STDOUT_LIMIT),
   );
   if (
     !value ||
     !exactKeys(value, RESPONSE_KEYS) ||
     value.schemaVersion !== RESERVATION_RESPONSE_SCHEMA_VERSION ||
     value.status !== "reserved" ||
-    value.protocol !== PILOT_V3_RESERVATION_PROTOCOL ||
-    value.namespace !== PILOT_V3_RESERVATION_NAMESPACE ||
-    value.key !== PILOT_V3_RESERVATION_KEY ||
-    value.reservationId !== PILOT_V3_RESERVATION_ID ||
+    value.protocol !== PILOT_V4_RESERVATION_PROTOCOL ||
+    value.namespace !== PILOT_V4_RESERVATION_NAMESPACE ||
+    value.key !== PILOT_V4_RESERVATION_KEY ||
+    value.reservationId !== PILOT_V4_RESERVATION_ID ||
     value.authority !== expected.authority ||
     value.requestSha256 !== expected.requestSha256 ||
     typeof value.signature !== "string" ||
@@ -609,7 +639,7 @@ function parseReservationReceipt(
   ) {
     throw new Error("External reservation broker returned an invalid signed response.");
   }
-  return value as unknown as PilotV3ReservationReceipt;
+  return value as unknown as PilotV4ReservationReceipt;
 }
 
 async function defaultBrokerInvoker(invocation: BrokerInvocation): Promise<BoundedProcessResult> {
@@ -626,12 +656,12 @@ async function defaultBrokerInvoker(invocation: BrokerInvocation): Promise<Bound
 export async function consumeExternalReservation(
   input: ConsumeExternalReservationInput,
   dependencies: ReservationDependencies = {},
-): Promise<PilotV3ReservationReceipt> {
-  const approvalCommit = await validatePilotV3ApprovalCommit(
+): Promise<PilotV4ReservationReceipt> {
+  const approvalCommit = await validatePilotV4ApprovalCommit(
     { repository: input.repository, approvalCommit: input.approvalCommit },
     dependencies,
   );
-  const approval = validatePilotV3ExternalApprovalBundle(input.externalBundleBytes, approvalCommit);
+  const approval = validatePilotV4ExternalApprovalBundle(input.externalBundleBytes, approvalCommit);
   return consumeValidatedExternalReservation(
     {
       repository: input.repository,
@@ -646,12 +676,12 @@ export async function consumeExternalReservation(
 export async function consumeValidatedExternalReservation(
   input: {
     repository: string;
-    approval: ValidatedPilotV3Approval;
+    approval: ValidatedPilotV4Approval;
     brokerPath: string;
     repositoryAndWorktreeRoots: readonly string[];
   },
   dependencies: Pick<ReservationDependencies, "invokeBroker"> = {},
-): Promise<PilotV3ReservationReceipt> {
+): Promise<PilotV4ReservationReceipt> {
   const approval = input.approval;
   const broker = await validateBrokerPath(
     input.brokerPath,
@@ -674,9 +704,9 @@ export async function consumeValidatedExternalReservation(
     result = await invokeBroker({
       command: [privateBroker, canonicalRequest],
       cwd: privateRoot,
-      timeoutMs: PILOT_V3_BROKER_TIMEOUT_MS,
-      stdoutLimit: PILOT_V3_BROKER_STDOUT_LIMIT,
-      stderrLimit: PILOT_V3_BROKER_STDERR_LIMIT,
+      timeoutMs: PILOT_V4_BROKER_TIMEOUT_MS,
+      stdoutLimit: PILOT_V4_BROKER_STDOUT_LIMIT,
+      stderrLimit: PILOT_V4_BROKER_STDERR_LIMIT,
     });
   } finally {
     await rm(privateRoot, { recursive: true, force: true });

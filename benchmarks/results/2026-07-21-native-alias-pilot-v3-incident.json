@@ -1,0 +1,46 @@
+{
+  "accountedCostUpperBoundUsd": null,
+  "accountedRequestsUpperBound": 17,
+  "accountingComplete": false,
+  "approvalCommit": "3b967d94f16855329cd4ce504adcf3eba6b3cfae",
+  "candidateCommit": "a34ce01f81ae880a6fa3a3e564d960247dc92052",
+  "completedSessions": 1,
+  "evidence": {
+    "journal": {
+      "bytes": 32421,
+      "sha256": "0523989ff919edeb3317327d6777a652bfcf20f9b2016dbb01b55f5b37535a2e"
+    },
+    "reservation": {
+      "bytes": 591,
+      "sha256": "bb24e97fba5a50ddcd02321c0fea6d7595e6aaf21d69b7251500782a94bc5023"
+    },
+    "sanitizedSessionExport": {
+      "bytes": 16279,
+      "sha256": "3129b7576278f1afe404891ba8bab65c413d14635f96d751ec9b841d2e2188e1"
+    },
+    "trace": {
+      "bytes": 8023,
+      "sha256": "c7e198fd0d35a61923c611282ce6354f78e5b1f5458a54820cb3f31175a6c0dc"
+    }
+  },
+  "externalApprovalBundleSha256": "8c1ee5bac9d01f95e0f9bb10352a4546654754b1d3fe5b830d17f331e670025e",
+  "fileMutationObserved": false,
+  "firstSession": {
+    "adapter": "better-hashline-native-aliases",
+    "index": 1,
+    "model": "openai/gpt-5.6-luna",
+    "repeat": 1,
+    "task": "single-constant"
+  },
+  "modelRequestsObserved": 5,
+  "pilotId": "native-alias-pilot-v3",
+  "recordedAt": "2026-07-21T07:01:21.7775459Z",
+  "reportedCostUsd": 0,
+  "reservationConsumed": true,
+  "retryForbidden": true,
+  "rootCauseCode": "native-alias-current-call-correlation-mismatch",
+  "rootCauseSummary": "The strict native-alias history validator did not correlate the active OpenAI Responses apply_patch call with the pending current call and rejected it as a historical call with an ambiguous execution state. A fresh hashline_read and one model retry produced the same rejection.",
+  "safeToResume": false,
+  "schemaVersion": 1,
+  "status": "failed"
+}

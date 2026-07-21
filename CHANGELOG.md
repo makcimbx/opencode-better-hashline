@@ -12,13 +12,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Add an explicit experimental `native-aliases` tool surface for exact OpenCode 1.18.3, with bounded host detection, session protocol binding, native renderer metadata, and fail-closed diagnostics.
 - Add a credential-free packaged verifier covering unique, non-GPT `edit`, and GPT-like `apply_patch` routes through stock OpenCode, including malformed calls, hooks, continuation, export/import, and renderer evidence.
 - Add deterministic collision fixtures and a separate `native-aliases-v1` paired-model adapter set with protocol-marker and malformed-retry trace metrics.
-- Record the failed-closed native-alias pilot v1 incident; no native-alias release or model-performance claim is made.
+- Record the failed-closed native-alias pilot v1 and v3 incidents; no native-alias release or model-performance claim is made.
 - Add a fail-closed benchmark oracle that correlates persisted history with JSONL, physically confines exact files, records per-file mutation provenance, and exercises a privacy-safe pilot-v1 topology fixture without model calls. The fixture declares but cannot independently prove the retained private trace hash.
 
 ### Changed
 
 - Keep the unique `hashline` surface as the default while routing all edit IDs through one snapshot-bound executor and capping native renderer metadata before permission or publication.
-- Retire unexecuted pilot v2 and keep corrected pilot v3 hard-disabled while freezing timeout/requested-output/trace limits, strict authentication rotation, OpenRouter no-fallback routing, and receipt-bound preflight evidence.
+- Retire unexecuted pilot v2 and permanently close consumed pilot v3 after its first fail-closed session; any v4 requires a new null anchor, approval chain, and external reservation.
+- Freeze hard-disabled pilot v4 on the three development-proven Luna, Sol, and NVIDIA Nemotron Nano routes: 72 paired sessions and at most 864 requests.
+
+### Fixed
+
+- Bound native-alias current-call history stabilization to exact repeated reads of one call ID, tool, and input, preventing an OpenAI Responses persistence race from becoming a false session-protocol rejection without accepting stale or cross-file input.
 
 ## [0.2.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.2.0...v0.2.1) - 2026-07-19
 
