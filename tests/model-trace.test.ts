@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { parse, relative, resolve } from "node:path";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, parse, relative, resolve } from "node:path";
 import {
   inspectJsonlTrace,
   inspectNativeAliasTrace,
@@ -31,6 +33,99 @@ function boundToolTrace(output: string): string {
 }
 
 describe("model benchmark trace inspection", () => {
+  test("binds baseline read and edit targets to the allowed fixture root", () => {
+    const output = boundToolTrace(
+      [
+        JSON.stringify({
+          type: "tool_use",
+          sessionID: "session",
+          part: {
+            sessionID: "session",
+            tool: "hashline_read",
+            callID: "call-read",
+            state: {
+              status: "completed",
+              input: { filePath: "package.json" },
+              metadata: { snapshotId: "snapshot-1" },
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "tool_use",
+          sessionID: "session",
+          part: {
+            sessionID: "session",
+            tool: "hashline_edit",
+            callID: "call-edit",
+            state: {
+              status: "completed",
+              input: {
+                filePath: "package.json",
+                snapshotId: "snapshot-1",
+                operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["{}"] }],
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+    );
+
+    expect(
+      inspectJsonlTrace(output, { allowedPathRoot: resolve(".") }).toolEvents.map(
+        ({ tool, targetPath, snapshotId }) => ({ tool, targetPath, snapshotId }),
+      ),
+    ).toEqual([
+      { tool: "hashline_read", targetPath: "package.json", snapshotId: "snapshot-1" },
+      { tool: "hashline_edit", targetPath: "package.json", snapshotId: "snapshot-1" },
+    ]);
+  });
+
+  test("leaves baseline targets outside the physical fixture unbound", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "better-hashline-trace-path-"));
+    const fixture = join(temporaryRoot, "fixture");
+    const outside = join(temporaryRoot, "outside");
+    await mkdir(fixture);
+    await mkdir(outside);
+    await writeFile(join(outside, "outside.txt"), "outside\n");
+    await symlink(outside, join(fixture, "linked"), "junction");
+
+    try {
+      const inputs = [
+        join(outside, "outside.txt"),
+        join(fixture, "linked", "outside.txt"),
+        join(fixture, "linked", "missing.txt"),
+      ];
+      const output = boundToolTrace(
+        inputs
+          .map((filePath, index) =>
+            JSON.stringify({
+              type: "tool_use",
+              sessionID: "session",
+              part: {
+                sessionID: "session",
+                tool: "hashline_edit",
+                callID: `call-${index}`,
+                state: {
+                  status: "error",
+                  input: { filePath },
+                  error: "rejected",
+                },
+              },
+            }),
+          )
+          .join("\n"),
+      );
+
+      expect(
+        inspectJsonlTrace(output, { allowedPathRoot: fixture }).toolEvents.map(
+          ({ targetPath }) => targetPath,
+        ),
+      ).toEqual([undefined, undefined, undefined]);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
   test("extracts completed tools, errors, tokens, cost, and finish reasons", () => {
     const output = boundToolTrace(
       [

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativeAliasPilotV4 } from "../benchmarks/model/adapters.js";
+import { nativeAliasPilotV5 } from "../benchmarks/model/adapters.js";
 
 function runRunner(args: string[], environment: Record<string, string> = {}) {
   return Bun.spawnSync([process.execPath, "./benchmarks/model/stage.ts", ...args], {
@@ -18,10 +18,10 @@ describe("model benchmark paid gates", () => {
   test("freezes the complete proposed native alias pilot schedule in dry-run mode", () => {
     const result = runRunner(["--native-alias-pilot"]);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout.toString()).toContain("= 72 sessions");
-    expect(result.stdout.toString()).toContain("864 total");
+    expect(result.stdout.toString()).toContain("= 48 sessions");
+    expect(result.stdout.toString()).toContain("576 total");
     expect(result.stdout.toString()).toContain("not approved for paid execution");
-    expect(result.stdout.toString()).toContain(nativeAliasPilotV4.scheduleManifestSha256);
+    expect(result.stdout.toString()).toContain(nativeAliasPilotV5.scheduleManifestSha256);
   });
 
   test("bounds the explicit native alias development probe model contract", () => {
@@ -44,12 +44,22 @@ describe("model benchmark paid gates", () => {
     expect(batch.stdout.toString()).toContain("= 2 sessions");
     expect(batch.stdout.toString()).toContain("24 total");
 
-    const openRouter = runRunner([
+    const paired = runRunner([
+      "--native-alias-probe",
+      "--model=openai/gpt-5.6-luna",
+      "--variant=medium",
+      "--adapter-set=native-aliases-v1",
+    ]);
+    expect(paired.exitCode).toBe(0);
+    expect(paired.stdout.toString()).toContain("= 2 sessions");
+    expect(paired.stdout.toString()).toContain("24 total");
+
+    const removedNano = runRunner([
       "--native-alias-probe",
       "--model=openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
       "--variant=",
     ]);
-    expect(openRouter.exitCode).toBe(0);
+    expect(removedNano.exitCode).not.toBe(0);
 
     const unknown = runRunner([
       "--native-alias-probe",
@@ -76,8 +86,8 @@ describe("model benchmark paid gates", () => {
     const unapproved = runRunner([
       "--native-alias-pilot",
       "--execute",
-      "--approved-sessions=72",
-      "--approved-max-requests=864",
+      "--approved-sessions=48",
+      "--approved-max-requests=576",
       "--approved-max-cost-usd=4",
       "--approved-source-commit=0000000000000000000000000000000000000000",
       "--approved-runner-sha256=0000000000000000000000000000000000000000000000000000000000000000",
@@ -98,7 +108,7 @@ describe("model benchmark paid gates", () => {
     expect(nestedPreflightOutput.stderr.toString()).toContain("direct child");
   }, 30_000);
 
-  test("keeps paid v4 execution hard-disabled even with dirty override", () => {
+  test("keeps paid v5 execution hard-disabled even with dirty override", () => {
     const output = join(tmpdir(), `better-hashline-hard-disable-${randomUUID()}`);
     const result = runRunner([
       "--native-alias-pilot",

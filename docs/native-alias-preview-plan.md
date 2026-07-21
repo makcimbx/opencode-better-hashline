@@ -440,8 +440,8 @@ No error may cause automatic execution by a built-in tool or silent surface fall
 ## Implementation Phases
 
 Phases 0-5 and the Phase 6 harness were implemented on the feature branch on 2026-07-20. The Phase 6
-behavioral gate is incomplete: pilot v1 failed closed, v2 was retired without execution, pilot v3 failed
-closed and consumed its reservation, and pilot v4 is hard-disabled by a new null anchor.
+behavioral gate is incomplete: pilot v1 failed closed, v2 was retired without execution, and pilots v3
+and v4 failed closed and consumed their reservations. Pilot v5 is hard-disabled by a new null anchor.
 The default production registry
 remains exactly `hashline_read`, `hashline_edit`, and `hashline_write`. The explicit alias preview,
 deterministic matrix, collision fixtures, credential-free packed verifier, and model adapter are
@@ -610,15 +610,20 @@ one-request retry-abort probe. Pilot v3 executed one Luna session and stopped fa
 requests because persisted current-call input lagged before-hook arguments. It made no file mutation,
 consumed its reservation, and may never resume or retry.
 
-Any pilot v4 must repeat the complete process with a new ID and null anchor. Candidate A produces the
+Pilot v4 repeated that process and passed its first native-alias session. Its second, baseline session
+produced exact expected bytes but the benchmark parsed its trace without fixture-root path authority, so
+the mutation ledger rejected bound read/edit provenance. The run stopped fail-closed after eight requests,
+consumed its reservation, and may never resume or retry. No runtime defect or unsafe mutation occurred.
+
+Any pilot v5 must repeat the complete process with a new ID and null anchor. Candidate A produces the
 receipt, tarball, package-tree, and runner; bundle B binds auth, endpoint, hard-budget, user approval,
 toolchain, schedule, and broker evidence; direct-child C changes only the anchor and reuses A's runner.
 A new durable reservation outside every repository/worktree must be consumed before model execution.
 
-The v4 manifest freezes Luna medium, Sol medium, and NVIDIA Nemotron Nano with fallback disabled across
-12 tasks and two surfaces: 72 sessions and at most 864 requests. The timeout, requested 2,048 output
+The v5 manifest freezes Luna medium and Sol medium across 12 tasks and two surfaces: 48 sessions and at
+most 576 requests. The timeout, requested 2,048 output
 tokens, 8 MiB trace bound, and USD 4/USD 1 reported-cost stop thresholds remain unchanged. Its schedule
-SHA-256 is `52d9b778c89f2b05619c013d718a4d7522a2aef5971ecf412b798946e3847bd0`.
+SHA-256 is `3b694becb988e6fcd1dace046ad45e298cdc4f4600d512ab54e3bb8a3cfdb70d`.
 
 Pilot outcomes:
 
@@ -638,7 +643,7 @@ user approval and all existing model/auth/cost gates in the model evaluation pla
 Implementation status: the adapter, oracle, ledger, exact-tree evaluator, marker/retry metrics, and
 model-free harness checks are implemented. Pilot v1 stopped on an oracle worktree false negative. Pilot
 v3 stopped on a bounded current-call persistence race. Both are terminal no-go incidents. Development
-probes are dirty-source, non-publishable diagnostics and cannot substitute for a new v4 approval gate.
+probes are dirty-source, non-publishable diagnostics and cannot substitute for a new v5 approval gate.
 
 ### Phase 7: release decision
 
@@ -663,7 +668,7 @@ closed without npm publication.
 
 ### Required before npm release
 
-- The 72-session pilot-v4 run shows no material malformed-call or retry regression requiring redesign.
+- The 48-session pilot-v5 run shows no material malformed-call or retry regression requiring redesign.
 - No wrong-target, stale-clobber, overwrite, permission bypass, or false-success outcome occurs.
 - Alias-specific documentation does not inherit unique-ID ownership guarantees.
 - A model-free verification command is available.
@@ -753,7 +758,7 @@ approve this plan
   -> unpublished alias prototype branch
   -> deterministic collision and packed-host evidence
   -> review threat-model delta
-  -> explicit approval for 72-session pilot v4
+  -> explicit approval for 48-session pilot v5
   -> evaluate go/no-go gates
   -> optional experimental release
 ```

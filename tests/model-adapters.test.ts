@@ -4,7 +4,7 @@ import {
   adapterPluginConfig,
   adapterSetManifest,
   modelAdapterSets,
-  nativeAliasPilotV4,
+  nativeAliasPilotV5,
   pilotProviderConfig,
   verificationSurfaceForAdapterSet,
 } from "../benchmarks/model/adapters.js";
@@ -35,10 +35,10 @@ describe("model benchmark adapters", () => {
     });
   });
 
-  test("freezes the unapproved 72-session native alias pilot-v4 proposal", () => {
-    expect(nativeAliasPilotV4).toEqual({
-      id: "native-alias-pilot-v4",
-      approvalAnchorPath: "benchmarks/model/native-alias-pilot-v4.approval.json",
+  test("freezes the unapproved 48-session native alias pilot-v5 proposal", () => {
+    expect(nativeAliasPilotV5).toEqual({
+      id: "native-alias-pilot-v5",
+      approvalAnchorPath: "benchmarks/model/native-alias-pilot-v5.approval.json",
       approvalRequirements: {
         externalBudgetReceipt: true,
         providerEndpointAttestation: true,
@@ -55,26 +55,21 @@ describe("model benchmark adapters", () => {
       requiredNpmVersion: "11.18.0",
       requiredOpenCodeVersion: "1.18.3",
       traceByteLimit: 8388608,
-      sessionLimit: 72,
-      requestLimit: 864,
+      sessionLimit: 48,
+      requestLimit: 576,
       totalCostLimitUsd: 4,
       perModelCostLimitUsd: 1,
       taskManifestSha256: "8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a",
       adapterManifestSha256: "cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8",
-      scheduleManifestSha256: "52d9b778c89f2b05619c013d718a4d7522a2aef5971ecf412b798946e3847bd0",
+      scheduleManifestSha256: "3b694becb988e6fcd1dace046ad45e298cdc4f4600d512ab54e3bb8a3cfdb70d",
       models: [
         { model: "openai/gpt-5.6-luna", variant: "medium", credential: "oauth" },
         { model: "openai/gpt-5.6-sol", variant: "medium", credential: "oauth" },
-        {
-          model: "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
-          credential: "api",
-          endpoint: { providerOrder: ["nvidia"], allowFallbacks: false },
-        },
       ],
     });
-    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV4.taskManifestSha256);
+    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV5.taskManifestSha256);
     expect(sha256(adapterSetManifest("native-aliases-v1"))).toBe(
-      nativeAliasPilotV4.adapterManifestSha256,
+      nativeAliasPilotV5.adapterManifestSha256,
     );
   });
 

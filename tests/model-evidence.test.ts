@@ -3,9 +3,9 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  isPublishableModelEvidence,
   journalAccounting,
   journalFailure,
+  modelEvidenceSourceStatus,
   reservePilotOutput,
   terminalDecision,
   writeJsonAtomic,
@@ -21,9 +21,18 @@ afterEach(async () => {
 
 describe("model evidence durability", () => {
   test("never labels development probes as publishable", () => {
-    expect(isPublishableModelEvidence(false, false)).toBe(true);
-    expect(isPublishableModelEvidence(true, false)).toBe(false);
-    expect(isPublishableModelEvidence(false, true)).toBe(false);
+    expect(modelEvidenceSourceStatus(false, false)).toEqual({
+      sourceDirty: false,
+      publishable: true,
+    });
+    expect(modelEvidenceSourceStatus(true, false)).toEqual({
+      sourceDirty: true,
+      publishable: false,
+    });
+    expect(modelEvidenceSourceStatus(false, true)).toEqual({
+      sourceDirty: false,
+      publishable: false,
+    });
   });
 
   test("confines pilot output without claiming an in-repository reservation", async () => {

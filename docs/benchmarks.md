@@ -198,16 +198,22 @@ strictly attested export worktree for renderer paths. It exactly correlates trac
 terminal records, validates complete history, and assigns every expected file mutation to the required
 executor. The unsanitized export remains memory-only; persisted evidence is sanitized. Model-free
 preflight records the same oracle's normalized v1-topology fixture and a packed one-request retry-abort probe. The fixture declares the private incident trace hash but is topology evidence, not a cryptographic replay of untracked raw bytes.
-Pilot v2 was never executed and is retired. Any pilot v4 requires a new identity and null anchor.
+Pilot v2 was never executed and is retired. Pilot v4 executed two sessions and stopped fail-closed after
+the baseline session produced exact bytes but its trace lacked fixture-root path authority, causing a
+mutation-ledger false negative. Its reservation is consumed, it may never resume or retry, and no model
+comparison result exists. See the
+[v4 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v4-incident.json). Any pilot v5 requires
+a new identity and null anchor.
 Candidate A must produce an exact schema-v6 receipt, tarball, package-tree manifest, and runner. External
 bundle B binds those artifacts to auth, endpoint, hard-budget, exact user approval, toolchain, schedule,
 and broker evidence. Direct-child commit C may change only the anchor to B's hash. A new approved broker
 must atomically consume a durable reservation outside every repository/worktree before any model process.
 
-The frozen v4 proposal uses the same 12 tasks and paired surfaces with three development-proven models:
-OpenAI Luna, OpenAI Sol, and OpenRouter NVIDIA Nemotron Nano. It contains 72 sessions and at most 864
-requests. Ultra was excluded after repeated provider-capacity failures; alternative NVIDIA candidates
-were excluded after model-format or no-tool instability. Development probes are non-publishable evidence.
+The frozen v5 proposal uses the same 12 tasks and paired surfaces with the two stable OpenAI routes: Luna
+and Sol, both medium. It contains 48 sessions and at most 576 requests. Nano was excluded after an
+intermittent malformed-argument development failure; Ultra and alternative NVIDIA candidates were
+excluded after provider-capacity, model-format, reasoning-length, or no-tool instability. Development
+probes are non-publishable evidence.
 
 ## Result Vocabulary
 

@@ -16,11 +16,14 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
-export function isPublishableModelEvidence(
+export function modelEvidenceSourceStatus(
   sourceDirty: boolean,
   developmentProbe: boolean,
-): boolean {
-  return !sourceDirty && !developmentProbe;
+): { sourceDirty: boolean; publishable: boolean } {
+  return {
+    sourceDirty,
+    publishable: !sourceDirty && !developmentProbe,
+  };
 }
 
 export async function reserveOutput(path: string): Promise<void> {

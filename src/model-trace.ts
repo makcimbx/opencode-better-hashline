@@ -61,6 +61,7 @@ export interface TraceInspection {
 }
 
 export interface TraceInspectionOptions {
+  allowedPathRoot?: string;
   nativeAlias?: NativeAliasProtocolIdentity & { allowedPathRoot: string };
 }
 
@@ -483,7 +484,10 @@ export function inspectJsonlTrace(
       const protocol = protocolMarker(partRecord.tool, state.metadata, options.nativeAlias);
       const targetPath =
         protocol.targetPath ??
-        argumentTargetPath(state.input, options.nativeAlias?.allowedPathRoot);
+        argumentTargetPath(
+          state.input,
+          options.allowedPathRoot ?? options.nativeAlias?.allowedPathRoot,
+        );
       const input = object(state.input);
       const metadata = object(state.metadata);
       const snapshotId =

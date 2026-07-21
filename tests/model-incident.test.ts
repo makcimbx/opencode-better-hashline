@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import incident from "../benchmarks/results/2026-07-20-native-alias-pilot-v1-incident.json";
 import incidentV3 from "../benchmarks/results/2026-07-21-native-alias-pilot-v3-incident.json";
+import incidentV4 from "../benchmarks/results/2026-07-21-native-alias-pilot-v4-incident.json";
 
 describe("native alias pilot v1 incident", () => {
   test("publishes a sanitized immutable no-go record", () => {
@@ -64,6 +65,52 @@ describe("native alias pilot v3 incident", () => {
     });
     expect(JSON.stringify(incidentV3)).not.toMatch(
       /[a-z]:(?:[\\/]|Users[\\/])|(?:^|["\\/])Users[\\/]|[\\/]home[\\/]|\\\\[^\\/]+[\\/]/iu,
+    );
+  });
+});
+
+describe("native alias pilot v4 incident", () => {
+  test("publishes a sanitized immutable consumed benchmark no-go record", () => {
+    expect(incidentV4).toMatchObject({
+      schemaVersion: 1,
+      pilotId: "native-alias-pilot-v4",
+      accounting: {
+        observedRequests: 8,
+        reportedCostUsd: 0,
+        accountingComplete: false,
+        accountedRequestsUpperBound: 20,
+        accountedCostUpperBoundUsd: null,
+      },
+      reservation: {
+        consumed: true,
+        retryForbidden: true,
+        safeToResume: false,
+      },
+      rootCause: {
+        code: "baseline-trace-missing-path-authority",
+        runtimeDefect: false,
+        unsafeMutation: false,
+      },
+      schedule: {
+        completedSessions: 2,
+        plannedSessions: 72,
+      },
+      sessionResults: {
+        firstNativeAliasSessionPassed: true,
+        secondExactFilesPassed: true,
+      },
+      terminal: {
+        status: "failed",
+        releaseDecision: "no-go",
+        safeToResume: false,
+      },
+    });
+    expect(incidentV4.sessionResults.secondBaselineAdapterIntegrityPassed).toBe(false);
+    expect(JSON.stringify(incidentV4)).not.toMatch(
+      /[a-z]:(?:[\\/]|Users[\\/])|(?:^|["\\/])Users[\\/]|[\\/]home[\\/]|\\\\[^\\/]+[\\/]/iu,
+    );
+    expect(JSON.stringify(incidentV4)).not.toMatch(
+      /"(?:access|refresh|key|access[_-]?token|refresh[_-]?token|api[_-]?key)"\s*:/iu,
     );
   });
 });
