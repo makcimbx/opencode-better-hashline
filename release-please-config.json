@@ -5,6 +5,13 @@
       "release-type": "node",
       "package-name": "opencode-better-hashline",
       "changelog-path": "CHANGELOG.md",
+      "changelog-sections": [
+        { "type": "feat", "section": "Added" },
+        { "type": "fix", "section": "Fixed" },
+        { "type": "perf", "section": "Changed" },
+        { "type": "refactor", "section": "Changed" },
+        { "type": "revert", "section": "Changed" }
+      ],
       "include-component-in-tag": false
     }
   }

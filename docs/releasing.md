@@ -38,12 +38,13 @@ Do not add `NPM_TOKEN` to the normal release workflow.
 ## Normal Release
 
 1. Conventional commits on `main` cause Release Please to create or update one release pull request.
-2. Review versioning, changelog, compatibility notes, benchmark claims, and packed contents.
-3. Merge the release pull request after required checks pass.
-4. Release Please creates the Git tag and GitHub release.
-5. The publish job in the same workflow checks out the exact released SHA. A separate release-triggered workflow is intentionally not used because events created with `GITHUB_TOKEN` do not normally start another workflow.
-6. The publish job checks/tests/builds, verifies the packed package through pinned OpenCode 1.18.4, pins npm 11.18.0, and publishes that exact tarball with npm OIDC provenance.
-7. Verify npm provenance, package contents, `opencode plugin opencode-better-hashline`, and the GitHub release notes.
+2. Record user-facing details under `Added`, `Changed`, and `Fixed` in the `Unreleased` changelog section. The release workflow moves those entries into the generated version and uses the same text for the release pull request and GitHub release; when no curated entries exist, Conventional Commit notes are used instead.
+3. Review versioning, changelog, compatibility notes, benchmark claims, and packed contents.
+4. Merge the release pull request after required checks pass.
+5. Release Please creates the Git tag and GitHub release.
+6. The publish job in the same workflow checks out the exact released SHA. A separate release-triggered workflow is intentionally not used because events created with `GITHUB_TOKEN` do not normally start another workflow.
+7. The publish job checks/tests/builds, verifies the packed package through pinned OpenCode 1.18.4, pins npm 11.18.0, and publishes that exact tarball with npm OIDC provenance.
+8. Verify npm provenance, package contents, `opencode plugin opencode-better-hashline`, and the GitHub release notes.
 
 ## Failure Handling
 
