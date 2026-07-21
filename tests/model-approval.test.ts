@@ -460,9 +460,16 @@ describe("pilot v7 external approval", () => {
       invokeBroker,
     });
     expect(receipt.reservationId).toBe(PILOT_V7_RESERVATION_ID);
-    await expect(
-      consumeExternalReservation(input, { runGit: testFixture.runGit, invokeBroker }),
-    ).rejects.toThrow("no retry or release");
+    const refusal = consumeExternalReservation(input, {
+      runGit: testFixture.runGit,
+      invokeBroker,
+    }).catch((error: unknown) => error);
+    const error = await refusal;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("no retry or release");
+    expect((error as Error).message).toContain('"exitCode":73');
+    expect((error as Error).message).toContain('"stderrBytes":16');
+    expect((error as Error).message).not.toContain("already reserved");
     expect(invocations).toHaveLength(2);
     expect(invocations[0]?.command[1]).toBe(invocations[1]?.command[1]);
     expect(

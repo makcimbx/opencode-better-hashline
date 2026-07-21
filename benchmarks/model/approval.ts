@@ -720,8 +720,19 @@ export async function consumeValidatedExternalReservation(
     result.stderr.length !== 0 ||
     result.stdoutBytes !== Buffer.byteLength(result.stdout, "utf8")
   ) {
+    const diagnostics = canonicalJson({
+      exitCode: result.exitCode,
+      stderrBytes: result.stderrBytes,
+      stderrOverflow: result.stderrOverflow,
+      stderrSha256: sha256(result.stderr),
+      stdoutAccountingMatches: result.stdoutBytes === Buffer.byteLength(result.stdout, "utf8"),
+      stdoutBytes: result.stdoutBytes,
+      stdoutOverflow: result.stdoutOverflow,
+      stdoutSha256: sha256(result.stdout),
+      timedOut: result.timedOut,
+    });
     throw new Error(
-      "External reservation broker refused or failed; no retry or release was attempted.",
+      `External reservation broker refused or failed (${diagnostics}); no retry or release was attempted.`,
     );
   }
   const receipt = parseReservationReceipt(Buffer.from(result.stdout, "utf8"), {
