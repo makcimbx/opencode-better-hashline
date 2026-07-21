@@ -34,9 +34,9 @@ Preflight performs builds, package installation, registry access when needed, Op
 
 `--adapter-set=native-aliases-v1` pairs the unique and experimental alias surfaces. Its preflight
 also runs the credential-free packed verifier through unique `hashline_edit`, non-GPT `edit`, and
-GPT-like `apply_patch`. Pilot v7 freezes Luna and Sol across 48 paired sessions and at most 576 requests
-behind `--native-alias-pilot`; its new committed null anchor hard-disables paid execution. Pilot v2 is
-retired unexecuted and consumed pilots v3, v4, v5, and v6 are terminal.
+GPT-like `apply_patch`. Pilot v7 completed Luna and Sol across all 48 paired sessions in 181 observed
+requests with complete accounting and no retry, timeout, process, transport, or trace failures. Pilot v2 is
+retired unexecuted and consumed pilots v3, v4, v5, and v6 are terminal no-go incidents.
 
 Paid execution requires the exact immutable session/request schedule, a reported-cost stop threshold
 (not a provider billing cap), cost
@@ -72,10 +72,10 @@ reservation is consumed and it may never resume or retry. See the
 [v5 incident](results/2026-07-21-native-alias-pilot-v5-incident.json). Pilot v6
 stopped after 23 sessions when the benchmark ledger cleared a still-valid snapshot for another file;
 its reservation is consumed and it may never resume or retry. See the
-[v6 incident](results/2026-07-21-native-alias-pilot-v6-incident.json). Pilot v7
-requires a new ID, null anchor, clean schema-v6 preflight, tarball, package-tree manifest, staged runner,
-external bundle B, anchor-only direct-child commit C, and a new durable broker reservation outside every
-repository and worktree.
+[v6 incident](results/2026-07-21-native-alias-pilot-v6-incident.json). Pilot v7 then completed 48/48
+Luna/Sol paired sessions with 181 observed requests and USD 0 reported cost. See the
+[privacy-safe summary](results/2026-07-21-native-alias-pilot-v7.json). This technical pass is not a
+model-superiority claim or release authorization.
 
 Raw outputs are written under `benchmarks/results/model/` and ignored by Git. Review them before moving a result into a publishable location.
 

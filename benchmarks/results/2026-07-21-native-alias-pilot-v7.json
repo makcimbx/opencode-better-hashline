@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "pilot": "native-alias-pilot-v7",
+  "status": "completed",
+  "generatedAt": "2026-07-21T18:43:52.025Z",
+  "candidateCommit": "6a2a03629b826940675a96a908a0cd2b2ca94059",
+  "approvalCommit": "03f4a081460ed3de47d17a80f735d46ee16f37d8",
+  "externalBundleSha256": "875c940c1b7f2c2d62a25e992f4a5bfa78871316c974e1f694fcfdc4003d0a88",
+  "packageVersion": "0.2.1",
+  "schedule": {
+    "models": ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol"],
+    "variant": "medium",
+    "taskSet": "baseline-v1",
+    "adapterSet": "native-aliases-v1",
+    "scheduledSessions": 48,
+    "completedSessions": 48,
+    "passedSessions": 48,
+    "failedSessions": 0,
+    "observedRequests": 181,
+    "reportedCostUsd": 0,
+    "accountingComplete": true
+  },
+  "models": {
+    "openai/gpt-5.6-luna": {
+      "sessions": 24,
+      "passed": 24,
+      "requests": 103,
+      "inputTokens": 105815,
+      "outputTokens": 5650,
+      "reasoningTokens": 1034,
+      "cacheReadTokens": 391680
+    },
+    "openai/gpt-5.6-sol": {
+      "sessions": 24,
+      "passed": 24,
+      "requests": 78,
+      "inputTokens": 115977,
+      "outputTokens": 4201,
+      "reasoningTokens": 389,
+      "cacheReadTokens": 241664
+    }
+  },
+  "adapters": {
+    "better-hashline": {
+      "sessions": 24,
+      "passed": 24,
+      "requests": 91,
+      "transportInvalid": 0,
+      "traceInvalid": 0,
+      "processFailures": 0,
+      "timeouts": 0,
+      "retries": 0
+    },
+    "better-hashline-native-aliases": {
+      "sessions": 24,
+      "passed": 24,
+      "requests": 90,
+      "transportInvalid": 0,
+      "traceInvalid": 0,
+      "processFailures": 0,
+      "timeouts": 0,
+      "retries": 0
+    }
+  },
+  "provenance": {
+    "preflightReceiptSha256": "1c2047b2dd31086c987329900d1d34937f839f55f70da312c1b95841bff4682c",
+    "runnerSha256": "deb92fc7bef774175a38d3eedd73d7ef6fce585bb252bd85108dcd9ca132567a",
+    "tarballSha256": "d7d5ec6cd0afaf540ef00b138935e50c8bbcc8ad587324d90616ffb0a84d1e1e",
+    "packageTreeSha256": "590cffa5162aa69d4bf0b244544fef912d9ad959dd333a97a73efa28f32fc50e",
+    "taskManifestSha256": "5465f2c98800241ec031375ee11d72f30b8649c00c8196359ba1b6dd39cef3ca",
+    "adapterManifestSha256": "cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8",
+    "scheduleManifestSha256": "3b694becb988e6fcd1dace046ad45e298cdc4f4600d512ab54e3bb8a3cfdb70d",
+    "journalSha256": "39ce58693243e439160e2fb29a091d0774f6210151d7561704fa2bbb170f3e52",
+    "reservationSha256": "66109d9d19660d35ad9275b2917432f62c5b8ddc319884876816dcec7c286efc",
+    "resultsSha256": "5cba50ca9f2978a503bae26e075ff2c20b71d9f5ef7c09fba98eccfbbaab544d",
+    "reservationRequestSha256": "0b0e1e28113b5c9ca48b86462fa63d0adf20cca2bf13e2f2bb17020b9343191f"
+  },
+  "claims": {
+    "technicalPilotPassed": true,
+    "modelSuperiority": false,
+    "releaseAuthorized": false,
+    "releaseDecision": "review-required",
+    "rawEvidencePublished": false
+  }
+}

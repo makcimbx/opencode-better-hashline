@@ -24,9 +24,9 @@ bun run bench:model --native-alias-pilot
 
 The alias trace records native-shaped retries, stable error codes, active alias, and protocol-marker
 validity. It rejects completed native-shaped calls, missing/invalid markers when an edit is required,
-`hashline_edit`, native `write`, shell/task/web transports, or both aliases appearing in one route. Pilot v7 freezes 12 tasks x
-2 surfaces x 2 stable models, 48 sessions, 576 maximum requests, and exact
-timeout/output/trace/cost/auth evidence behind a new null anchor. Pilot v3 executed one Luna session,
+`hashline_edit`, native `write`, shell/task/web transports, or both aliases appearing in one route. Pilot v7 completed 12 tasks x
+2 surfaces x 2 stable models: all 48 sessions passed in 181 observed requests with complete accounting and
+exact timeout/output/trace/cost/auth evidence. Pilot v3 executed one Luna session,
 stopped fail-closed on current-call history correlation, consumed its reservation, and may never resume
 or retry. Pilot v4 passed its first native-alias session but stopped on a baseline trace-path oracle false
 negative after its second session; it is also consumed and nonretryable. The
@@ -59,11 +59,10 @@ strictly attested export worktree as renderer authority. Trace and export termin
 exactly, complete history must validate, and a per-file mutation ledger must bind every expected change
 to the correct executor. The unsanitized export is memory-only; persisted evidence is sanitized. Packed
 preflight executes this same oracle against a normalized v1 topology and proves one-request retry abort.
-Pilot v7 starts from a new ID and null anchor. Candidate A must produce exact schema-v6 receipt,
-tarball, package-tree, and staged-runner bytes. External bundle B must bind them to auth, endpoint,
-hard-budget, user approval, toolchain, schedule, and a new broker reservation. Direct-child commit C may
-change only that anchor and must reuse A's runner bytes. The broker and durable reservation must remain
-outside every repository/worktree and be consumed once before any model process.
+Pilot v7 used an exact schema-v6 receipt, tarball, package-tree, staged-runner bytes, external bundle B,
+anchor-only commit C, and a one-shot broker reservation outside every repository/worktree. Its
+[privacy-safe summary](../results/2026-07-21-native-alias-pilot-v7.json) records the completed technical
+gate without publishing raw traces or claiming model superiority.
 
 See [the benchmark guide](../README.md), [methodology](../../docs/benchmarks.md), and the
 [staged model evaluation plan](../../docs/model-evaluation-plan.md).

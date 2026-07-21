@@ -29,7 +29,7 @@
 - Filesystem and plugin tests cover authorization, races, host hooks, and fail-closed behavior; update them when those paths change.
 - `bun run bench` is deterministic but result paths are write-once. Never `--force` published evidence; add a new dated result.
 - `bun run bench:model` is a no-cost dry run. `--preflight` performs installs/writes but no model call. Never use `--execute` without explicit user approval, a model/auth source, and `BENCHMARK_ACK_COSTS=yes`.
-- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted; pilots v3, v4, v5, and v6 consumed their reservations and failed closed. None may resume or retry. A new pilot identity is created only after a paid launch consumed its durable reservation, never for pre-reservation failures or ordinary development findings. Any next candidate must start from a new null anchor and exact A/B/C/broker evidence. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
+- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted; pilots v3, v4, v5, and v6 consumed their reservations and failed closed, while pilot v7 consumed its reservation and completed 48/48 sessions. None may resume or retry. A new pilot identity is created only after a paid launch consumed its durable reservation, never for pre-reservation failures or ordinary development findings. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
 
 ## Fast Benchmark Development
 

@@ -440,8 +440,8 @@ No error may cause automatic execution by a built-in tool or silent surface fall
 ## Implementation Phases
 
 Phases 0-5 and the Phase 6 harness were implemented on the feature branch on 2026-07-20. The Phase 6
-behavioral gate is incomplete: pilot v1 failed closed, v2 was retired without execution, and pilots v3,
-v4, v5, and v6 failed closed and consumed their reservations. Pilot v7 is hard-disabled by a new null anchor.
+behavioral gate completed technically: pilot v1 failed closed, v2 was retired without execution, pilots v3,
+v4, v5, and v6 failed closed and consumed their reservations, and pilot v7 completed all 48 sessions.
 The default production registry
 remains exactly `hashline_read`, `hashline_edit`, and `hashline_write`. The explicit alias preview,
 deterministic matrix, collision fixtures, credential-free packed verifier, and model adapter are
@@ -624,15 +624,12 @@ Pilot v6 passed 22 sessions and stopped fail-closed on session 23. Both files re
 but the benchmark ledger cleared the second file's still-valid snapshot after editing the first file. The
 reservation is consumed; v6 may never resume or retry, and no runtime defect or unsafe mutation occurred.
 
-Any pilot v7 must repeat the complete process with a new ID and null anchor. Candidate A produces the
-receipt, tarball, package-tree, and runner; bundle B binds auth, endpoint, hard-budget, user approval,
-toolchain, schedule, and broker evidence; direct-child C changes only the anchor and reuses A's runner.
-A new durable reservation outside every repository/worktree must be consumed before model execution.
-
-The v7 manifest freezes Luna medium and Sol medium across 12 tasks and two surfaces: 48 sessions and at
-most 576 requests. The timeout, requested 2,048 output
-tokens, 8 MiB trace bound, and USD 4/USD 1 reported-cost stop thresholds remain unchanged. Its schedule
-SHA-256 is `3b694becb988e6fcd1dace046ad45e298cdc4f4600d512ab54e3bb8a3cfdb70d`.
+Pilot v7 repeated the complete process with a new ID, exact candidate A, external bundle B, anchor-only C,
+and a new durable reservation outside every repository/worktree. Its Luna/Sol medium manifest covered 12
+tasks and two surfaces: all 48 sessions passed in 181 observed requests with complete accounting. The
+timeout, requested 2,048 output tokens, 8 MiB trace bound, and USD 4/USD 1 reported-cost stop thresholds
+were unchanged. Schedule SHA-256 was
+`3b694becb988e6fcd1dace046ad45e298cdc4f4600d512ab54e3bb8a3cfdb70d`.
 
 Pilot outcomes:
 
@@ -654,7 +651,7 @@ model-free harness checks are implemented. Pilot v1 stopped on an oracle worktre
 v3 stopped on a bounded current-call persistence race, v4 on missing baseline trace authority, v5 on
 the missing create-file parent fixture, and v6 on unrelated-file snapshot clearing in the benchmark ledger.
 All are terminal no-go incidents. Development probes may use clean or dirty source but are always
-non-publishable diagnostics; full-schedule rehearsal still cannot substitute for a new v7 approval gate.
+non-publishable diagnostics. Pilot v7 completed the paid technical gate; release remains separately reviewed.
 
 ### Phase 7: release decision
 
@@ -769,7 +766,7 @@ approve this plan
   -> unpublished alias prototype branch
   -> deterministic collision and packed-host evidence
   -> review threat-model delta
-  -> explicit approval for 48-session pilot v7
+  -> completed 48-session pilot v7
   -> evaluate go/no-go gates
   -> optional experimental release
 ```

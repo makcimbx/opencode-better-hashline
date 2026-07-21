@@ -12,5 +12,6 @@ Committed JSON files are immutable, reviewable benchmark records. Local timing e
 | `2026-07-21-native-alias-pilot-v4-incident.json` | Sanitized no-go record for the consumed pilot v4 baseline-ledger oracle incident; not release or model-comparison evidence |
 | `2026-07-21-native-alias-pilot-v5-incident.json` | Sanitized no-go record for the consumed pilot v5 create-file fixture incident; not release or model-comparison evidence |
 | `2026-07-21-native-alias-pilot-v6-incident.json` | Sanitized no-go record for the consumed pilot v6 multi-file ledger incident; not release or model-comparison evidence |
+| `2026-07-21-native-alias-pilot-v7.json` | Privacy-safe successful pilot summary: 48/48 sessions passed across Luna/Sol and both paired surfaces; release remains review-required |
 
 See [docs/benchmarks.md](../../docs/benchmarks.md) for interpretation and claim limits.

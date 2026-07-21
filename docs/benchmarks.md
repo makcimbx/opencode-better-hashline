@@ -210,18 +210,17 @@ resume or retry, and no unsafe mutation occurred. See the
 22 sessions and stopped fail-closed after its benchmark ledger cleared a still-valid
 snapshot for another file. Its reservation is consumed, it may never resume or retry, and exact expected
 bytes were preserved. See the
-[v6 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v6-incident.json). Any pilot v7 requires
-a new identity and null anchor.
-Candidate A must produce an exact schema-v6 receipt, tarball, package-tree manifest, and runner. External
-bundle B binds those artifacts to auth, endpoint, hard-budget, exact user approval, toolchain, schedule,
-and broker evidence. Direct-child commit C may change only the anchor to B's hash. A new approved broker
-must atomically consume a durable reservation outside every repository/worktree before any model process.
+[v6 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v6-incident.json). Pilot v7 then used a
+new identity, exact A/B/C approval chain, and new external reservation to complete all 48 sessions.
 
-The frozen v7 proposal uses the same 12 tasks and paired surfaces with the two stable OpenAI routes: Luna
-and Sol, both medium. It contains 48 sessions and at most 576 requests. Nano was excluded after an
+The completed v7 schedule used the same 12 tasks and paired surfaces with Luna and Sol medium. All 48
+sessions passed in 181 observed requests with complete accounting, zero retries/failures/timeouts, and USD
+0 reported cost. Nano was excluded after an
 intermittent malformed-argument development failure; Ultra and alternative NVIDIA candidates were
 excluded after provider-capacity, model-format, reasoning-length, or no-tool instability. Development
-probes are non-publishable evidence.
+probes are non-publishable evidence. The
+[privacy-safe v7 summary](../benchmarks/results/2026-07-21-native-alias-pilot-v7.json) is technical evidence,
+not a model-superiority claim or release authorization.
 
 ## Result Vocabulary
 
