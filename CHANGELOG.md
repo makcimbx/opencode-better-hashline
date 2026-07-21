@@ -13,6 +13,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+## [0.3.2](https://github.com/makcimbx/opencode-better-hashline/compare/v0.3.1...v0.3.2) (2026-07-21)
+
+### Fixed
+
+* sync curated release notes ([#23](https://github.com/makcimbx/opencode-better-hashline/issues/23)) ([d30b291](https://github.com/makcimbx/opencode-better-hashline/commit/d30b29140b1b5a1455ab43393d1eadc7fdc6061f))
+
 ## [0.3.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.3.0...v0.3.1) (2026-07-21)
 
 ### Fixed
