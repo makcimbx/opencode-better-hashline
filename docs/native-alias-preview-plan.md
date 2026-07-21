@@ -651,7 +651,9 @@ model-free harness checks are implemented. Pilot v1 stopped on an oracle worktre
 v3 stopped on a bounded current-call persistence race, v4 on missing baseline trace authority, v5 on
 the missing create-file parent fixture, and v6 on unrelated-file snapshot clearing in the benchmark ledger.
 All are terminal no-go incidents. Development probes may use clean or dirty source but are always
-non-publishable diagnostics. Pilot v7 completed the paid technical gate; release remains separately reviewed.
+non-publishable diagnostics. Pilot v7 completed the paid technical gate, and the maintainer approved an
+opt-in experimental release. `hashline` remains the default; merge and publication still use normal review
+and Release Please automation.
 
 ### Phase 7: release decision
 

@@ -252,8 +252,8 @@ describe("native alias pilot v7 result", () => {
       claims: {
         technicalPilotPassed: true,
         modelSuperiority: false,
-        releaseAuthorized: false,
-        releaseDecision: "review-required",
+        releaseAuthorized: true,
+        releaseDecision: "approved-experimental",
         rawEvidencePublished: false,
       },
     });

@@ -215,14 +215,14 @@ and shares contain paths and diffs. Sanitized exports remove tool paths, diffs, 
 OpenCode 1.18.3 retains a safe root-relative session locator; review it before disclosure. The removed
 marker makes alias continuation fail closed. ACP can classify the alias as an edit but cannot reconstruct the
 native structured diff from Better Hashline metadata. The unique `hashline` surface remains the
-production recommendation until the completed paid pilot evidence passes the remaining release review in the
-[preview plan](docs/native-alias-preview-plan.md).
+production default and recommendation; the completed paid pilot supports only an opt-in experimental
+native-alias release under the [preview plan](docs/native-alias-preview-plan.md).
 
 Native-alias pilots v1, v3, v4, v5, and v6 stopped fail-closed on terminal benchmark incidents and cannot
 resume or retry. Their privacy-safe incident records are tracked under `benchmarks/results/`. Pilot v7
 completed all 48 Luna/Sol sessions across the unique and native-alias surfaces with complete accounting,
 zero retries/failures/timeouts, and USD 0 reported cost. The privacy-safe summary is tracked under
-`benchmarks/results/`; native aliases remain unreleased pending explicit release review.
+`benchmarks/results/`; the maintainer approved native aliases for an opt-in experimental release.
 
 ## Why No Per-Line Hash?
 

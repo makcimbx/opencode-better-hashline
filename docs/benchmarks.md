@@ -220,7 +220,8 @@ intermittent malformed-argument development failure; Ultra and alternative NVIDI
 excluded after provider-capacity, model-format, reasoning-length, or no-tool instability. Development
 probes are non-publishable evidence. The
 [privacy-safe v7 summary](../benchmarks/results/2026-07-21-native-alias-pilot-v7.json) is technical evidence,
-not a model-superiority claim or release authorization.
+not a model-superiority claim. The maintainer approved only an opt-in experimental release; `hashline`
+remains the default.
 
 ## Result Vocabulary
 

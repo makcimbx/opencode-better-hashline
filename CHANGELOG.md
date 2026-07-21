@@ -19,7 +19,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Keep the unique `hashline` surface as the default while routing all edit IDs through one snapshot-bound executor and capping native renderer metadata before permission or publication.
 - Retire unexecuted pilot v2 and permanently close consumed pilots v3, v4, v5, and v6 after their fail-closed sessions; none may resume or retry.
-- Complete pilot v7 on Luna and Sol: all 48 paired sessions passed with 181 observed requests, complete accounting, zero retries/failures/timeouts, and USD 0 reported cost. Release remains separately review-gated.
+- Complete pilot v7 on Luna and Sol: all 48 paired sessions passed with 181 observed requests, complete accounting, zero retries/failures/timeouts, and USD 0 reported cost. The maintainer approved an opt-in experimental release; `hashline` remains the default.
 
 ### Fixed
 
