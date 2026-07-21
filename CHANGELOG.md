@@ -5,13 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.3.2...v0.4.0) (2026-07-21)
-
-
-### Added
-
-* add attested edit readback ([#25](https://github.com/makcimbx/opencode-better-hashline/issues/25)) ([a2edb86](https://github.com/makcimbx/opencode-better-hashline/commit/a2edb868af31796fdbc1d5d0c8cd7566ba739981))
-
 ## [Unreleased]
 
 ### Added
@@ -19,6 +12,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 ### Fixed
+
+## [0.4.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.3.2...v0.4.0) (2026-07-21)
+
+### Added
+
+* add attested edit readback ([#25](https://github.com/makcimbx/opencode-better-hashline/issues/25)) ([a2edb86](https://github.com/makcimbx/opencode-better-hashline/commit/a2edb868af31796fdbc1d5d0c8cd7566ba739981))
 
 ## [0.3.2](https://github.com/makcimbx/opencode-better-hashline/compare/v0.3.1...v0.3.2) (2026-07-21)
 
