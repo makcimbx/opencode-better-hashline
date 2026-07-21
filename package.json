@@ -71,7 +71,7 @@
   "author": "Maksim Ivanov",
   "license": "MIT",
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.3",
+    "@opencode-ai/plugin": "1.18.4",
     "diff": "9.0.0"
   },
   "devDependencies": {
