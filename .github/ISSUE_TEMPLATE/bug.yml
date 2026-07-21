@@ -22,7 +22,7 @@ body:
     attributes:
       label: OpenCode version
       description: Output of `opencode --version`.
-      placeholder: 1.18.3
+      placeholder: 1.18.4
     validations:
       required: true
 

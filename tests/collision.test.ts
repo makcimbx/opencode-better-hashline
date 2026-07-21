@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Hooks, type ToolContext, tool } from "@opencode-ai/plugin";
 import { z } from "zod";
-import { openCode1183ProviderSchema } from "../src/native-alias.js";
+import { openCodeProviderSchema } from "../src/native-alias.js";
 import { betterHashlinePlugin, hashlineEditArgumentsSchema } from "../src/plugin.js";
 import { jsonSha256 } from "../src/presentation.js";
 
@@ -78,9 +78,7 @@ class CollisionHost {
   schemaSha256(toolName: string): string {
     const definition = this.tools[toolName];
     if (!definition) throw new Error(`Missing ${toolName} tool`);
-    return jsonSha256(
-      openCode1183ProviderSchema(z.toJSONSchema(z.object(definition.args).strict())),
-    );
+    return jsonSha256(openCodeProviderSchema(z.toJSONSchema(z.object(definition.args).strict())));
   }
 
   async execute(
@@ -232,7 +230,7 @@ describe("native alias collision harness", () => {
     host.addBuiltins(nativeTools(executions));
 
     expect(host.schemaSha256("edit")).not.toBe(
-      jsonSha256(openCode1183ProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
+      jsonSha256(openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
     );
     const result = await host.execute(
       "edit",
@@ -250,7 +248,7 @@ describe("native alias collision harness", () => {
     host.addPlugin(await createBetter());
 
     expect(host.schemaSha256("edit")).toBe(
-      jsonSha256(openCode1183ProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
+      jsonSha256(openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
     );
     const result = await executeBetterEdit(host);
     expect(executions).toEqual([]);
@@ -266,7 +264,7 @@ describe("native alias collision harness", () => {
     host.addPlugin({ tool: nativeTools(executions) });
 
     expect(host.schemaSha256("edit")).not.toBe(
-      jsonSha256(openCode1183ProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
+      jsonSha256(openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
     );
     await expect(
       host.execute("edit", { filePath: "file.txt", oldString: "old", newString: "new" }, context()),
@@ -295,7 +293,7 @@ describe("native alias collision harness", () => {
     });
 
     expect(host.schemaSha256("edit")).toBe(
-      jsonSha256(openCode1183ProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
+      jsonSha256(openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema))),
     );
     const result = await host.execute(
       "edit",

@@ -62,8 +62,8 @@ The default unique tool IDs avoid three OpenCode hazards:
 The plugin keeps native `read` and adds `hashline_read`, `hashline_edit`, and `hashline_write`. With `enforce: true`, `chat.message` disables native mutator IDs on every user turn and `tool.execute.before` is a second tripwire. This is defense in depth, not a shell sandbox.
 
 The explicit native-alias preview instead registers Better Hashline's shared executor as `edit` and
-`apply_patch`, lets OpenCode 1.18.3 retain one by model route, and preserves unique read/create tools.
-Activation uses the host-configured SDK transport, exact host and schema fingerprints, bounded
+`apply_patch`, lets OpenCode retain one by model route, and preserves unique read/create tools.
+Activation uses the host-configured SDK transport, exact observed host and schema fingerprints, bounded
 session-history validation, double argument parsing, and native renderer metadata. Registry ownership
 still cannot be attested, so this surface does not replace the unique-ID recommendation.
 

@@ -8,7 +8,7 @@ scenarios that distinguish editing protocols.
 Requirements:
 
 - Bun 1.3.14 or newer
-- OpenCode 1.18.3
+- OpenCode 1.18.4
 
 ```sh
 bun install --frozen-lockfile

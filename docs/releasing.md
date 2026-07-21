@@ -42,7 +42,7 @@ Do not add `NPM_TOKEN` to the normal release workflow.
 3. Merge the release pull request after required checks pass.
 4. Release Please creates the Git tag and GitHub release.
 5. The publish job in the same workflow checks out the exact released SHA. A separate release-triggered workflow is intentionally not used because events created with `GITHUB_TOKEN` do not normally start another workflow.
-6. The publish job checks/tests/builds, verifies the packed package through pinned OpenCode 1.18.3, pins npm 11.18.0, and publishes that exact tarball with npm OIDC provenance.
+6. The publish job checks/tests/builds, verifies the packed package through pinned OpenCode 1.18.4, pins npm 11.18.0, and publishes that exact tarball with npm OIDC provenance.
 7. Verify npm provenance, package contents, `opencode plugin opencode-better-hashline`, and the GitHub release notes.
 
 ## Failure Handling

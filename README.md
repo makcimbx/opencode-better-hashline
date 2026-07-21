@@ -155,7 +155,7 @@ OpenCode accepts plugin options as the second tuple element:
 | Option | Default | Purpose |
 | --- | ---: | --- |
 | `enforce` | `true` | Hide and reject native `edit`, `write`, and `apply_patch` |
-| `toolSurface` | `"hashline"` | Tool-ID surface; `"native-aliases"` is an experimental OpenCode 1.18.3-only preview |
+| `toolSurface` | `"hashline"` | Tool-ID surface; `"native-aliases"` is an experimental capability-checked preview |
 | `maxFileBytes` | 8 MiB | Maximum editable or creatable text file |
 | `maxLines` | 100,000 | Maximum logical lines per editable file |
 | `maxCacheBytes` | 64 MiB | Approximate retained snapshot memory budget |
@@ -174,7 +174,7 @@ Set `enforce: false` only for migration or A/B evaluation. It leaves native muta
 
 `toolSurface: "native-aliases"` keeps the Better Hashline snapshot executor but publishes it as
 `edit` on non-GPT routes and `apply_patch` on GPT-5-like patch routes so stock OpenCode can use its
-native diff renderers. It requires `enforce: true`, exact OpenCode `1.18.3`, a restart, and a new
+native diff renderers. It requires `enforce: true`, a compatible OpenCode host, a restart, and a new
 session:
 
 ```json
@@ -189,7 +189,7 @@ session:
 ```
 
 The mode still exposes unique `hashline_read` and create-only `hashline_write`; it never aliases
-native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Host, schema, or
+native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Transport, schema, or
 session incompatibility fails closed without falling back to a builtin or to `hashline_edit`.
 
 Run the credential-free clean-room verifier after installation and after every plugin-order or
@@ -264,8 +264,8 @@ See [benchmark methodology and raw results](docs/benchmarks.md), [prior-art audi
 
 | Component | Status |
 | --- | --- |
-| OpenCode 1.18.3 stable V1 plugin API | Tested |
-| Experimental native aliases | OpenCode 1.18.3 only; explicit opt-in |
+| OpenCode `>=1.18.3 <2` stable V1 plugin API | Supported; verifier pinned to 1.18.4 |
+| Experimental native aliases | Capability-checked at startup; explicit opt-in |
 | Windows, Linux, macOS | CI and filesystem tests |
 | UTF-8, optional BOM, LF, CRLF, mixed EOL, lone CR | Supported |
 | Directories, images, PDFs, binary files | Use native `read`; not editable here |

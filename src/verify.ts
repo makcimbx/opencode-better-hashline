@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tool } from "@opencode-ai/plugin";
 import { evaluateExactTree } from "./exact-tree.js";
 import { inspectNativeAliasTrace } from "./model-trace.js";
-import { openCode1183ProviderSchema } from "./native-alias.js";
+import { openCodeProviderSchema } from "./native-alias.js";
 import { hashlineEditArgumentsSchema } from "./plugin.js";
 import {
   canonicalJson,
@@ -261,7 +261,7 @@ export default async function observer() {
 }
 
 function providerSchemaProjection(value: unknown) {
-  return openCode1183ProviderSchema(value);
+  return openCodeProviderSchema(value);
 }
 
 function collectToolParts(value: unknown) {
@@ -1167,7 +1167,7 @@ async function verifyScenario(
     invariant(toolPart.state.metadata, "Exported edit metadata is missing");
 
     const schemaSha256 = jsonSha256(
-      openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+      openCodeProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
     );
     let fingerprint: string | undefined;
     let benchmarkOracleVerified = scenario.surface === "hashline";

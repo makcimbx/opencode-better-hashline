@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hooks, ToolContext } from "@opencode-ai/plugin";
 import { z } from "zod";
-import { openCode1183ProviderSchema } from "../src/native-alias.js";
+import { openCodeProviderSchema } from "../src/native-alias.js";
 import {
   betterHashlinePlugin,
   hashlineEditArgumentsSchema,
@@ -265,7 +265,7 @@ async function systemGuidance(value: Hooks): Promise<string> {
 }
 
 describe("native alias activation and visibility", () => {
-  test("registers aliases without hashline_edit on the allowlisted host", async () => {
+  test("registers aliases without hashline_edit on a compatible host", async () => {
     const { value } = await aliasHarness();
     expect(Object.keys(value.tool ?? {}).sort()).toEqual([
       "apply_patch",
@@ -342,25 +342,34 @@ describe("native alias activation and visibility", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
-  test("fails closed on unsupported and unavailable hosts", async () => {
-    for (const unavailable of [{ hostVersion: "1.18.4" }, { healthStatus: 503 }]) {
-      const { value } = await aliasHarness(unavailable);
-      expect(Object.keys(value.tool ?? {}).sort()).toEqual(["hashline_read", "hashline_write"]);
-      expect(await systemGuidance(value)).toContain("native aliases are unavailable");
-      await expect(
-        value["tool.execute.before"]?.(
-          { tool: "edit", sessionID: randomUUID(), callID: "call" },
-          { args: replaceArgs("missing.txt", "s_AAAAAAAAAAAAAAAAAAAAAA") },
-        ),
-      ).rejects.toThrow("TOOL_SURFACE_UNAVAILABLE:");
-      await expect(
-        value.tool?.hashline_write?.execute(
-          { filePath: "blocked.txt", content: "blocked" },
-          context(),
-        ),
-      ).rejects.toThrow("TOOL_SURFACE_UNAVAILABLE:");
-      expect(await readdir(root)).toEqual([]);
-    }
+  test("accepts later host versions when the required capabilities are present", async () => {
+    const { value } = await aliasHarness({ hostVersion: "1.18.4" });
+    expect(Object.keys(value.tool ?? {}).sort()).toEqual([
+      "apply_patch",
+      "edit",
+      "hashline_read",
+      "hashline_write",
+    ]);
+    expect(await systemGuidance(value)).toContain("native aliases are active");
+  });
+
+  test("fails closed when host capabilities are unavailable", async () => {
+    const { value } = await aliasHarness({ healthStatus: 503 });
+    expect(Object.keys(value.tool ?? {}).sort()).toEqual(["hashline_read", "hashline_write"]);
+    expect(await systemGuidance(value)).toContain("native aliases are unavailable");
+    await expect(
+      value["tool.execute.before"]?.(
+        { tool: "edit", sessionID: randomUUID(), callID: "call" },
+        { args: replaceArgs("missing.txt", "s_AAAAAAAAAAAAAAAAAAAAAA") },
+      ),
+    ).rejects.toThrow("TOOL_SURFACE_UNAVAILABLE:");
+    await expect(
+      value.tool?.hashline_write?.execute(
+        { filePath: "blocked.txt", content: "blocked" },
+        context(),
+      ),
+    ).rejects.toThrow("TOOL_SURFACE_UNAVAILABLE:");
+    expect(await readdir(root)).toEqual([]);
   });
 
   test("tripwires inactive hashline_edit in alias mode", async () => {
@@ -818,7 +827,7 @@ describe("native alias continuation safety", () => {
 
   test("accepts compatible unsanitized history and binds continuation once", async () => {
     const schemaSha256 = jsonSha256(
-      openCode1183ProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema)),
+      openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema)),
     );
     const historicalDiff =
       "--- history.txt\tbefore\n+++ history.txt\tafter\n@@ -1 +1 @@\n-old\n+new\n";
@@ -868,7 +877,7 @@ describe("native alias continuation safety", () => {
 
   test("continues from compacted history on a synthetic turn", async () => {
     const schemaSha256 = jsonSha256(
-      openCode1183ProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema)),
+      openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema)),
     );
     const historyMetadata = buildNativeAliasMetadata({
       surface: "edit",

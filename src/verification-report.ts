@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { tool } from "@opencode-ai/plugin";
-import { openCode1183ProviderSchema } from "./native-alias.js";
+import { openCodeProviderSchema } from "./native-alias.js";
 import { hashlineEditArgumentsSchema } from "./plugin.js";
 import {
   canonicalJson,
@@ -9,7 +9,7 @@ import {
   nativeAliasProtocolFingerprint,
 } from "./presentation.js";
 
-export const PINNED_OPENCODE_VERSION = "1.18.3";
+export const PINNED_OPENCODE_VERSION = "1.18.4";
 export const VERIFIER_RENDERED_BYTES = "alpha\nRENDER\ngamma\n";
 export const TERMINAL_RENDERER_SHA256: Record<VerificationCaseReport["route"], string> = {
   hashline: "cc314f125f2cb87d36099a6503374a83d381f6ce09b0ae224869838d07092e8d",
@@ -174,7 +174,7 @@ export function assertFullVerificationReport(
   }
 
   const schemaSha256 = jsonSha256(
-    openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+    openCodeProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
   );
   const finalBytesSha256 = sha256(VERIFIER_RENDERED_BYTES);
   let protocolFingerprint: string | undefined;

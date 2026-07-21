@@ -6,7 +6,7 @@
 - `bun run check` is non-mutating typecheck, Biome CI, and documentation-link validation.
 - Run one file with `bun test tests/plugin.test.ts`; pass multiple test paths for a focused safety suite.
 - Before a PR, run `bun run format`, then `bun run ci` (`check -> coverage -> build`).
-- Run `bun run pack:check` after package exports, build, hooks, dependencies, or packed files change. It tests the real tarball through pinned OpenCode 1.18.3.
+- Run `bun run pack:check` after package exports, build, hooks, dependencies, or packed files change. It tests the real tarball through pinned OpenCode 1.18.4.
 - `bun run release:pack` additionally retains an ignored `.tgz`; use it only for release work.
 
 ## Architecture And Invariants
@@ -16,7 +16,7 @@
 - Keep `.js` specifiers in TypeScript imports. Do not edit generated `dist/` or `coverage/`.
 - Snapshot refs become editable only in `tool.execute.after`, after host truncation and output-digest checks. Retained or pending bytes are not issued provenance.
 - Exact retained bytes are freshness authority. `rebase: "none"` stays strict by default; `"unique"` is explicit, exact, and ambiguity-rejecting. Do not add fuzzy matching, normalization, nearest-match selection, source repair, or silent fallback.
-- Keep `hashline` as the default unique-ID surface and native `read`. Experimental `native-aliases` requires `enforce:true`, exact OpenCode 1.18.3, bounded history/metadata, and no silent fallback; it never aliases native `write`. Neither surface is a shell sandbox.
+- Keep `hashline` as the default unique-ID surface and native `read`. Experimental `native-aliases` requires `enforce:true`, compatible host capabilities, exact observed-version/schema session identity, bounded history/metadata, and no silent fallback; it never aliases native `write`. Neither surface is a shell sandbox.
 - Current native-alias history may be reread only within the bounded stabilization window for the same exact active call ID and tool; execution still requires exact persisted input equality. Never substitute fuzzy, cross-ID, or stale-input correlation.
 - Preserve the filesystem order: canonicalize and authorize, plan one immutable result, approve that exact diff, reread bytes/identity, then stage and publish. Never replan after approval.
 - OpenCode may swallow plugin initialization failures. Option errors must retain diagnostic fail-closed mode rather than escaping initialization.
