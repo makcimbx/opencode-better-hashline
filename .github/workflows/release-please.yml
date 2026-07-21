@@ -65,10 +65,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
         run: |
           notes="${RUNNER_TEMP}/release-notes.md"
           body="${RUNNER_TEMP}/release-pr-body.md"
+          PR_NUMBER="$(jq -er '.number' <<< "${RELEASE_PR}")"
           bun ./scripts/sync-release-notes-cli.ts sync CHANGELOG.md "${notes}"
           if ! git diff --quiet -- CHANGELOG.md; then
             git config user.name "github-actions[bot]"
