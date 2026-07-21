@@ -43,5 +43,6 @@
 ## Workflow
 
 - Use Conventional Commit prefixes; Release Please derives versions and changelog entries from them.
+- For every user-visible change, update `CHANGELOG.md` under `## [Unreleased]` in `Added`, `Changed`, or `Fixed` in the same PR. The release workflow promotes these entries into release PR and GitHub Release notes; Conventional Commit notes are only the fallback.
 - `main` is protected; normal changes land through reviewed PRs with required checks.
 - The `v0.1.0` bootstrap is complete. Future npm releases go only through the Release Please workflow and `npm-release` OIDC environment. Do not add `NPM_TOKEN`, manually republish, retag, or overwrite a version.
