@@ -41,6 +41,7 @@ export function inspectMutationLedger(
     "hashline_edit",
     "hashline_write",
   ]);
+  const editExecutorTools = new Set(["edit", "apply_patch", "hashline_edit"]);
   const unauthorized: string[] = [];
   const wrongExecutor: string[] = [];
   const issuedSnapshots = new Map<string, string>();
@@ -49,6 +50,12 @@ export function inspectMutationLedger(
     const targetPath = event.targetPath ? normalizedPath(event.targetPath) : undefined;
     if (mutationTools.has(event.tool) && (!targetPath || !allowedMutations.has(targetPath))) {
       unauthorized.push(`${event.tool}:${targetPath ?? "unbound"}`);
+    }
+    if (targetPath && editExecutorTools.has(event.tool) && !changed.includes(targetPath)) {
+      wrongExecutor.push(`edit:${targetPath}`);
+    }
+    if (targetPath && event.tool === "hashline_write" && !created.includes(targetPath)) {
+      wrongExecutor.push(`write:${targetPath}`);
     }
     if (event.status !== "completed" || !targetPath) continue;
     if (event.tool === "hashline_read") {
@@ -62,7 +69,6 @@ export function inspectMutationLedger(
     }
     if (editTools.includes(event.tool)) {
       edits.push(targetPath);
-      if (!changed.includes(targetPath)) wrongExecutor.push(`edit:${targetPath}`);
       if (!event.snapshotId || issuedSnapshots.get(event.snapshotId) !== targetPath) {
         missing.push(`edit-snapshot:${targetPath}`);
       }
@@ -71,7 +77,6 @@ export function inspectMutationLedger(
     }
     if (event.tool === "hashline_write") {
       writes.push(targetPath);
-      if (!created.includes(targetPath)) wrongExecutor.push(`write:${targetPath}`);
     }
   }
 

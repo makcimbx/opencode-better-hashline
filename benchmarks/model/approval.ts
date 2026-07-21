@@ -8,21 +8,21 @@ import { isInsideCanonicalPath } from "../../src/path-identity.js";
 import { canonicalJson } from "../../src/presentation.js";
 import { type BoundedProcessResult, captureBoundedProcess } from "./process.js";
 
-export const PILOT_V5_ID = "native-alias-pilot-v5" as const;
-export const PILOT_V5_APPROVAL_ANCHOR_PATH =
-  "benchmarks/model/native-alias-pilot-v5.approval.json" as const;
-export const PILOT_V5_OUTPUT_RELATIVE_PATH =
-  "benchmarks/results/model/native-alias-pilot-v5" as const;
-export const PILOT_V5_PREFLIGHT_SCHEMA_VERSION = 6 as const;
-export const PILOT_V5_TASK_MANIFEST_SHA256 =
-  "8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a" as const;
-export const PILOT_V5_ADAPTER_MANIFEST_SHA256 =
+export const PILOT_V6_ID = "native-alias-pilot-v6" as const;
+export const PILOT_V6_APPROVAL_ANCHOR_PATH =
+  "benchmarks/model/native-alias-pilot-v6.approval.json" as const;
+export const PILOT_V6_OUTPUT_RELATIVE_PATH =
+  "benchmarks/results/model/native-alias-pilot-v6" as const;
+export const PILOT_V6_PREFLIGHT_SCHEMA_VERSION = 6 as const;
+export const PILOT_V6_TASK_MANIFEST_SHA256 =
+  "5465f2c98800241ec031375ee11d72f30b8649c00c8196359ba1b6dd39cef3ca" as const;
+export const PILOT_V6_ADAPTER_MANIFEST_SHA256 =
   "cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8" as const;
-export const PILOT_V5_SCHEDULE_MANIFEST_SHA256 =
+export const PILOT_V6_SCHEDULE_MANIFEST_SHA256 =
   "3b694becb988e6fcd1dace046ad45e298cdc4f4600d512ab54e3bb8a3cfdb70d" as const;
-export const PILOT_V5_PACKAGE_VERSION = "0.2.1" as const;
+export const PILOT_V6_PACKAGE_VERSION = "0.2.1" as const;
 
-export const PILOT_V5_LIMITS = {
+export const PILOT_V6_LIMITS = {
   repeats: 1,
   maxAgentSteps: 12,
   sessionTimeoutMs: 300_000,
@@ -30,21 +30,21 @@ export const PILOT_V5_LIMITS = {
   traceByteLimit: 8 * 1024 * 1024,
   sessionLimit: 48,
   requestLimit: 576,
-  totalCostStopThresholdUsd: 4,
-  perModelCostStopThresholdUsd: 1,
+  totalReportedCostUsd: 4,
+  perModelReportedCostUsd: 1,
 } as const;
 
-export const PILOT_V5_RESERVATION_PROTOCOL =
+export const PILOT_V6_RESERVATION_PROTOCOL =
   "opencode-better-hashline-paid-pilot-reservation/v1" as const;
-export const PILOT_V5_RESERVATION_NAMESPACE =
+export const PILOT_V6_RESERVATION_NAMESPACE =
   "io.github.makcimbx.opencode-better-hashline" as const;
-export const PILOT_V5_RESERVATION_KEY = PILOT_V5_ID;
-export const PILOT_V5_RESERVATION_ID =
-  `${PILOT_V5_RESERVATION_NAMESPACE}/${PILOT_V5_RESERVATION_KEY}` as const;
+export const PILOT_V6_RESERVATION_KEY = PILOT_V6_ID;
+export const PILOT_V6_RESERVATION_ID =
+  `${PILOT_V6_RESERVATION_NAMESPACE}/${PILOT_V6_RESERVATION_KEY}` as const;
 
-export const PILOT_V5_BROKER_TIMEOUT_MS = 10_000 as const;
-export const PILOT_V5_BROKER_STDOUT_LIMIT = 64 * 1024;
-export const PILOT_V5_BROKER_STDERR_LIMIT = 16 * 1024;
+export const PILOT_V6_BROKER_TIMEOUT_MS = 10_000 as const;
+export const PILOT_V6_BROKER_STDOUT_LIMIT = 64 * 1024;
+export const PILOT_V6_BROKER_STDERR_LIMIT = 16 * 1024;
 
 const APPROVAL_SCHEMA_VERSION = 1 as const;
 const EXTERNAL_BUNDLE_SCHEMA_VERSION = 1 as const;
@@ -53,29 +53,29 @@ const RESERVATION_RESPONSE_SCHEMA_VERSION = 1 as const;
 const ANCHOR_BYTE_LIMIT = 4 * 1024;
 const BUNDLE_BYTE_LIMIT = 64 * 1024;
 
-export interface ActivePilotV5ApprovalAnchor {
+export interface ActivePilotV6ApprovalAnchor {
   schemaVersion: typeof APPROVAL_SCHEMA_VERSION;
-  pilotId: typeof PILOT_V5_ID;
+  pilotId: typeof PILOT_V6_ID;
   approval: {
     candidateCommit: string;
     externalBundleSha256: string;
   };
 }
 
-export type PilotV5ApprovalAnchor =
+export type PilotV6ApprovalAnchor =
   | {
       schemaVersion: typeof APPROVAL_SCHEMA_VERSION;
-      pilotId: typeof PILOT_V5_ID;
+      pilotId: typeof PILOT_V6_ID;
       approval: null;
     }
-  | ActivePilotV5ApprovalAnchor;
+  | ActivePilotV6ApprovalAnchor;
 
-export interface PilotV5ExternalApprovalBundle {
+export interface PilotV6ExternalApprovalBundle {
   schemaVersion: typeof EXTERNAL_BUNDLE_SCHEMA_VERSION;
-  pilotId: typeof PILOT_V5_ID;
+  pilotId: typeof PILOT_V6_ID;
   candidateCommit: string;
-  packageVersion: typeof PILOT_V5_PACKAGE_VERSION;
-  preflightSchemaVersion: typeof PILOT_V5_PREFLIGHT_SCHEMA_VERSION;
+  packageVersion: typeof PILOT_V6_PACKAGE_VERSION;
+  preflightSchemaVersion: typeof PILOT_V6_PREFLIGHT_SCHEMA_VERSION;
   hashes: {
     preflightReceiptSha256: string;
     runnerExecutableSha256: string;
@@ -93,48 +93,48 @@ export interface PilotV5ExternalApprovalBundle {
     userApprovalSha256: string;
     brokerExecutableSha256: string;
   };
-  outputRelativePath: typeof PILOT_V5_OUTPUT_RELATIVE_PATH;
-  limits: typeof PILOT_V5_LIMITS;
+  outputRelativePath: typeof PILOT_V6_OUTPUT_RELATIVE_PATH;
+  limits: typeof PILOT_V6_LIMITS;
   reservation: {
-    protocol: typeof PILOT_V5_RESERVATION_PROTOCOL;
-    namespace: typeof PILOT_V5_RESERVATION_NAMESPACE;
-    key: typeof PILOT_V5_RESERVATION_KEY;
+    protocol: typeof PILOT_V6_RESERVATION_PROTOCOL;
+    namespace: typeof PILOT_V6_RESERVATION_NAMESPACE;
+    key: typeof PILOT_V6_RESERVATION_KEY;
     authority: string;
   };
 }
 
-export interface ValidatedPilotV5ApprovalCommit {
+export interface ValidatedPilotV6ApprovalCommit {
   approvalCommit: string;
   candidateCommit: string;
-  anchor: ActivePilotV5ApprovalAnchor;
+  anchor: ActivePilotV6ApprovalAnchor;
 }
 
-export interface ValidatedPilotV5Approval extends ValidatedPilotV5ApprovalCommit {
+export interface ValidatedPilotV6Approval extends ValidatedPilotV6ApprovalCommit {
   externalBundleSha256: string;
-  bundle: PilotV5ExternalApprovalBundle;
+  bundle: PilotV6ExternalApprovalBundle;
 }
 
-export interface PilotV5ReservationRequest {
+export interface PilotV6ReservationRequest {
   schemaVersion: typeof RESERVATION_REQUEST_SCHEMA_VERSION;
   operation: "consume";
-  protocol: typeof PILOT_V5_RESERVATION_PROTOCOL;
-  namespace: typeof PILOT_V5_RESERVATION_NAMESPACE;
-  key: typeof PILOT_V5_RESERVATION_KEY;
-  reservationId: typeof PILOT_V5_RESERVATION_ID;
+  protocol: typeof PILOT_V6_RESERVATION_PROTOCOL;
+  namespace: typeof PILOT_V6_RESERVATION_NAMESPACE;
+  key: typeof PILOT_V6_RESERVATION_KEY;
+  reservationId: typeof PILOT_V6_RESERVATION_ID;
   authority: string;
-  pilotId: typeof PILOT_V5_ID;
+  pilotId: typeof PILOT_V6_ID;
   candidateCommit: string;
   approvalCommit: string;
   externalBundleSha256: string;
 }
 
-export interface PilotV5ReservationReceipt {
+export interface PilotV6ReservationReceipt {
   schemaVersion: typeof RESERVATION_RESPONSE_SCHEMA_VERSION;
   status: "reserved";
-  protocol: typeof PILOT_V5_RESERVATION_PROTOCOL;
-  namespace: typeof PILOT_V5_RESERVATION_NAMESPACE;
-  key: typeof PILOT_V5_RESERVATION_KEY;
-  reservationId: typeof PILOT_V5_RESERVATION_ID;
+  protocol: typeof PILOT_V6_RESERVATION_PROTOCOL;
+  namespace: typeof PILOT_V6_RESERVATION_NAMESPACE;
+  key: typeof PILOT_V6_RESERVATION_KEY;
+  reservationId: typeof PILOT_V6_RESERVATION_ID;
   authority: string;
   requestSha256: string;
   signature: string;
@@ -152,7 +152,7 @@ export type GitRunner = (
 export interface BrokerInvocation {
   command: readonly [executablePath: string, canonicalRequest: string];
   cwd: string;
-  timeoutMs: typeof PILOT_V5_BROKER_TIMEOUT_MS;
+  timeoutMs: typeof PILOT_V6_BROKER_TIMEOUT_MS;
   stdoutLimit: number;
   stderrLimit: number;
 }
@@ -208,12 +208,12 @@ const HASH_KEYS = [
 const LIMIT_KEYS = [
   "maxAgentSteps",
   "requestedOutputTokenLimit",
-  "perModelCostStopThresholdUsd",
+  "perModelReportedCostUsd",
   "repeats",
   "requestLimit",
   "sessionLimit",
   "sessionTimeoutMs",
-  "totalCostStopThresholdUsd",
+  "totalReportedCostUsd",
   "traceByteLimit",
 ] as const;
 const RESERVATION_KEYS = ["authority", "key", "namespace", "protocol"] as const;
@@ -291,12 +291,12 @@ function committedAnchorEncoding(value: unknown): string {
     !root ||
     !exactKeys(root, ANCHOR_KEYS) ||
     root.schemaVersion !== APPROVAL_SCHEMA_VERSION ||
-    root.pilotId !== PILOT_V5_ID
+    root.pilotId !== PILOT_V6_ID
   ) {
     return `${canonicalJson(value)}\n`;
   }
   if (root.approval === null) {
-    return `{ "approval": null, "pilotId": "${PILOT_V5_ID}", "schemaVersion": 1 }\n`;
+    return `{ "approval": null, "pilotId": "${PILOT_V6_ID}", "schemaVersion": 1 }\n`;
   }
   const approval = record(root.approval);
   if (
@@ -312,7 +312,7 @@ function committedAnchorEncoding(value: unknown): string {
     "candidateCommit": "${approval.candidateCommit}",
     "externalBundleSha256": "${approval.externalBundleSha256}"
   },
-  "pilotId": "${PILOT_V5_ID}",
+  "pilotId": "${PILOT_V6_ID}",
   "schemaVersion": 1
 }\n`;
 }
@@ -345,11 +345,11 @@ function parseCanonicalJson(
   return value;
 }
 
-export function parsePilotV5ApprovalAnchor(bytes: Uint8Array): PilotV5ApprovalAnchor {
+export function parsePilotV6ApprovalAnchor(bytes: Uint8Array): PilotV6ApprovalAnchor {
   const value = record(
     parseCanonicalJson(
       bytes,
-      "Pilot v5 approval anchor",
+      "Pilot v6 approval anchor",
       ANCHOR_BYTE_LIMIT,
       committedAnchorEncoding,
     ),
@@ -358,11 +358,11 @@ export function parsePilotV5ApprovalAnchor(bytes: Uint8Array): PilotV5ApprovalAn
     !value ||
     !exactKeys(value, ANCHOR_KEYS) ||
     value.schemaVersion !== APPROVAL_SCHEMA_VERSION ||
-    value.pilotId !== PILOT_V5_ID
+    value.pilotId !== PILOT_V6_ID
   ) {
-    throw new Error("Pilot v5 approval anchor has an invalid exact-key schema.");
+    throw new Error("Pilot v6 approval anchor has an invalid exact-key schema.");
   }
-  if (value.approval === null) return value as unknown as PilotV5ApprovalAnchor;
+  if (value.approval === null) return value as unknown as PilotV6ApprovalAnchor;
 
   const approval = record(value.approval);
   if (
@@ -371,16 +371,16 @@ export function parsePilotV5ApprovalAnchor(bytes: Uint8Array): PilotV5ApprovalAn
     !isCommit(approval.candidateCommit) ||
     !isSha256(approval.externalBundleSha256)
   ) {
-    throw new Error("Pilot v5 active approval anchor has an invalid exact-key schema.");
+    throw new Error("Pilot v6 active approval anchor has an invalid exact-key schema.");
   }
-  return value as unknown as ActivePilotV5ApprovalAnchor;
+  return value as unknown as ActivePilotV6ApprovalAnchor;
 }
 
-export function parsePilotV5ExternalApprovalBundle(
+export function parsePilotV6ExternalApprovalBundle(
   bytes: Uint8Array,
-): PilotV5ExternalApprovalBundle {
+): PilotV6ExternalApprovalBundle {
   const value = record(
-    parseCanonicalJson(bytes, "Pilot v5 external approval bundle", BUNDLE_BYTE_LIMIT),
+    parseCanonicalJson(bytes, "Pilot v6 external approval bundle", BUNDLE_BYTE_LIMIT),
   );
   const hashes = record(value?.hashes);
   const limits = record(value?.limits);
@@ -389,33 +389,33 @@ export function parsePilotV5ExternalApprovalBundle(
     !value ||
     !exactKeys(value, BUNDLE_KEYS) ||
     value.schemaVersion !== EXTERNAL_BUNDLE_SCHEMA_VERSION ||
-    value.pilotId !== PILOT_V5_ID ||
+    value.pilotId !== PILOT_V6_ID ||
     !isCommit(value.candidateCommit) ||
-    value.packageVersion !== PILOT_V5_PACKAGE_VERSION ||
-    value.preflightSchemaVersion !== PILOT_V5_PREFLIGHT_SCHEMA_VERSION ||
-    value.outputRelativePath !== PILOT_V5_OUTPUT_RELATIVE_PATH ||
+    value.packageVersion !== PILOT_V6_PACKAGE_VERSION ||
+    value.preflightSchemaVersion !== PILOT_V6_PREFLIGHT_SCHEMA_VERSION ||
+    value.outputRelativePath !== PILOT_V6_OUTPUT_RELATIVE_PATH ||
     !hashes ||
     !exactKeys(hashes, HASH_KEYS) ||
     !HASH_KEYS.every((key) => isSha256(hashes[key])) ||
-    hashes.taskManifestSha256 !== PILOT_V5_TASK_MANIFEST_SHA256 ||
-    hashes.adapterManifestSha256 !== PILOT_V5_ADAPTER_MANIFEST_SHA256 ||
-    hashes.scheduleManifestSha256 !== PILOT_V5_SCHEDULE_MANIFEST_SHA256 ||
+    hashes.taskManifestSha256 !== PILOT_V6_TASK_MANIFEST_SHA256 ||
+    hashes.adapterManifestSha256 !== PILOT_V6_ADAPTER_MANIFEST_SHA256 ||
+    hashes.scheduleManifestSha256 !== PILOT_V6_SCHEDULE_MANIFEST_SHA256 ||
     !limits ||
     !exactKeys(limits, LIMIT_KEYS) ||
-    !LIMIT_KEYS.every((key) => limits[key] === PILOT_V5_LIMITS[key]) ||
+    !LIMIT_KEYS.every((key) => limits[key] === PILOT_V6_LIMITS[key]) ||
     !reservation ||
     !exactKeys(reservation, RESERVATION_KEYS) ||
-    reservation.protocol !== PILOT_V5_RESERVATION_PROTOCOL ||
-    reservation.namespace !== PILOT_V5_RESERVATION_NAMESPACE ||
-    reservation.key !== PILOT_V5_RESERVATION_KEY ||
+    reservation.protocol !== PILOT_V6_RESERVATION_PROTOCOL ||
+    reservation.namespace !== PILOT_V6_RESERVATION_NAMESPACE ||
+    reservation.key !== PILOT_V6_RESERVATION_KEY ||
     typeof reservation.authority !== "string" ||
     !/^[\x21-\x7e]{1,256}$/u.test(reservation.authority)
   ) {
     throw new Error(
-      "Pilot v5 external approval bundle does not match the frozen exact-key schema.",
+      "Pilot v6 external approval bundle does not match the frozen exact-key schema.",
     );
   }
-  return value as unknown as PilotV5ExternalApprovalBundle;
+  return value as unknown as PilotV6ExternalApprovalBundle;
 }
 
 async function defaultGitRunner(invocation: GitInvocation): Promise<string> {
@@ -450,33 +450,33 @@ async function gitText(
   return (await gitBytes(repository, args, runGit)).toString("utf8");
 }
 
-export async function loadCommittedPilotV5ApprovalAnchor(
+export async function loadCommittedPilotV6ApprovalAnchor(
   input: { repository: string; commit: string },
   dependencies: ApprovalDependencies = {},
-): Promise<PilotV5ApprovalAnchor> {
+): Promise<PilotV6ApprovalAnchor> {
   if (!isCommit(input.commit)) throw new Error("Approval anchor commit must be exact 40-hex.");
   const runGit = dependencies.runGit ?? defaultGitRunner;
   const bytes = await gitBytes(
     input.repository,
-    ["show", `${input.commit}:${PILOT_V5_APPROVAL_ANCHOR_PATH}`],
+    ["show", `${input.commit}:${PILOT_V6_APPROVAL_ANCHOR_PATH}`],
     runGit,
   );
-  return parsePilotV5ApprovalAnchor(bytes);
+  return parsePilotV6ApprovalAnchor(bytes);
 }
 
-export async function validatePilotV5ApprovalCommit(
+export async function validatePilotV6ApprovalCommit(
   input: { repository: string; approvalCommit: string },
   dependencies: ApprovalDependencies = {},
-): Promise<ValidatedPilotV5ApprovalCommit> {
+): Promise<ValidatedPilotV6ApprovalCommit> {
   if (!isCommit(input.approvalCommit)) {
-    throw new Error("Pilot v5 approval commit must be exact 40-hex.");
+    throw new Error("Pilot v6 approval commit must be exact 40-hex.");
   }
   const runGit = dependencies.runGit ?? defaultGitRunner;
   const head = (
     await gitText(input.repository, ["rev-parse", "--verify", "HEAD^{commit}"], runGit)
   ).trim();
   if (head !== input.approvalCommit) {
-    throw new Error("Pilot v5 approval commit must be the checked-out HEAD.");
+    throw new Error("Pilot v6 approval commit must be the checked-out HEAD.");
   }
   const status = await gitText(
     input.repository,
@@ -484,13 +484,13 @@ export async function validatePilotV5ApprovalCommit(
     runGit,
   );
   if (status.length !== 0) {
-    throw new Error("Pilot v5 approval commit requires a clean worktree.");
+    throw new Error("Pilot v6 approval commit requires a clean worktree.");
   }
   const hiddenIndexFlags = (await gitText(input.repository, ["ls-files", "-v"], runGit))
     .split(/\r?\n/u)
     .filter((line) => /^[a-zS]/u.test(line));
   if (hiddenIndexFlags.length !== 0) {
-    throw new Error("Pilot v5 approval commit forbids hidden index flags.");
+    throw new Error("Pilot v6 approval commit forbids hidden index flags.");
   }
 
   const lineage = (
@@ -503,7 +503,7 @@ export async function validatePilotV5ApprovalCommit(
     .trim()
     .split(/\s+/u);
   if (lineage.length !== 2 || lineage[0] !== input.approvalCommit || !isCommit(lineage[1])) {
-    throw new Error("Pilot v5 approval commit must have exactly one parent candidate A.");
+    throw new Error("Pilot v6 approval commit must have exactly one parent candidate A.");
   }
   const candidateCommit = lineage[1];
 
@@ -516,41 +516,41 @@ export async function validatePilotV5ApprovalCommit(
   )
     .split(/\r?\n/u)
     .filter((path) => path.length > 0);
-  if (changedPaths.length !== 1 || changedPaths[0] !== `M\t${PILOT_V5_APPROVAL_ANCHOR_PATH}`) {
-    throw new Error("Candidate A..approval C must change only the pilot v5 approval anchor.");
+  if (changedPaths.length !== 1 || changedPaths[0] !== `M\t${PILOT_V6_APPROVAL_ANCHOR_PATH}`) {
+    throw new Error("Candidate A..approval C must change only the pilot v6 approval anchor.");
   }
 
-  const anchor = await loadCommittedPilotV5ApprovalAnchor(
+  const anchor = await loadCommittedPilotV6ApprovalAnchor(
     { repository: input.repository, commit: input.approvalCommit },
     { runGit },
   );
   if (anchor.approval === null) {
-    throw new Error("Pilot v5 remains hard-disabled by its committed null approval anchor.");
+    throw new Error("Pilot v6 remains hard-disabled by its committed null approval anchor.");
   }
   if (anchor.approval.candidateCommit !== candidateCommit) {
-    throw new Error("Pilot v5 approval anchor candidate does not match parent A.");
+    throw new Error("Pilot v6 approval anchor candidate does not match parent A.");
   }
-  const candidateAnchor = await loadCommittedPilotV5ApprovalAnchor(
+  const candidateAnchor = await loadCommittedPilotV6ApprovalAnchor(
     { repository: input.repository, commit: candidateCommit },
     { runGit },
   );
   if (candidateAnchor.approval !== null) {
-    throw new Error("Candidate A must contain the hard-disabled null pilot v5 approval anchor.");
+    throw new Error("Candidate A must contain the hard-disabled null pilot v6 approval anchor.");
   }
   return { approvalCommit: input.approvalCommit, candidateCommit, anchor };
 }
 
-export function validatePilotV5ExternalApprovalBundle(
+export function validatePilotV6ExternalApprovalBundle(
   bytes: Uint8Array,
-  approval: ValidatedPilotV5ApprovalCommit,
-): ValidatedPilotV5Approval {
+  approval: ValidatedPilotV6ApprovalCommit,
+): ValidatedPilotV6Approval {
   const externalBundleSha256 = sha256(bytes);
   if (externalBundleSha256 !== approval.anchor.approval.externalBundleSha256) {
-    throw new Error("Pilot v5 external approval bundle hash does not match the committed anchor.");
+    throw new Error("Pilot v6 external approval bundle hash does not match the committed anchor.");
   }
-  const bundle = parsePilotV5ExternalApprovalBundle(bytes);
+  const bundle = parsePilotV6ExternalApprovalBundle(bytes);
   if (bundle.candidateCommit !== approval.candidateCommit) {
-    throw new Error("Pilot v5 external approval bundle candidate does not match parent A.");
+    throw new Error("Pilot v6 external approval bundle candidate does not match parent A.");
   }
   return { ...approval, externalBundleSha256, bundle };
 }
@@ -600,16 +600,16 @@ async function validateBrokerPath(
   return { bytes, canonicalPath: canonicalBroker };
 }
 
-function reservationRequest(approval: ValidatedPilotV5Approval): PilotV5ReservationRequest {
+function reservationRequest(approval: ValidatedPilotV6Approval): PilotV6ReservationRequest {
   return {
     schemaVersion: RESERVATION_REQUEST_SCHEMA_VERSION,
     operation: "consume",
-    protocol: PILOT_V5_RESERVATION_PROTOCOL,
-    namespace: PILOT_V5_RESERVATION_NAMESPACE,
-    key: PILOT_V5_RESERVATION_KEY,
-    reservationId: PILOT_V5_RESERVATION_ID,
+    protocol: PILOT_V6_RESERVATION_PROTOCOL,
+    namespace: PILOT_V6_RESERVATION_NAMESPACE,
+    key: PILOT_V6_RESERVATION_KEY,
+    reservationId: PILOT_V6_RESERVATION_ID,
     authority: approval.bundle.reservation.authority,
-    pilotId: PILOT_V5_ID,
+    pilotId: PILOT_V6_ID,
     candidateCommit: approval.candidateCommit,
     approvalCommit: approval.approvalCommit,
     externalBundleSha256: approval.externalBundleSha256,
@@ -619,19 +619,19 @@ function reservationRequest(approval: ValidatedPilotV5Approval): PilotV5Reservat
 function parseReservationReceipt(
   bytes: Uint8Array,
   expected: { authority: string; requestSha256: string },
-): PilotV5ReservationReceipt {
+): PilotV6ReservationReceipt {
   const value = record(
-    parseCanonicalJson(bytes, "External reservation broker response", PILOT_V5_BROKER_STDOUT_LIMIT),
+    parseCanonicalJson(bytes, "External reservation broker response", PILOT_V6_BROKER_STDOUT_LIMIT),
   );
   if (
     !value ||
     !exactKeys(value, RESPONSE_KEYS) ||
     value.schemaVersion !== RESERVATION_RESPONSE_SCHEMA_VERSION ||
     value.status !== "reserved" ||
-    value.protocol !== PILOT_V5_RESERVATION_PROTOCOL ||
-    value.namespace !== PILOT_V5_RESERVATION_NAMESPACE ||
-    value.key !== PILOT_V5_RESERVATION_KEY ||
-    value.reservationId !== PILOT_V5_RESERVATION_ID ||
+    value.protocol !== PILOT_V6_RESERVATION_PROTOCOL ||
+    value.namespace !== PILOT_V6_RESERVATION_NAMESPACE ||
+    value.key !== PILOT_V6_RESERVATION_KEY ||
+    value.reservationId !== PILOT_V6_RESERVATION_ID ||
     value.authority !== expected.authority ||
     value.requestSha256 !== expected.requestSha256 ||
     typeof value.signature !== "string" ||
@@ -639,7 +639,7 @@ function parseReservationReceipt(
   ) {
     throw new Error("External reservation broker returned an invalid signed response.");
   }
-  return value as unknown as PilotV5ReservationReceipt;
+  return value as unknown as PilotV6ReservationReceipt;
 }
 
 async function defaultBrokerInvoker(invocation: BrokerInvocation): Promise<BoundedProcessResult> {
@@ -656,12 +656,12 @@ async function defaultBrokerInvoker(invocation: BrokerInvocation): Promise<Bound
 export async function consumeExternalReservation(
   input: ConsumeExternalReservationInput,
   dependencies: ReservationDependencies = {},
-): Promise<PilotV5ReservationReceipt> {
-  const approvalCommit = await validatePilotV5ApprovalCommit(
+): Promise<PilotV6ReservationReceipt> {
+  const approvalCommit = await validatePilotV6ApprovalCommit(
     { repository: input.repository, approvalCommit: input.approvalCommit },
     dependencies,
   );
-  const approval = validatePilotV5ExternalApprovalBundle(input.externalBundleBytes, approvalCommit);
+  const approval = validatePilotV6ExternalApprovalBundle(input.externalBundleBytes, approvalCommit);
   return consumeValidatedExternalReservation(
     {
       repository: input.repository,
@@ -676,12 +676,12 @@ export async function consumeExternalReservation(
 export async function consumeValidatedExternalReservation(
   input: {
     repository: string;
-    approval: ValidatedPilotV5Approval;
+    approval: ValidatedPilotV6Approval;
     brokerPath: string;
     repositoryAndWorktreeRoots: readonly string[];
   },
   dependencies: Pick<ReservationDependencies, "invokeBroker"> = {},
-): Promise<PilotV5ReservationReceipt> {
+): Promise<PilotV6ReservationReceipt> {
   const approval = input.approval;
   const broker = await validateBrokerPath(
     input.brokerPath,
@@ -704,9 +704,9 @@ export async function consumeValidatedExternalReservation(
     result = await invokeBroker({
       command: [privateBroker, canonicalRequest],
       cwd: privateRoot,
-      timeoutMs: PILOT_V5_BROKER_TIMEOUT_MS,
-      stdoutLimit: PILOT_V5_BROKER_STDOUT_LIMIT,
-      stderrLimit: PILOT_V5_BROKER_STDERR_LIMIT,
+      timeoutMs: PILOT_V6_BROKER_TIMEOUT_MS,
+      stdoutLimit: PILOT_V6_BROKER_STDOUT_LIMIT,
+      stderrLimit: PILOT_V6_BROKER_STDERR_LIMIT,
     });
   } finally {
     await rm(privateRoot, { recursive: true, force: true });

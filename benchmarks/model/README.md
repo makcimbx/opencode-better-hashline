@@ -23,8 +23,8 @@ bun run bench:model --native-alias-pilot
 ```
 
 The alias trace records native-shaped retries, stable error codes, active alias, and protocol-marker
-validity. It rejects completed native-shaped calls, missing/invalid markers, `hashline_edit`, native
-`write`, shell/task/web transports, or both aliases appearing in one route. Pilot v5 freezes 12 tasks x
+validity. It rejects completed native-shaped calls, missing/invalid markers when an edit is required,
+`hashline_edit`, native `write`, shell/task/web transports, or both aliases appearing in one route. Pilot v6 freezes 12 tasks x
 2 surfaces x 2 stable models, 48 sessions, 576 maximum requests, and exact
 timeout/output/trace/cost/auth evidence behind a new null anchor. Pilot v3 executed one Luna session,
 stopped fail-closed on current-call history correlation, consumed its reservation, and may never resume
@@ -33,10 +33,13 @@ negative after its second session; it is also consumed and nonretryable. The
 [v3 incident](../results/2026-07-21-native-alias-pilot-v3-incident.json) records five requests, USD 0
 reported cost, no file mutation, and incomplete conservative accounting. The
 [v4 incident](../results/2026-07-21-native-alias-pilot-v4-incident.json) records the successful first
-session and baseline oracle rejection with no runtime defect or unsafe mutation.
+session and baseline oracle rejection with no runtime defect or unsafe mutation. Pilot v5 passed 16
+sessions and stopped because the create-file fixture omitted the parent directory required by strict
+create-only `hashline_write`; its [incident](../results/2026-07-21-native-alias-pilot-v5-incident.json)
+records no runtime defect or unsafe mutation.
 
 `--native-alias-probe` is development evidence only. It fixes the task to one exact single-file edit,
-accepts the native-alias-only or paired adapter set and the two frozen v5 model/variant pairs, and permits
+accepts the native-alias-only or paired adapter set and the two frozen v6 model/variant pairs, and permits
 1–20 explicit repeats under normal paid approvals,
 requires isolated strict auth, and confines raw output to a new direct child of ignored
 `benchmarks/results/model/`. Probe output is dirty-source, non-publishable evidence and never consumes
@@ -53,7 +56,7 @@ strictly attested export worktree as renderer authority. Trace and export termin
 exactly, complete history must validate, and a per-file mutation ledger must bind every expected change
 to the correct executor. The unsanitized export is memory-only; persisted evidence is sanitized. Packed
 preflight executes this same oracle against a normalized v1 topology and proves one-request retry abort.
-Pilot v5 starts from a new ID and null anchor. Candidate A must produce exact schema-v6 receipt,
+Pilot v6 starts from a new ID and null anchor. Candidate A must produce exact schema-v6 receipt,
 tarball, package-tree, and staged-runner bytes. External bundle B must bind them to auth, endpoint,
 hard-budget, user approval, toolchain, schedule, and a new broker reservation. Direct-child commit C may
 change only that anchor and must reuse A's runner bytes. The broker and durable reservation must remain

@@ -34,9 +34,9 @@ Preflight performs builds, package installation, registry access when needed, Op
 
 `--adapter-set=native-aliases-v1` pairs the unique and experimental alias surfaces. Its preflight
 also runs the credential-free packed verifier through unique `hashline_edit`, non-GPT `edit`, and
-GPT-like `apply_patch`. Pilot v5 freezes Luna and Sol across 48 paired sessions and at most 576 requests
+GPT-like `apply_patch`. Pilot v6 freezes Luna and Sol across 48 paired sessions and at most 576 requests
 behind `--native-alias-pilot`; its new committed null anchor hard-disables paid execution. Pilot v2 is
-retired unexecuted and consumed pilots v3 and v4 are terminal.
+retired unexecuted and consumed pilots v3, v4, and v5 are terminal.
 
 Paid execution requires the exact immutable session/request schedule, a reported-cost stop threshold
 (not a provider billing cap), cost
@@ -67,6 +67,9 @@ never resume or retry. See the
 [sanitized incident](results/2026-07-21-native-alias-pilot-v3-incident.json). Pilot v4 stopped after two
 sessions on a baseline trace-path oracle false negative; its reservation is also consumed and it may never
 resume or retry. See the [v4 incident](results/2026-07-21-native-alias-pilot-v4-incident.json). Pilot v5
+stopped after 17 sessions because the create-file fixture omitted the parent `src/` directory; its
+reservation is consumed and it may never resume or retry. See the
+[v5 incident](results/2026-07-21-native-alias-pilot-v5-incident.json). Pilot v6
 requires a new ID, null anchor, clean schema-v6 preflight, tarball, package-tree manifest, staged runner,
 external bundle B, anchor-only direct-child commit C, and a new durable broker reservation outside every
 repository and worktree.

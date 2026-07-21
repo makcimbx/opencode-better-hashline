@@ -8,9 +8,9 @@ export const modelAdapterSets = {
 
 export type AdapterSetId = keyof typeof modelAdapterSets;
 
-export const nativeAliasPilotV5 = {
-  id: "native-alias-pilot-v5",
-  approvalAnchorPath: "benchmarks/model/native-alias-pilot-v5.approval.json",
+export const nativeAliasPilotV6 = {
+  id: "native-alias-pilot-v6",
+  approvalAnchorPath: "benchmarks/model/native-alias-pilot-v6.approval.json",
   approvalRequirements: {
     externalBudgetReceipt: true,
     providerEndpointAttestation: true,
@@ -29,9 +29,9 @@ export const nativeAliasPilotV5 = {
   traceByteLimit: 8 * 1024 * 1024,
   sessionLimit: 48,
   requestLimit: 576,
-  totalCostLimitUsd: 4,
-  perModelCostLimitUsd: 1,
-  taskManifestSha256: "8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a",
+  totalReportedCostUsd: 4,
+  perModelReportedCostUsd: 1,
+  taskManifestSha256: "5465f2c98800241ec031375ee11d72f30b8649c00c8196359ba1b6dd39cef3ca",
   adapterManifestSha256: "cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8",
   scheduleManifestSha256: "3b694becb988e6fcd1dace046ad45e298cdc4f4600d512ab54e3bb8a3cfdb70d",
   models: [

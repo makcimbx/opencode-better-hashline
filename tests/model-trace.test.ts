@@ -494,6 +494,68 @@ describe("model benchmark trace inspection", () => {
     expect(pending.oracleDecision).toBe("invalid");
   });
 
+  test("allows a creation-only native-alias session without an edit protocol marker", async () => {
+    const worktree = parse(resolve(".")).root;
+    const allowedPathRoot = resolve(".");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const output = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session",
+        part: {
+          tool: "hashline_write",
+          callID: "call-write",
+          state: {
+            status: "completed",
+            input: { filePath: "created.ts", content: "export {};\n" },
+            output: "Created created.ts.",
+            title: "Create created.ts",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        },
+      }),
+    );
+    const part = (JSON.parse(output) as { part: unknown }).part;
+    const sessionExport = JSON.stringify({
+      info: {
+        id: "session",
+        directory: allowedPathRoot,
+        path: relative(worktree, allowedPathRoot).replaceAll("\\", "/"),
+      },
+      messages: [
+        {
+          info: { id: "message-1", sessionID: "session", role: "assistant" },
+          parts: [part],
+        },
+      ],
+    });
+    const expected = {
+      ...identity,
+      allowedPathRoot,
+      expectedDirectory: allowedPathRoot,
+      expectedWorktree: worktree,
+    };
+
+    expect((await inspectNativeAliasTrace(output, sessionExport, expected)).oracleDecision).toBe(
+      "invalid",
+    );
+    const creation = await inspectNativeAliasTrace(output, sessionExport, {
+      ...expected,
+      requireNativeAliasMarker: false,
+    });
+    expect(creation.oracleDecision).toBe("valid");
+    expect(creation.toolEvents[0]).toMatchObject({
+      tool: "hashline_write",
+      protocolMarker: "absent",
+      targetPath: "created.ts",
+    });
+  });
+
   test("binds absolute hashline paths to their physical fixture target", () => {
     const allowedPathRoot = resolve(".");
     const canonicalPath = resolve(allowedPathRoot, "package.json");

@@ -338,10 +338,16 @@ export async function inspectNativeAliasTrace(
   expected: Omit<NonNullable<TraceInspectionOptions["nativeAlias"]>, "worktree"> & {
     expectedDirectory: string;
     expectedWorktree: string;
+    requireNativeAliasMarker?: boolean;
   },
 ): Promise<TraceInspection> {
   const accounting = inspectJsonlTrace(output);
-  const { expectedDirectory, expectedWorktree, ...identity } = expected;
+  const {
+    expectedDirectory,
+    expectedWorktree,
+    requireNativeAliasMarker = true,
+    ...identity
+  } = expected;
   if (accounting.sessionIds.length !== 1) {
     return { ...accounting, oracleDecision: "invalid", oracleReason: "trace-session-invalid" };
   }
@@ -355,7 +361,13 @@ export async function inspectNativeAliasTrace(
       accounting.sessionIds[0] as string,
       expectedWorktree,
     );
-    return await inspectAttestedNativeAliasTrace(output, accounting, identity, attested);
+    return await inspectAttestedNativeAliasTrace(
+      output,
+      accounting,
+      identity,
+      attested,
+      requireNativeAliasMarker,
+    );
   } catch {
     return { ...accounting, oracleDecision: "invalid", oracleReason: "session-export-invalid" };
   }
@@ -366,6 +378,7 @@ async function inspectAttestedNativeAliasTrace(
   accounting: TraceInspection,
   identity: Omit<NonNullable<TraceInspectionOptions["nativeAlias"]>, "worktree">,
   attested: Awaited<ReturnType<typeof attestSessionExport>>,
+  requireNativeAliasMarker: boolean,
 ): Promise<TraceInspection> {
   try {
     assertTerminalCorrelation(traceTerminalParts(output), exportTerminalParts(attested.messages));
@@ -395,7 +408,10 @@ async function inspectAttestedNativeAliasTrace(
       oracleReason: invalid.protocolReason ?? "protocol-history-invalid",
     };
   }
-  if (!inspection.toolEvents.some((event) => event.protocolMarker === "valid")) {
+  if (
+    requireNativeAliasMarker &&
+    !inspection.toolEvents.some((event) => event.protocolMarker === "valid")
+  ) {
     return { ...inspection, oracleDecision: "invalid", oracleReason: "protocol-history-invalid" };
   }
   return { ...inspection, oracleDecision: "valid", oracleReason: "valid" };

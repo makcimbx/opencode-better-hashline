@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import incident from "../benchmarks/results/2026-07-20-native-alias-pilot-v1-incident.json";
 import incidentV3 from "../benchmarks/results/2026-07-21-native-alias-pilot-v3-incident.json";
 import incidentV4 from "../benchmarks/results/2026-07-21-native-alias-pilot-v4-incident.json";
+import incidentV5 from "../benchmarks/results/2026-07-21-native-alias-pilot-v5-incident.json";
 
 describe("native alias pilot v1 incident", () => {
   test("publishes a sanitized immutable no-go record", () => {
@@ -110,6 +111,57 @@ describe("native alias pilot v4 incident", () => {
       /[a-z]:(?:[\\/]|Users[\\/])|(?:^|["\\/])Users[\\/]|[\\/]home[\\/]|\\\\[^\\/]+[\\/]/iu,
     );
     expect(JSON.stringify(incidentV4)).not.toMatch(
+      /"(?:access|refresh|key|access[_-]?token|refresh[_-]?token|api[_-]?key)"\s*:/iu,
+    );
+  });
+});
+
+describe("native alias pilot v5 incident", () => {
+  test("publishes a sanitized immutable consumed fixture no-go record", () => {
+    expect(incidentV5).toMatchObject({
+      schemaVersion: 1,
+      pilotId: "native-alias-pilot-v5",
+      accounting: {
+        observedRequests: 70,
+        reportedCostUsd: 0,
+        accountingComplete: false,
+        accountedRequestsUpperBound: 82,
+        accountedCostUpperBoundUsd: null,
+      },
+      reservation: {
+        consumed: true,
+        retryForbidden: true,
+        safeToResume: false,
+      },
+      rootCause: {
+        code: "create-file-fixture-missing-parent-directory",
+        benchmarkDefect: true,
+        runtimeDefect: false,
+        unsafeMutation: false,
+      },
+      schedule: {
+        completedSessions: 17,
+        passedSessions: 16,
+        plannedSessions: 48,
+      },
+      sessionResults: {
+        firstSixteenSessionsPassed: true,
+        failedProcessPassed: true,
+        failedTransportPassed: true,
+        failedExactFilesPassed: false,
+        failedHashlineWriteErrorCode: "PATH_NOT_FOUND",
+      },
+      terminal: {
+        status: "failed",
+        releaseDecision: "no-go",
+        safeToResume: false,
+      },
+    });
+    const serialized = JSON.stringify(incidentV5);
+    expect(serialized).not.toMatch(
+      /[a-z]:(?:[\\/]|Users[\\/])|(?:^|["\\/])Users[\\/]|[\\/]home[\\/]|\\\\[^\\/]+[\\/]/iu,
+    );
+    expect(serialized).not.toMatch(
       /"(?:access|refresh|key|access[_-]?token|refresh[_-]?token|api[_-]?key)"\s*:/iu,
     );
   });

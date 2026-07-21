@@ -50,4 +50,15 @@ describe("model task manifests", () => {
     expect(expected?.startsWith("HEADER\nBEGIN FOOTER\nfooter-value\nEND FOOTER\n")).toBe(true);
     expect(expected?.endsWith("unchanged-5000\n")).toBe(true);
   });
+
+  test("keeps the create-file parent fixture and expected tree exact", () => {
+    const task = modelTaskSets["baseline-v1"].find((candidate) => candidate.id === "create-file");
+
+    expect(task?.files).toEqual({ "README.md": "fixture\n", "src/.gitkeep": "" });
+    expect(task?.expectedFiles).toEqual({
+      "README.md": "fixture\n",
+      "src/.gitkeep": "",
+      "src/version.ts": 'export const version = "1.0.0";\n',
+    });
+  });
 });

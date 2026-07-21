@@ -11,6 +11,18 @@ const task: ModelTask = {
   expectedFiles: { "src/a.ts": "new\n", "src/new.ts": "created\n" },
 };
 
+const creationTask: ModelTask = {
+  id: "creation-ledger",
+  category: "creation",
+  prompt: "fixture",
+  files: { "README.md": "fixture\n", "src/.gitkeep": "" },
+  expectedFiles: {
+    "README.md": "fixture\n",
+    "src/.gitkeep": "",
+    "src/version.ts": 'export const version = "1.0.0";\n',
+  },
+};
+
 function event(
   tool: string,
   targetPath: string,
@@ -139,5 +151,72 @@ describe("model mutation ledger", () => {
       }),
     ]);
     expect(inspectMutationLedger(task, inspection, "native-aliases").valid).toBe(false);
+  });
+
+  test("binds pure creation to hashline_write and rejects every edit attempt", () => {
+    const valid = trace([event("hashline_write", "src/version.ts")]);
+    expect(inspectMutationLedger(creationTask, valid, "native-aliases")).toMatchObject({
+      valid: true,
+      changed: [],
+      created: ["src/version.ts"],
+    });
+    expect(inspectMutationLedger(creationTask, valid, "hashline")).toMatchObject({
+      valid: true,
+      changed: [],
+      created: ["src/version.ts"],
+    });
+
+    const erroredAlias = trace([
+      event("edit", "src/version.ts", {
+        status: "error",
+        errorCode: "INVALID_ARGUMENT",
+      }),
+      event("hashline_write", "src/version.ts", { sequence: 1 }),
+    ]);
+    expect(inspectMutationLedger(creationTask, erroredAlias, "native-aliases")).toMatchObject({
+      valid: false,
+      wrongExecutor: ["edit:src/version.ts"],
+    });
+
+    const erroredPatch = trace([
+      event("apply_patch", "src/version.ts", {
+        status: "error",
+        errorCode: "INVALID_ARGUMENT",
+      }),
+      event("hashline_write", "src/version.ts", { sequence: 1 }),
+    ]);
+    expect(inspectMutationLedger(creationTask, erroredPatch, "native-aliases")).toMatchObject({
+      valid: false,
+      wrongExecutor: ["edit:src/version.ts"],
+    });
+
+    const erroredBaseline = trace([
+      event("hashline_edit", "src/version.ts", {
+        status: "error",
+        errorCode: "INVALID_ARGUMENT",
+      }),
+      event("hashline_write", "src/version.ts", { sequence: 1 }),
+    ]);
+    expect(inspectMutationLedger(creationTask, erroredBaseline, "hashline")).toMatchObject({
+      valid: false,
+      wrongExecutor: ["edit:src/version.ts"],
+    });
+
+    const failedWrite = trace([
+      event("hashline_write", "src/version.ts", {
+        status: "error",
+        errorCode: "PATH_NOT_FOUND",
+      }),
+    ]);
+    expect(inspectMutationLedger(creationTask, failedWrite, "native-aliases")).toMatchObject({
+      valid: false,
+      missing: ["write:src/version.ts"],
+    });
+
+    const unauthorized = trace([event("hashline_write", "src/other.ts")]);
+    expect(inspectMutationLedger(creationTask, unauthorized, "native-aliases")).toMatchObject({
+      valid: false,
+      unauthorized: ["hashline_write:src/other.ts"],
+    });
   });
 });
