@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { openCode1183ProviderSchema } from "../src/native-alias.js";
+import { openCodeProviderSchema } from "../src/native-alias.js";
 import { hashlineEditArgumentsSchema, hashlineEditDescription } from "../src/plugin.js";
 import {
   buildNativeAliasMetadata,
@@ -40,7 +40,7 @@ describe("native alias presentation contracts", () => {
       "91950a6e54fb3d8b1bf66fcd2cdc6146f6ef2b86000277fa400af784c77407f6",
     );
     expect(schemaSha256).toBe("fcc372c6be3bee0bf11d25ebc95e4428aa742de94c59ad8cd24f6e491af2ad9e");
-    expect(jsonSha256(openCode1183ProviderSchema(schema))).toBe(
+    expect(jsonSha256(openCodeProviderSchema(schema))).toBe(
       "a7359841f93f0f111d5cb5cab8d747e0cf07cc130b683e97b8b75499a68a63d1",
     );
     expect(jsonSha256(providerContract)).toBe(

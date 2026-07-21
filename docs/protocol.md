@@ -20,11 +20,13 @@ It does not attempt semantic merge, multi-file transactions, hostile-writer CAS,
 create-only `hashline_write`. With enforcement enabled, native `edit`, `write`, and `apply_patch`
 are hidden and tripwired.
 
-The experimental `toolSurface: "native-aliases"` requires `enforce: true` and an allowlisted exact
-OpenCode host, currently only `1.18.3`. It exposes `hashline_read`, create-only `hashline_write`, and
+The experimental `toolSurface: "native-aliases"` requires `enforce: true` and a compatible OpenCode
+host. It exposes `hashline_read`, create-only `hashline_write`, and
 both Better Hashline edit definitions under `edit` and `apply_patch`; OpenCode's model-family filter
 retains exactly one alias. It does not register `hashline_edit` and never aliases native `write`.
-Unavailable hosts or schemas remain diagnostic and fail closed without changing surfaces.
+Host versions are recorded in protocol identity rather than allowlisted. Missing or incompatible
+transport, health, schema, or session-history capabilities remain diagnostic and fail closed without
+changing surfaces.
 
 All three edit IDs use the same strict schema and snapshot-bound executor. Alias executors parse a
 second time, so native `oldString`/`newString` and `patchText` shapes reject with `INVALID_ARGUMENT`

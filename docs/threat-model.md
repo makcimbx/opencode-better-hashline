@@ -42,7 +42,7 @@ adversarial workloads.
 
 ### Native-alias ownership
 
-OpenCode 1.18.3 does not expose final executable ownership. A later configured plugin, directory
+OpenCode's V1 plugin API does not expose final executable ownership. A later configured plugin, directory
 tool, or MCP tool can replace `edit` or `apply_patch`; a later after-hook can remove or rewrite a
 valid result marker. Matching schemas are not proof of matching executors, and historical markers
 are evidence only for the persisted completed call. Alias mode therefore trusts plugin ordering,

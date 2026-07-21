@@ -22,9 +22,8 @@ import {
 } from "./filesystem.js";
 import {
   detectOpenCodeVersion,
-  openCode1183ProviderSchema,
+  openCodeProviderSchema,
   readOpenCodeSessionHistory,
-  SUPPORTED_OPENCODE_VERSIONS,
 } from "./native-alias.js";
 import { type ResolvedOptions, resolveOptions } from "./options.js";
 import { exactRelativePath, sameFilesystemRoot } from "./path-identity.js";
@@ -454,11 +453,8 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   if (options.toolSurface === "native-aliases" && !initializationError) {
     try {
       const hostVersion = await detectOpenCodeVersion(input.client);
-      if (!SUPPORTED_OPENCODE_VERSIONS.has(hostVersion)) {
-        throw new Error(`OpenCode ${hostVersion} is not allowlisted; expected 1.18.3.`);
-      }
       const schemaSha256 = jsonSha256(
-        openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+        openCodeProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
       );
       aliasIdentity = {
         packageVersion: PACKAGE_VERSION,
@@ -907,7 +903,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           : options.toolSurface === "native-aliases" && aliasAvailabilityError
             ? `Better Hashline native aliases are unavailable and file mutation is disabled: ${aliasAvailabilityError}`
             : options.toolSurface === "native-aliases"
-              ? "Better Hashline native aliases are active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then the available edit or apply_patch tool with the Better Hashline snapshot operation schema. Never issue edit or apply_patch calls concurrently or in the same assistant message; for multiple files, wait for each tool result before calling the next. Pass snapshotId as a top-level string and operations as a JSON array, never as encoded text or XML. hashline_write is CREATE ONLY: never call it after hashline_read or for an existing path. Native write and hashline_edit are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content. This experimental surface requires OpenCode 1.18.3, a new session after configuration changes, and Better Hashline to be the last plugin defining edit or apply_patch."
+              ? "Better Hashline native aliases are active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then the available edit or apply_patch tool with the Better Hashline snapshot operation schema. Never issue edit or apply_patch calls concurrently or in the same assistant message; for multiple files, wait for each tool result before calling the next. Pass snapshotId as a top-level string and operations as a JSON array, never as encoded text or XML. hashline_write is CREATE ONLY: never call it after hashline_read or for an existing path. Native write and hashline_edit are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content. This experimental surface requires a compatible OpenCode host, a new session after configuration changes, and Better Hashline to be the last plugin defining edit or apply_patch."
               : options.enforce
                 ? "Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. Use hashline_write only to create a new file. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content."
                 : "Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files. Native editing tools remain enabled by configuration.",

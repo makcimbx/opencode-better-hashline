@@ -17,7 +17,7 @@ import { release, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tool } from "@opencode-ai/plugin";
-import { openCode1183ProviderSchema } from "../../src/native-alias.js";
+import { openCodeProviderSchema } from "../../src/native-alias.js";
 import { hashlineEditArgumentsSchema } from "../../src/plugin.js";
 import { jsonSha256 } from "../../src/presentation.js";
 import {
@@ -115,7 +115,7 @@ function excludesSensitivePaths(value: string, paths: string[]): boolean {
 
 const MAX_AGENT_STEPS = nativeAliasPilotV7.maxAgentSteps;
 const EDIT_SCHEMA_SHA256 = jsonSha256(
-  openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+  openCodeProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
 );
 
 function option(name: string): string | undefined {

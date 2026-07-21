@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 
-export const SUPPORTED_OPENCODE_VERSIONS = new Set(["1.18.3"]);
 export const HOST_HEALTH_TIMEOUT_MS = 2_000;
 export const HOST_HEALTH_MAX_BYTES = 4_096;
 export const SESSION_HISTORY_TIMEOUT_MS = 2_000;
@@ -12,7 +11,7 @@ type HostTransportConfig = {
   headers?: unknown;
 };
 
-type PinnedOpenCodeClient = {
+type OpenCodeClient = {
   _client?: {
     getConfig?: () => HostTransportConfig;
   };
@@ -23,19 +22,19 @@ function hostTransport(client: unknown): {
   fetch: (request: Request) => Promise<Response>;
   headers: Headers;
 } {
-  const internal = (client as PinnedOpenCodeClient | undefined)?._client;
+  const internal = (client as OpenCodeClient | undefined)?._client;
   if (!internal || typeof internal.getConfig !== "function") {
-    throw new Error("OpenCode 1.18.3 client transport is unavailable.");
+    throw new Error("OpenCode client transport is unavailable.");
   }
   const config = internal.getConfig();
   if (typeof config.baseUrl !== "string" || typeof config.fetch !== "function") {
-    throw new Error("OpenCode 1.18.3 client transport has an unexpected shape.");
+    throw new Error("OpenCode client transport has an unexpected shape.");
   }
   let headers: Headers;
   try {
     headers = new Headers(config.headers as ConstructorParameters<typeof Headers>[0]);
   } catch {
-    throw new Error("OpenCode 1.18.3 client transport has invalid headers.");
+    throw new Error("OpenCode client transport has invalid headers.");
   }
   return {
     baseUrl: config.baseUrl,
@@ -109,7 +108,7 @@ export async function detectOpenCodeVersion(client: unknown): Promise<string> {
   return (health as { version: string }).version;
 }
 
-export function openCode1183ProviderSchema(schema: unknown): Record<string, unknown> {
+export function openCodeProviderSchema(schema: unknown): Record<string, unknown> {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
     throw new Error("OpenCode provider schema has an unexpected shape.");
   }

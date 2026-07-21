@@ -8,7 +8,6 @@ import {
   HOST_HEALTH_TIMEOUT_MS,
   readOpenCodeSessionHistory,
   SESSION_HISTORY_TRANSPORT_MAX_BYTES,
-  SUPPORTED_OPENCODE_VERSIONS,
 } from "../src/native-alias.js";
 import { buildNativeAliasMetadata, type NativeAliasSurface } from "../src/presentation.js";
 import {
@@ -79,7 +78,7 @@ function completedPart(
 }
 
 describe("native alias host detection", () => {
-  test("accepts only a bounded healthy response from the allowlisted host", async () => {
+  test("accepts a bounded healthy response and reports the exact host version", async () => {
     let requested: Request | undefined;
     const version = await detectOpenCodeVersion(
       healthClient(
@@ -92,7 +91,6 @@ describe("native alias host detection", () => {
     );
 
     expect(version).toBe("1.18.3");
-    expect(SUPPORTED_OPENCODE_VERSIONS).toEqual(new Set(["1.18.3"]));
     expect(requested?.url).toBe("http://127.0.0.1:4096/global/health");
     expect(requested?.cache).toBe("no-store");
     expect(requested?.redirect).toBe("error");
