@@ -41,6 +41,59 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      - name: Check out release pull request
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+
+      - name: Check out released revision
+        if: steps.release.outputs.release_created == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.release.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Bun for release notes
+        if: steps.release.outputs.prs_created == 'true' || steps.release.outputs.release_created == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Sync curated release pull request notes
+        if: steps.release.outputs.prs_created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
+        run: |
+          notes="${RUNNER_TEMP}/release-notes.md"
+          body="${RUNNER_TEMP}/release-pr-body.md"
+          bun ./scripts/sync-release-notes-cli.ts sync CHANGELOG.md "${notes}"
+          if ! git diff --quiet -- CHANGELOG.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git commit -m "chore: sync curated release notes"
+            git push
+          fi
+          printf ':robot: I have created a release *beep* *boop*\n---\n\n' > "${body}"
+          cat "${notes}" >> "${body}"
+          printf '\n---\nThis PR was generated with [Release Please](https://github.com/googleapis/release-please).\n' >> "${body}"
+          gh pr edit "${PR_NUMBER}" --body-file "${body}"
+
+      - name: Sync GitHub release notes
+        if: steps.release.outputs.release_created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          notes="${RUNNER_TEMP}/release-notes.md"
+          bun ./scripts/sync-release-notes-cli.ts extract CHANGELOG.md "${RELEASE_VERSION}" "${notes}"
+          gh release edit "${RELEASE_TAG}" --notes-file "${notes}"
+
   publish:
     name: Publish npm package
     needs: release
