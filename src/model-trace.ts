@@ -27,6 +27,7 @@ export interface ToolTerminalEvent {
   protocolReason?: OracleReason;
   targetPath?: string;
   snapshotId?: string;
+  issuedSnapshotId?: string;
   rebase?: "none" | "unique";
 }
 
@@ -508,6 +509,12 @@ export function inspectJsonlTrace(
       const metadata = object(state.metadata);
       const snapshotId =
         partRecord.tool === "hashline_read" ? metadata?.snapshotId : input?.snapshotId;
+      const issuedSnapshotId =
+        status === "completed" &&
+        ["edit", "apply_patch", "hashline_edit"].includes(partRecord.tool) &&
+        typeof state.output === "string"
+          ? /(?:^|\n)@hashline snapshot=(s_[A-Za-z0-9_-]{22})(?:\s|$)/u.exec(state.output)?.[1]
+          : undefined;
       const rebase = input?.rebase === "unique" ? "unique" : "none";
       inspection.toolEvents.push({
         sequence: inspection.toolEvents.length,
@@ -522,6 +529,7 @@ export function inspectJsonlTrace(
         ...(protocol.marker === "absent" ? {} : { protocolReason: protocol.reason }),
         ...(targetPath === undefined ? {} : { targetPath }),
         ...(typeof snapshotId === "string" ? { snapshotId } : {}),
+        ...(issuedSnapshotId === undefined ? {} : { issuedSnapshotId }),
         ...(["edit", "apply_patch", "hashline_edit"].includes(partRecord.tool) ? { rebase } : {}),
       });
       if (status === "completed") increment(inspection.tools, partRecord.tool);

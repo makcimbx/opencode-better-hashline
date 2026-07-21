@@ -166,7 +166,7 @@ Transfer evaluation uses the separately versioned `transfer-v1` development task
 changing the 12-task transport baseline. Its eight checked-in exact-output tasks cover long-block
 copy, upward and downward moves, multiple independent transfers, a 5,000-line corridor, conflict
 recovery, duplicate source content, and a legacy-operation control. Deterministic mechanism scenarios
-separately cover source/destination shifts, relocation ambiguity, a write intersecting a copy source,
+separately cover source/destination shifts, relocation ambiguity, pre-edit copy semantics when a write intersects its source,
 and changed move corridors.
 
 Report `copy_range` and `move_range` independently. Copy can avoid retransmitting any sufficiently

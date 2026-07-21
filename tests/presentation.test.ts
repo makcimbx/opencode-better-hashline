@@ -35,19 +35,19 @@ describe("native alias presentation contracts", () => {
     };
     const serialized = JSON.stringify(providerContract);
 
-    expect(new TextEncoder().encode(serialized)).toHaveLength(3048);
+    expect(new TextEncoder().encode(serialized)).toHaveLength(3732);
     expect(createHash("sha256").update(serialized).digest("hex")).toBe(
-      "91950a6e54fb3d8b1bf66fcd2cdc6146f6ef2b86000277fa400af784c77407f6",
+      "c99baf32e55357a4dd9822c1b5017147067576fb5054a74563402c5f676e04cd",
     );
-    expect(schemaSha256).toBe("fcc372c6be3bee0bf11d25ebc95e4428aa742de94c59ad8cd24f6e491af2ad9e");
+    expect(schemaSha256).toBe("34336fe2e7a625533979c93d639e661d9a92b94b531c78ae6faa5589e8d906c9");
     expect(jsonSha256(openCodeProviderSchema(schema))).toBe(
-      "a7359841f93f0f111d5cb5cab8d747e0cf07cc130b683e97b8b75499a68a63d1",
+      "53887ee61c4554c8fe52320a8083a5546c148a578ce9d4f383b8b3e5fc51e0c3",
     );
     expect(jsonSha256(providerContract)).toBe(
-      "25c8a3347bcc37aa50878a1df43f5e13d64511ebed7a594f78c6e283436a2ed9",
+      "8111a2f79bac4e0c1e9ff1fea7b7bfa07965819fa5bab4e94a4601d7ea5efcfd",
     );
     expect(nativeAliasProtocolFingerprint(commonInput)).toBe(
-      "b7fe25d5a9f70c9c033103f6888819550a0f422b4c3804ba1470aad280a2bc61",
+      "5817b34f11b60cf7569f900361abe648168e73eb6b128490cc71621553507a21",
     );
   });
 

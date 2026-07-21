@@ -328,7 +328,7 @@ export async function publishReplacement(input: {
   maxBytes: number;
   signal: AbortSignal;
   consume: () => void;
-}): Promise<void> {
+}): Promise<StableFile> {
   const { resolved, expected, replacement, maxBytes, signal, consume } = input;
   throwIfAborted(signal);
   await assertAliasStable(resolved);
@@ -397,6 +397,7 @@ export async function publishReplacement(input: {
     if (!bytesEqual(verified.bytes, replacement)) {
       fail("RACE_AFTER_WRITE", "The published file was changed by another writer.");
     }
+    return verified;
   } finally {
     if (temporaryExists) await rm(temporaryPath, { force: true });
   }

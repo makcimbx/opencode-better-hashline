@@ -39,7 +39,7 @@ The snapshot store distinguishes bytes retained by the process from line referen
 
 `planEdits` receives base and current immutable text documents and returns final text/bytes or a stable rejection. It performs no I/O and asks no permission. This makes exhaustive and property testing possible without weakening the filesystem path.
 
-Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy reads retained logical texts and inserts them with destination-local EOL rules. Move rewrites one source-to-destination corridor by permuting texts over fixed positional EOL slots. A declarative read/write effect graph rejects dependencies instead of giving operation array order sequential meaning. Projected text statistics compose CRLF across planned segment boundaries; after bounded projection, every move is rendered lazily and reparsed to prove that its expected logical texts and positional EOL slots remain representable.
+Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy reads retained pre-edit logical texts and inserts them with destination-local EOL rules, even when another operation writes across its source. Move rewrites one source-to-destination corridor by permuting texts over fixed positional EOL slots. A declarative write-footprint graph rejects intersecting destructive spans, internal insertion destinations, and duplicate insertion destinations instead of giving operation array order sequential meaning. Projected text statistics compose CRLF across planned segment boundaries; after bounded projection, every move is rendered lazily and reparsed to prove that its expected logical texts and positional EOL slots remain representable.
 
 ### Permissions approve a fixed plan
 
@@ -71,7 +71,7 @@ still cannot be attested, so this surface does not replace the unique-ID recomme
 
 Snapshots are process-memory objects. Retained weight accounts for raw bytes plus decoded UTF-16 text. Limits apply globally, per session, and per session/path. LRU and TTL eviction skip pinned edits. If all eligible entries are pinned or one file cannot fit the configured budget, the operation rejects rather than exceeding the budget silently.
 
-A successful or attempted publication transition invalidates prior snapshots for the path. The agent must reread before another edit. Multiple exact reads can reuse one retained snapshot only when digest and bytes both match.
+A successful or attempted publication transition invalidates prior snapshots for the path. By default the agent must reread before another edit. With explicit `readback: true`, the post-rename exact verification bytes may instead create a new snapshot near the changed hunk. Its refs are issued only after the after-hook attests delivery; a failed continuation never changes the already-completed write into a reported mutation failure. Multiple exact reads can reuse one retained snapshot only when digest and bytes both match.
 
 ## Filesystem Model
 

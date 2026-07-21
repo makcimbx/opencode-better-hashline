@@ -48,13 +48,15 @@ describe("snapshot store", () => {
     expect(() => store.peek(scope, snapshot.id)).toThrow("SNAPSHOT_UNKNOWN:");
   });
 
-  test("invalidates all revisions for a path and delays pinned removal", () => {
-    const store = new SnapshotStore(options());
+  test("invalidates pinned revisions and admits a successor at the per-path limit", () => {
+    const store = new SnapshotStore(options({ maxSnapshotsPerPath: 1 }));
     const first = store.remember(scope, "/worktree/file.ts", document("a"));
     const pinned = store.pin(scope, first.id);
     store.invalidatePath(scope, "/worktree/file.ts");
     expect(pinned.invalid).toBe(true);
     expect(() => store.peek(scope, first.id)).toThrow("SNAPSHOT_UNKNOWN:");
+    const successor = store.remember(scope, "/worktree/file.ts", document("b"));
+    expect(() => store.peek(scope, successor.id)).not.toThrow();
     store.release(pinned);
     expect(() => store.peek(scope, first.id)).toThrow("SNAPSHOT_UNKNOWN:");
   });

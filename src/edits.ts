@@ -96,7 +96,6 @@ type PlannedChange = ChangeLocation & {
 };
 
 type Effect = {
-  read?: LineSpan;
   destructive?: LineSpan;
   insertion?: number;
 };
@@ -247,8 +246,8 @@ function changesOverlap(left: ChangeLocation, right: ChangeLocation): boolean {
   const leftInsertion = left.start === left.end;
   const rightInsertion = right.start === right.end;
   if (leftInsertion && rightInsertion) return left.start === right.start;
-  if (leftInsertion) return left.start >= right.start && left.start <= right.end;
-  if (rightInsertion) return right.start >= left.start && right.start <= left.end;
+  if (leftInsertion) return left.start > right.start && left.start < right.end;
+  if (rightInsertion) return right.start > left.start && right.start < left.end;
   return left.start < right.end && right.start < left.end;
 }
 
@@ -278,7 +277,6 @@ function spansIntersect(left: LineSpan, right: LineSpan): boolean {
 }
 
 function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean): void {
-  let readWriteConflict = false;
   let destructiveConflict = false;
   let insertionDestructiveConflict = false;
   let insertionConflict = false;
@@ -287,12 +285,6 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
       const first = effects[left];
       const second = effects[right];
       if (!first || !second) continue;
-      if (
-        (first.read && second.destructive && spansIntersect(first.read, second.destructive)) ||
-        (second.read && first.destructive && spansIntersect(second.read, first.destructive))
-      ) {
-        readWriteConflict = true;
-      }
       if (
         first.destructive &&
         second.destructive &&
@@ -307,8 +299,8 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
         if (
           insertion !== undefined &&
           destructive &&
-          insertion >= destructive.start &&
-          insertion <= destructive.end
+          insertion > destructive.start &&
+          insertion < destructive.end
         ) {
           insertionDestructiveConflict = true;
         }
@@ -323,34 +315,28 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
     }
   }
 
-  if (readWriteConflict) {
-    fail(
-      "OPERATIONS_OVERLAP",
-      relocated
-        ? "A relocated transfer source intersects another operation's write range."
-        : "A transfer source intersects another operation's write range.",
-    );
-  }
   if (destructiveConflict) {
     fail(
       "OPERATIONS_OVERLAP",
-      relocated ? "Relocated destructive ranges overlap." : "Destructive ranges overlap.",
+      relocated
+        ? "Relocated destructive write ranges overlap. Merge them into one replacement, or split the edits."
+        : "Destructive write ranges overlap. Merge them into one replacement, or split the edits.",
     );
   }
   if (insertionDestructiveConflict) {
     fail(
       "OPERATIONS_OVERLAP",
       relocated
-        ? "A relocated insertion touches a destructive range boundary."
-        : "An insertion touches a destructive range boundary.",
+        ? "A relocated insertion is inside a destructive write range. Fold it into the replacement, or split the edits."
+        : "An insertion is inside a destructive write range. Fold it into the replacement, or split the edits.",
     );
   }
   if (insertionConflict) {
     fail(
       "OPERATIONS_OVERLAP",
       relocated
-        ? "Relocated insertions use the same boundary."
-        : "Multiple insertions use the same snapshot boundary.",
+        ? "Relocated insertions use the same boundary. Combine them into one insertion in the desired order."
+        : "Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
     );
   }
 }
@@ -365,7 +351,10 @@ function assertLegacyBaseOperationsCompatible(
       if (!first || !second) continue;
       if (first.op === "insert" && second.op === "insert") {
         if (first.afterLine === second.afterLine) {
-          fail("OPERATIONS_OVERLAP", "Multiple insertions use the same snapshot boundary.");
+          fail(
+            "OPERATIONS_OVERLAP",
+            "Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+          );
         }
         continue;
       }
@@ -375,8 +364,11 @@ function assertLegacyBaseOperationsCompatible(
       if (insertion && replacement) {
         const start = replacement.startLine - 1;
         const end = replacement.endLine;
-        if (insertion.afterLine >= start && insertion.afterLine <= end) {
-          fail("OPERATIONS_OVERLAP", "An insertion touches a replacement range boundary.");
+        if (insertion.afterLine > start && insertion.afterLine < end) {
+          fail(
+            "OPERATIONS_OVERLAP",
+            "An insertion is inside a replacement range. Fold it into the replacement, or split the edits.",
+          );
         }
         continue;
       }
@@ -386,7 +378,10 @@ function assertLegacyBaseOperationsCompatible(
         first.startLine - 1 < second.endLine &&
         second.startLine - 1 < first.endLine
       ) {
-        fail("OPERATIONS_OVERLAP", "Replacement ranges overlap in the snapshot.");
+        fail(
+          "OPERATIONS_OVERLAP",
+          "Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits.",
+        );
       }
     }
   }
@@ -398,22 +393,19 @@ function baseEffect(operation: Exclude<EditOperation, ReplaceFileOperation>): Ef
   }
   if (operation.op === "insert") return { insertion: operation.afterLine };
   if (operation.op === "copy_range") {
-    return {
-      read: rangeFor(operation.startLine, operation.endLine),
-      insertion: operation.afterLine,
-    };
+    return { insertion: operation.afterLine };
   }
   const corridor = moveCorridorSpan(operation);
-  return { read: corridor, destructive: corridor };
+  return { destructive: corridor };
 }
 
 function mappedEffect(operation: MappedOperation): Effect {
   if (operation.op === "replace") return { destructive: operation.target };
   if (operation.op === "insert") return { insertion: operation.destination };
   if (operation.op === "copy_range") {
-    return { read: operation.source, insertion: operation.destination };
+    return { insertion: operation.destination };
   }
-  return { read: operation.corridor, destructive: operation.corridor };
+  return { destructive: operation.corridor };
 }
 
 function renderWholeFile(

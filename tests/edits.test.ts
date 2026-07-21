@@ -113,19 +113,25 @@ describe("line edit planning", () => {
         { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
         { op: "replace", startLine: 2, endLine: 2, lines: ["y"] },
       ]),
-    ).toThrow("OPERATIONS_OVERLAP: Replacement ranges overlap in the snapshot.");
+    ).toThrow(
+      "OPERATIONS_OVERLAP: Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits.",
+    );
     expect(() =>
       plan("a\nb\n", "a\nb\n", [
         { op: "insert", afterLine: 1, lines: ["x"] },
         { op: "insert", afterLine: 1, lines: ["y"] },
       ]),
-    ).toThrow("OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary.");
+    ).toThrow(
+      "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+    );
     expect(() =>
       plan("a\nb\n", "a\nb\n", [
-        { op: "replace", startLine: 1, endLine: 1, lines: ["x"] },
+        { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
         { op: "insert", afterLine: 1, lines: ["y"] },
       ]),
-    ).toThrow("OPERATIONS_OVERLAP: An insertion touches a replacement range boundary.");
+    ).toThrow(
+      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits.",
+    );
     expect(() => plan("a\n", "a\n", [{ op: "insert", afterLine: 1, lines: [] }])).toThrow(
       "INVALID_ARGUMENT:",
     );
@@ -135,6 +141,30 @@ describe("line edit planning", () => {
     expect(() =>
       plan("a\n", "a\n", [{ op: "replace", startLine: 1, endLine: 1, lines: ["x\ny"] }]),
     ).toThrow("INVALID_ARGUMENT:");
+  });
+
+  test("allows insertions at destructive range boundaries independent of array order", () => {
+    const cases: Array<{ operations: EditOperation[]; expected: string }> = [
+      {
+        operations: [
+          { op: "replace", startLine: 1, endLine: 1, lines: ["A"] },
+          { op: "insert", afterLine: 1, lines: ["between"] },
+        ],
+        expected: "A\nbetween\nb\n",
+      },
+      {
+        operations: [
+          { op: "replace", startLine: 2, endLine: 2, lines: ["B"] },
+          { op: "insert", afterLine: 1, lines: ["between"] },
+        ],
+        expected: "a\nbetween\nB\n",
+      },
+    ];
+
+    for (const { operations, expected } of cases) {
+      expect(plan("a\nb\n", "a\nb\n", operations).text).toBe(expected);
+      expect(plan("a\nb\n", "a\nb\n", [...operations].reverse()).text).toBe(expected);
+    }
   });
 
   test("keeps replace_file exclusive and strict", () => {

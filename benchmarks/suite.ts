@@ -428,7 +428,7 @@ export function scenarios(): Scenario[] {
       operations: [{ op: "move_range", startLine: 5, endLine: 5, afterLine: 2 }],
     },
     {
-      id: "copy-read-write-conflict",
+      id: "copy-read-write-pre-edit",
       category: "transfer-overlap",
       base: "a\nb\nc\nd\ne\n",
       current: "a\nb\nc\nd\ne\n",
@@ -436,6 +436,7 @@ export function scenarios(): Scenario[] {
         { op: "copy_range", startLine: 2, endLine: 3, afterLine: 5 },
         { op: "replace", startLine: 3, endLine: 3, lines: ["changed"] },
       ],
+      expectedText: "a\nb\nchanged\nd\ne\nb\nc\n",
     },
     {
       id: "empty-file-boundary-changed",

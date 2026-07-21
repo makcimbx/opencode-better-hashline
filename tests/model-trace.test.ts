@@ -391,9 +391,11 @@ describe("model benchmark trace inspection", () => {
             input: {
               filePath: "package.json",
               snapshotId: "s_1234567890123456789012",
+              readback: true,
               operations: [{ op: "replace_file", lines: [] }],
             },
-            output: "Applied 1 operation.",
+            output:
+              "Applied 1 operation.\n@hashline snapshot=s_abcdefghijklmnopqrstuv sha256=123456789abc lines=0\n@eof",
             title: "Edit package.json",
             metadata,
             time: { start: 1, end: 2 },
@@ -431,6 +433,7 @@ describe("model benchmark trace inspection", () => {
     expect(trace.toolEvents[0]).toMatchObject({
       protocolMarker: "valid",
       targetPath: "package.json",
+      issuedSnapshotId: "s_abcdefghijklmnopqrstuv",
     });
 
     const mismatchedExport = JSON.parse(sessionExport) as {

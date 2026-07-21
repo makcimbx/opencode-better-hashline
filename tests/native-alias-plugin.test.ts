@@ -509,7 +509,10 @@ describe("native alias argument and mutation contract", () => {
       });
       const tools = aliasRegistry(value);
       const readResult = await issueSnapshot(value, toolContext, "file.txt");
-      const args = replaceArgs("file.txt", String(readResult.metadata.snapshotId));
+      const args = {
+        ...replaceArgs("file.txt", String(readResult.metadata.snapshotId)),
+        readback: true,
+      };
       currentInput = args;
 
       await value["tool.execute.before"]?.(
@@ -519,8 +522,15 @@ describe("native alias argument and mutation contract", () => {
       const result = structured(
         await tools[surface === "edit" ? "edit" : "applyPatch"].execute(args, toolContext),
       );
+      expect(result.metadata.hashlinePending).toEqual(expect.any(String));
+      await value["tool.execute.after"]?.(
+        { tool: surface, sessionID: toolContext.sessionID, callID: "edit-call", args },
+        result,
+      );
 
-      expect(result.output).toBe("Applied 1 operation. Reread before the next edit.");
+      expect(result.output).toContain("Applied 1 operation.\n@hashline snapshot=");
+      expect(result.output).toContain("2|TWO");
+      expect(result.metadata.hashlinePending).toBeUndefined();
       expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\nTWO\nthree\n");
       expect(asks.map(({ permission }) => permission)).toEqual(["read", "edit"]);
       expect(historyCalls).toEqual([toolContext.sessionID]);

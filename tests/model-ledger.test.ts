@@ -147,6 +147,24 @@ describe("model mutation ledger", () => {
     expect(inspectMutationLedger(task, reread, "native-aliases").valid).toBe(true);
   });
 
+  test("accepts an attested edit readback as the next eligible snapshot", () => {
+    const inspection = trace([
+      event("hashline_read", "src/a.ts", { sequence: 0, snapshotId: "snapshot:first" }),
+      event("edit", "src/a.ts", {
+        sequence: 1,
+        snapshotId: "snapshot:first",
+        issuedSnapshotId: "snapshot:successor",
+      }),
+      event("edit", "src/a.ts", { sequence: 2, snapshotId: "snapshot:successor" }),
+      event("hashline_write", "src/new.ts", { sequence: 3 }),
+    ]);
+
+    expect(inspectMutationLedger(task, inspection, "native-aliases")).toMatchObject({
+      valid: true,
+      missing: [],
+    });
+  });
+
   test("preserves eligible snapshots for other files after an edit", () => {
     const inspection = trace([
       event("hashline_read", "src/a.ts", { sequence: 0, snapshotId: "snapshot:a" }),

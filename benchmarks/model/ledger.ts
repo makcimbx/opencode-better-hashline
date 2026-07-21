@@ -78,6 +78,15 @@ export function inspectMutationLedger(
       for (const [snapshotId, snapshotPath] of eligibleSnapshots) {
         if (snapshotPath === targetPath) eligibleSnapshots.delete(snapshotId);
       }
+      if (event.issuedSnapshotId) {
+        const boundPath = snapshotBindings.get(event.issuedSnapshotId);
+        if (boundPath !== undefined && boundPath !== targetPath) {
+          missing.push(`edit-readback-snapshot:${targetPath}`);
+        } else {
+          snapshotBindings.set(event.issuedSnapshotId, targetPath);
+          eligibleSnapshots.set(event.issuedSnapshotId, targetPath);
+        }
+      }
       continue;
     }
     if (event.tool === "hashline_write") {

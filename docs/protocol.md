@@ -101,6 +101,7 @@ Tool: `hashline_edit`, or `edit`/`apply_patch` on the explicit native-alias surf
   "filePath": "src/example.ts",
   "snapshotId": "s_J7yi7wDyv3j9xQ2zP5kL8A",
   "rebase": "none",
+  "readback": true,
   "operations": [
     { "op": "replace", "startLine": 4, "endLine": 6, "lines": ["replacement"] },
     { "op": "insert", "afterLine": 9, "lines": ["inserted"] }
@@ -125,7 +126,12 @@ are rejected rather than ignored.
 
 At the top level, `rebase` is optional and defaults to `"none"`. `allowHashlinePrefixes` affects only
 literal `replace`, `insert`, and `replace_file` payloads; leave it omitted unless an `N|` or
-`@hashline`-style prefix is intentional file content.
+`@hashline`-style prefix is intentional file content. `readback` is optional and defaults to `false`.
+Set it to `true` only when a dependent follow-up edit is expected. After successful publication, the
+result then includes a bounded page from a new snapshot near the first changed hunk. The old snapshot
+remains invalid. The successor's refs become editable only after the same output-digest, marker, and
+truncation checks used by `hashline_read`. If those checks fail, the write remains successful but the
+result requires a normal `hashline_read` before another edit.
 
 ### Replace
 
@@ -146,7 +152,7 @@ literal `replace`, `insert`, and `replace_file` payloads; leave it omitted unles
 }
 ```
 
-`startLine..endLine` is an inclusive source range and `afterLine` is a destination boundary. All coordinates refer to the supplied immutable snapshot. Copy inserts the retained logical source texts using the same destination-local EOL rule as `insert`; it does not promise to retain the source delimiters or final-newline state. The entire source and the destination boundary must have been issued. A destination inside the copy's own source is valid.
+`startLine..endLine` is an inclusive source range and `afterLine` is a destination boundary. All coordinates refer to the supplied immutable snapshot. Copy inserts the retained pre-edit logical source texts using the same destination-local EOL rule as `insert`; it does not promise to retain the source delimiters or final-newline state. The entire source and the destination boundary must have been issued. A destination inside the copy's own source is valid. A replacement or move may also write across the copy source; the copied payload still comes from the immutable pre-batch document.
 
 ### Move Range
 
@@ -196,9 +202,9 @@ Explicit recovery for cooperative edits. A replacement range relocates only when
 
 An insertion relocates only when both original neighboring line tokens remain adjacent at the selected base boundary and all successful bounded signatures agree on one boundary. BOF/EOF require a bounded prefix/suffix that occurs only at the corresponding current edge; copied edge evidence is ambiguous. A concurrent insertion at the same boundary invalidates the boundary.
 
-In a transfer-containing batch, every source range, destination boundary, move corridor, replacement range, and insertion boundary is mapped canonically through one cumulative work budget. Copy source and destination anchors relocate independently. Move source, corridor, and destination anchors also relocate independently, then must retain their exact geometric relationship. Pairwise range and boundary relations must remain equal to the base snapshot. Any insertion or change inside a move corridor rejects rather than being incorporated into the move.
+In a transfer-containing batch, every source range, destination boundary, move corridor, replacement range, and insertion boundary is mapped canonically through one cumulative work budget. Copy source and destination anchors relocate independently. Move source, corridor, and destination anchors also relocate independently, then must retain their exact geometric relationship. Pairwise range and boundary relations must remain equal to the base snapshot. A destructive span intersecting a move corridor or an insertion destination strictly inside it rejects rather than being incorporated into the move; a read-only copy source may intersect it.
 
-This global topology and canonical anchor ordering applies only to batches containing `copy_range` or `move_range`. Transfer-free batches retain the pre-transfer mapper order, work consumption, output bytes, and error behavior for compatibility. Consequently, adding a transfer to an otherwise unchanged legacy batch can expose a global topology ambiguity and return `AMBIGUOUS_RELOCATION`.
+This global topology and canonical anchor ordering applies only to batches containing `copy_range` or `move_range`. Transfer-free batches retain the pre-transfer mapper order, work consumption, and output bytes for batches that remain valid. Consequently, adding a transfer to an otherwise unchanged legacy batch can expose a global topology ambiguity and return `AMBIGUOUS_RELOCATION`.
 
 There is no fuzzy normalization, whitespace tolerance, nearest candidate, conflict marker, or fallback from strict to unique.
 
@@ -245,6 +251,8 @@ For an existing file:
 11. Invalidate all snapshots for this session/path immediately before publication.
 12. Attempt one rename over the canonical target.
 13. Reread and verify the resulting bytes.
+14. When `readback: true`, retain those verified bytes as a new snapshot and render a bounded page.
+15. Issue the successor refs only after `tool.execute.after` attests the delivered output.
 
 No rebase or diff change occurs after permission approval. If state changed while approval was pending, publication rejects.
 
@@ -257,17 +265,16 @@ A one-file operation array is validation-atomic: all operations are parsed, issu
 The array is declarative, not a sequential program, and array order cannot resolve conflicts. Every source is read from the immutable pre-batch document. The batch rejects:
 
 - overlapping destructive spans;
-- a copy source intersecting another operation's destructive span or move corridor;
 - insertions or copy destinations sharing a boundary;
-- any insertion boundary at either end of or inside a destructive span;
-- any other operation intersecting a move corridor.
+- any insertion or copy destination strictly inside a destructive span.
 
-Immediately adjacent, non-intersecting destructive spans are valid. Overlapping copy sources and otherwise independent mixed or multiple transfer operations are valid. Conflict rules are checked both before and after unique relocation.
+Immediately adjacent, non-intersecting destructive spans are valid. An insertion-like destination may touch either destructive endpoint. Copy sources may overlap other reads or writes because they always read the immutable pre-batch document. Conflict rules are checked both before and after unique relocation.
 
 If a transfer-containing batch has several conflict classes, diagnostics use one global precedence:
-transfer read/write dependency, destructive intersection, insertion touching a destructive span, then
-duplicate insertion boundary. Request-array order therefore changes neither the error code nor its
-diagnostic text. Transfer-free batches retain the released `0.1.1` overlap diagnostics.
+destructive intersection, insertion strictly inside a destructive span, then duplicate insertion
+boundary. Request-array order therefore changes neither the error code nor its diagnostic text.
+Diagnostics include a repair hint to merge overlapping destructive payloads, fold an internal
+insertion into its replacement, or combine same-boundary insertions in the intended order.
 
 An individually byte-identical `move_range` rejects the entire batch with `NO_CHANGE`, including when another member would change the file. This intentionally treats an identity move as a model-addressing error. Legacy no-op `replace` or `insert` members retain aggregate behavior: they are accepted when the final batch changes bytes.
 
