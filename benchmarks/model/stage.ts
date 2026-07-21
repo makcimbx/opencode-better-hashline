@@ -3,12 +3,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { captureBoundedProcess } from "../../src/process-capture.js";
 import {
-  loadCommittedPilotV6ApprovalAnchor,
-  PILOT_V6_APPROVAL_ANCHOR_PATH,
-  type PilotV6ApprovalAnchor,
-  parsePilotV6ApprovalAnchor,
-  validatePilotV6ApprovalCommit,
-  validatePilotV6ExternalApprovalBundle,
+  loadCommittedPilotV7ApprovalAnchor,
+  PILOT_V7_APPROVAL_ANCHOR_PATH,
+  type PilotV7ApprovalAnchor,
+  parsePilotV7ApprovalAnchor,
+  validatePilotV7ApprovalCommit,
+  validatePilotV7ExternalApprovalBundle,
 } from "./approval.js";
 import { buildRunnerBundle, readApprovedRunner, type StagedRunner } from "./stage-runner.js";
 
@@ -61,24 +61,24 @@ async function launch(): Promise<number> {
   try {
     let runner: StagedRunner;
     if (nativePilot && paid) {
-      let anchor: PilotV6ApprovalAnchor;
+      let anchor: PilotV7ApprovalAnchor;
       try {
-        anchor = await loadCommittedPilotV6ApprovalAnchor({
+        anchor = await loadCommittedPilotV7ApprovalAnchor({
           repository,
           commit: identity.commit,
         });
       } catch (error) {
         if (!identity.dirty) throw error;
-        const workingAnchor = parsePilotV6ApprovalAnchor(
-          await readFile(join(repository, PILOT_V6_APPROVAL_ANCHOR_PATH)),
+        const workingAnchor = parsePilotV7ApprovalAnchor(
+          await readFile(join(repository, PILOT_V7_APPROVAL_ANCHOR_PATH)),
         );
         if (workingAnchor.approval !== null) throw error;
-        throw new Error("Pilot v6 remains hard-disabled by its committed null approval anchor.");
+        throw new Error("Pilot v7 remains hard-disabled by its committed null approval anchor.");
       }
       if (anchor.approval === null) {
-        throw new Error("Pilot v6 remains hard-disabled by its committed null approval anchor.");
+        throw new Error("Pilot v7 remains hard-disabled by its committed null approval anchor.");
       }
-      const approvalCommit = await validatePilotV6ApprovalCommit({
+      const approvalCommit = await validatePilotV7ApprovalCommit({
         repository,
         approvalCommit: identity.commit,
       });
@@ -87,7 +87,7 @@ async function launch(): Promise<number> {
         throw new Error("Paid native-alias execution requires --external-approval-bundle.");
       }
       const externalApprovalBytes = new Uint8Array(await readFile(externalApprovalPath));
-      const approval = validatePilotV6ExternalApprovalBundle(externalApprovalBytes, approvalCommit);
+      const approval = validatePilotV7ExternalApprovalBundle(externalApprovalBytes, approvalCommit);
       if (!approvedRunner) {
         throw new Error(
           "Paid native-alias execution requires an exact approved runner executable.",

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { inspectMutationLedger } from "../benchmarks/model/ledger.js";
-import type { ModelTask } from "../benchmarks/model/tasks.js";
+import { type ModelTask, modelTasks } from "../benchmarks/model/tasks.js";
 import type { ToolTerminalEvent, TraceInspection } from "../benchmarks/model/trace.js";
 
 const task: ModelTask = {
@@ -21,6 +21,14 @@ const creationTask: ModelTask = {
     "src/.gitkeep": "",
     "src/version.ts": 'export const version = "1.0.0";\n',
   },
+};
+
+const multiFileTask: ModelTask = {
+  id: "multi-file-ledger",
+  category: "multi-file",
+  prompt: "fixture",
+  files: { "src/a.ts": "old a\n", "src/b.ts": "old b\n" },
+  expectedFiles: { "src/a.ts": "new a\n", "src/b.ts": "new b\n" },
 };
 
 function event(
@@ -137,6 +145,113 @@ describe("model mutation ledger", () => {
       event("hashline_write", "src/new.ts", { sequence: 4 }),
     ]);
     expect(inspectMutationLedger(task, reread, "native-aliases").valid).toBe(true);
+  });
+
+  test("preserves eligible snapshots for other files after an edit", () => {
+    const inspection = trace([
+      event("hashline_read", "src/a.ts", { sequence: 0, snapshotId: "snapshot:a" }),
+      event("hashline_read", "src/b.ts", { sequence: 1, snapshotId: "snapshot:b" }),
+      event("edit", "src/a.ts", { sequence: 2, snapshotId: "snapshot:a" }),
+      event("edit", "src/b.ts", { sequence: 3, snapshotId: "snapshot:b" }),
+    ]);
+
+    expect(inspectMutationLedger(multiFileTask, inspection, "native-aliases")).toMatchObject({
+      valid: true,
+      changed: ["src/a.ts", "src/b.ts"],
+      missing: [],
+    });
+  });
+
+  test("accepts idempotent rereads of the same unchanged snapshot", () => {
+    const inspection = trace([
+      event("hashline_read", "src/a.ts", { sequence: 0, snapshotId: "snapshot:a" }),
+      event("hashline_read", "src/b.ts", { sequence: 1, snapshotId: "snapshot:b" }),
+      event("edit", "src/a.ts", { sequence: 2, snapshotId: "snapshot:a" }),
+      event("hashline_read", "src/b.ts", { sequence: 3, snapshotId: "snapshot:b" }),
+      event("edit", "src/b.ts", { sequence: 4, snapshotId: "snapshot:b" }),
+    ]);
+
+    expect(inspectMutationLedger(multiFileTask, inspection, "native-aliases")).toMatchObject({
+      valid: true,
+      missing: [],
+    });
+  });
+
+  test("retains permanent snapshot path bindings after invalidation", () => {
+    for (const surface of ["hashline", "native-aliases"] as const) {
+      const editTool = surface === "hashline" ? "hashline_edit" : "edit";
+      const inspection = trace([
+        event("hashline_read", "src/a.ts", { sequence: 0, snapshotId: "snapshot:shared" }),
+        event(editTool, "src/a.ts", { sequence: 1, snapshotId: "snapshot:shared" }),
+        event("hashline_read", "src/b.ts", { sequence: 2, snapshotId: "snapshot:shared" }),
+        event(editTool, "src/b.ts", { sequence: 3, snapshotId: "snapshot:shared" }),
+      ]);
+
+      expect(inspectMutationLedger(multiFileTask, inspection, surface)).toMatchObject({
+        valid: false,
+        missing: ["read-snapshot:src/b.ts", "edit-snapshot:src/b.ts"],
+      });
+    }
+  });
+
+  test("invalidates every issued snapshot only for the edited file", () => {
+    const inspection = trace([
+      event("hashline_read", "src/a.ts", { sequence: 0, snapshotId: "snapshot:a:first" }),
+      event("hashline_read", "src/a.ts", { sequence: 1, snapshotId: "snapshot:a:second" }),
+      event("hashline_read", "src/b.ts", { sequence: 2, snapshotId: "snapshot:b" }),
+      event("edit", "src/a.ts", { sequence: 3, snapshotId: "snapshot:a:first" }),
+      event("edit", "src/a.ts", { sequence: 4, snapshotId: "snapshot:a:second" }),
+      event("edit", "src/b.ts", { sequence: 5, snapshotId: "snapshot:b" }),
+    ]);
+
+    expect(inspectMutationLedger(multiFileTask, inspection, "native-aliases")).toMatchObject({
+      valid: false,
+      missing: ["edit-snapshot:src/a.ts"],
+    });
+  });
+
+  test("accepts the read-all then mutate-all plan for every baseline task and surface", () => {
+    for (const surface of ["hashline", "native-aliases"] as const) {
+      for (const baselineTask of modelTasks) {
+        const events: ToolTerminalEvent[] = [];
+        const changed = Object.keys(baselineTask.expectedFiles).filter(
+          (path) =>
+            baselineTask.files[path] !== undefined &&
+            baselineTask.files[path] !== baselineTask.expectedFiles[path],
+        );
+        const created = Object.keys(baselineTask.expectedFiles).filter(
+          (path) => baselineTask.files[path] === undefined,
+        );
+        let sequence = 0;
+
+        for (const path of changed) {
+          events.push(
+            event("hashline_read", path, {
+              sequence: sequence++,
+              snapshotId: `snapshot:${baselineTask.id}:${path}`,
+            }),
+          );
+        }
+        for (const path of changed) {
+          events.push(
+            event(surface === "hashline" ? "hashline_edit" : "edit", path, {
+              sequence: sequence++,
+              snapshotId: `snapshot:${baselineTask.id}:${path}`,
+            }),
+          );
+        }
+        for (const path of created) {
+          events.push(event("hashline_write", path, { sequence: sequence++ }));
+        }
+
+        expect(inspectMutationLedger(baselineTask, trace(events), surface)).toMatchObject({
+          valid: true,
+          missing: [],
+          unauthorized: [],
+          wrongExecutor: [],
+        });
+      }
+    }
   });
 
   test("rejects errored mutation attempts outside the task manifest", () => {

@@ -140,6 +140,8 @@ export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 export const hashlineEditDescription =
   'Atomically edit one exact hashline_read snapshot. Pass snapshotId as a top-level string and operations as a JSON array of operation objects; never encode arguments as text or XML. Minimal replace shape: {"filePath":"path","snapshotId":"s_...","operations":[{"op":"replace","startLine":1,"endLine":1,"lines":["replacement"]}]}. Use only fields listed for each op; finalNewline is replace_file-only. replace_file must be sole and use rebase:none. All coordinates use one immutable pre-batch snapshot; transfers read pre-edit source; afterLine is never adjusted for moves/deletes. replace lines:[] deletes; insert forbids []; use replace_file with lines:[],finalNewline:false for an empty file. lines:[""] is one empty logical value and may only alter EOL bytes. unique rebase is exact, unchanged, ambiguity-rejecting, and never fuzzy.';
 
+export const nativeAliasEditDescription = `${hashlineEditDescription} Never issue edit or apply_patch calls concurrently or in the same assistant message. For multiple files, call one edit tool, wait for its result, then call the next.`;
+
 type SnapshotEditToolName = "hashline_edit" | "edit" | "apply_patch";
 
 type SnapshotBoundEditExecutor = (
@@ -151,9 +153,10 @@ type SnapshotBoundEditExecutor = (
 function createSnapshotEditTool(
   toolName: SnapshotEditToolName,
   executeSnapshotBoundEdit: SnapshotBoundEditExecutor,
+  description = hashlineEditDescription,
 ) {
   return tool({
-    description: hashlineEditDescription,
+    description,
     args: editArgumentShape,
     execute(rawArgs, context) {
       return executeSnapshotBoundEdit(toolName, rawArgs, context);
@@ -738,8 +741,16 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   }
 
   const hashlineEdit = createSnapshotEditTool("hashline_edit", executeSnapshotBoundEdit);
-  const nativeEdit = createSnapshotEditTool("edit", executeSnapshotBoundEdit);
-  const nativeApplyPatch = createSnapshotEditTool("apply_patch", executeSnapshotBoundEdit);
+  const nativeEdit = createSnapshotEditTool(
+    "edit",
+    executeSnapshotBoundEdit,
+    nativeAliasEditDescription,
+  );
+  const nativeApplyPatch = createSnapshotEditTool(
+    "apply_patch",
+    executeSnapshotBoundEdit,
+    nativeAliasEditDescription,
+  );
 
   const hashlineWrite = tool({
     description:
@@ -896,7 +907,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           : options.toolSurface === "native-aliases" && aliasAvailabilityError
             ? `Better Hashline native aliases are unavailable and file mutation is disabled: ${aliasAvailabilityError}`
             : options.toolSurface === "native-aliases"
-              ? "Better Hashline native aliases are active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then the available edit or apply_patch tool with the Better Hashline snapshot operation schema. Pass snapshotId as a top-level string and operations as a JSON array, never as encoded text or XML. hashline_write is CREATE ONLY: never call it after hashline_read or for an existing path. Native write and hashline_edit are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content. This experimental surface requires OpenCode 1.18.3, a new session after configuration changes, and Better Hashline to be the last plugin defining edit or apply_patch."
+              ? "Better Hashline native aliases are active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then the available edit or apply_patch tool with the Better Hashline snapshot operation schema. Never issue edit or apply_patch calls concurrently or in the same assistant message; for multiple files, wait for each tool result before calling the next. Pass snapshotId as a top-level string and operations as a JSON array, never as encoded text or XML. hashline_write is CREATE ONLY: never call it after hashline_read or for an existing path. Native write and hashline_edit are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content. This experimental surface requires OpenCode 1.18.3, a new session after configuration changes, and Better Hashline to be the last plugin defining edit or apply_patch."
               : options.enforce
                 ? "Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. Use hashline_write only to create a new file. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content."
                 : "Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files. Native editing tools remain enabled by configuration.",

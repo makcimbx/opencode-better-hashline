@@ -1,0 +1,74 @@
+{
+  "accounting": {
+    "accountedCostUpperBoundUsd": null,
+    "accountedRequestsUpperBound": 109,
+    "accountingComplete": false,
+    "observedRequests": 97,
+    "reportedCostUsd": 0
+  },
+  "approval": {
+    "approvalCommit": "7c01cf63af417024046c8847ad0ea33a7d1a48b6",
+    "candidateCommit": "6a656ddd54ddb77aef3500fbad2880c977ab600a",
+    "externalBundleSha256": "ba5ac922badf1a31763d91440de1113a75461d658ad1a489ac93c144fcd4cbde"
+  },
+  "evidence": {
+    "failedSessionSanitizedExport": {
+      "bytes": 23370,
+      "sha256": "d3e2bb5b74a24e2c3ee0caf9cfadcc4a669f98d52a21bc875362bd8788d1d5e4"
+    },
+    "failedSessionTrace": {
+      "bytes": 14015,
+      "sha256": "dc9e5f93d304bec9dd8d0055168210665e16b5da1bdf3b9c342339fcdeeaed59"
+    },
+    "journal": {
+      "bytes": 157986,
+      "sha256": "102042ff3dbed31bec2b22de949d75624ded2431151b3ec70871da1cd41b0701"
+    },
+    "reservation": {
+      "bytes": 591,
+      "sha256": "2bb4bca5fe11af575e9ce2a2f5fecf9e388baf68be03bda6e26712c1ec0bc024"
+    }
+  },
+  "occurredAt": "2026-07-21T14:28:14.163Z",
+  "pilotId": "native-alias-pilot-v6",
+  "reservation": {
+    "consumed": true,
+    "requestSha256": "ecb3444a080aa9e2a6934a8491cff35d1f2de8078201aaefdc2c077490afda5b",
+    "retryForbidden": true,
+    "safeToResume": false
+  },
+  "rootCause": {
+    "benchmarkDefect": true,
+    "code": "multifile-ledger-cleared-unrelated-snapshots",
+    "detail": "The mutation ledger cleared every issued snapshot after editing the first file. Runtime invalidation is path-scoped, so the still-valid snapshot for the second file was incorrectly rejected after both files were edited to exact expected bytes.",
+    "runtimeDefect": false,
+    "unsafeMutation": false
+  },
+  "schedule": {
+    "completedSessions": 23,
+    "failedSession": {
+      "adapter": "better-hashline",
+      "index": 23,
+      "model": "openai/gpt-5.6-luna",
+      "repeat": 1,
+      "task": "paired-files",
+      "variant": "medium"
+    },
+    "passedSessions": 22,
+    "plannedSessions": 48
+  },
+  "schemaVersion": 1,
+  "sessionResults": {
+    "failedAdapterIntegrityPassed": false,
+    "failedExactFilesPassed": true,
+    "failedProcessPassed": true,
+    "failedTransportPassed": true,
+    "firstTwentyTwoSessionsPassed": true,
+    "missingLedgerEvidence": "edit-snapshot:src/theme.ts"
+  },
+  "terminal": {
+    "releaseDecision": "no-go",
+    "safeToResume": false,
+    "status": "failed"
+  }
+}

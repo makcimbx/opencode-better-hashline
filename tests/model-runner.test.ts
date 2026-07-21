@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativeAliasPilotV6 } from "../benchmarks/model/adapters.js";
+import { nativeAliasPilotV7 } from "../benchmarks/model/adapters.js";
 
 function runRunner(args: string[], environment: Record<string, string> = {}) {
   return Bun.spawnSync([process.execPath, "./benchmarks/model/stage.ts", ...args], {
@@ -21,7 +21,7 @@ describe("model benchmark paid gates", () => {
     expect(result.stdout.toString()).toContain("= 48 sessions");
     expect(result.stdout.toString()).toContain("576 total");
     expect(result.stdout.toString()).toContain("not approved for paid execution");
-    expect(result.stdout.toString()).toContain(nativeAliasPilotV6.scheduleManifestSha256);
+    expect(result.stdout.toString()).toContain(nativeAliasPilotV7.scheduleManifestSha256);
   });
 
   test("bounds the explicit native alias development probe model contract", () => {
@@ -64,6 +64,17 @@ describe("model benchmark paid gates", () => {
     expect(createFile.exitCode).toBe(0);
     expect(createFile.stdout.toString()).toContain("= 2 sessions");
     expect(createFile.stdout.toString()).toContain("24 total");
+
+    const fullRehearsal = runRunner([
+      "--native-alias-probe",
+      "--model=openai/gpt-5.6-luna",
+      "--variant=medium",
+      "--task-set=baseline-v1",
+      "--adapter-set=native-aliases-v1",
+    ]);
+    expect(fullRehearsal.exitCode).toBe(0);
+    expect(fullRehearsal.stdout.toString()).toContain("= 24 sessions");
+    expect(fullRehearsal.stdout.toString()).toContain("288 total");
 
     const removedNano = runRunner([
       "--native-alias-probe",
@@ -119,7 +130,7 @@ describe("model benchmark paid gates", () => {
     expect(nestedPreflightOutput.stderr.toString()).toContain("direct child");
   }, 30_000);
 
-  test("keeps paid v6 execution hard-disabled even with dirty override", () => {
+  test("keeps paid v7 execution hard-disabled even with dirty override", () => {
     const output = join(tmpdir(), `better-hashline-hard-disable-${randomUUID()}`);
     const result = runRunner([
       "--native-alias-pilot",

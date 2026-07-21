@@ -6,7 +6,12 @@ import { join } from "node:path";
 import type { Hooks, ToolContext } from "@opencode-ai/plugin";
 import { z } from "zod";
 import { openCode1183ProviderSchema } from "../src/native-alias.js";
-import { betterHashlinePlugin, hashlineEditArgumentsSchema } from "../src/plugin.js";
+import {
+  betterHashlinePlugin,
+  hashlineEditArgumentsSchema,
+  hashlineEditDescription,
+  nativeAliasEditDescription,
+} from "../src/plugin.js";
 import {
   buildNativeAliasMetadata,
   jsonSha256,
@@ -274,7 +279,16 @@ describe("native alias activation and visibility", () => {
     if (!editShape || !patchShape) throw new Error("Alias schemas are unavailable");
     expect(z.toJSONSchema(z.object(editShape).strict())).toEqual(expectedSchema);
     expect(z.toJSONSchema(z.object(patchShape).strict())).toEqual(expectedSchema);
+    expect(value.tool?.edit?.description).toBe(nativeAliasEditDescription);
+    expect(value.tool?.apply_patch?.description).toBe(nativeAliasEditDescription);
+    expect(nativeAliasEditDescription).toContain(
+      "Never issue edit or apply_patch calls concurrently or in the same assistant message",
+    );
+    expect(hashlineEditDescription).not.toContain("edit or apply_patch calls concurrently");
     expect(await systemGuidance(value)).toContain("native aliases are active");
+    expect(await systemGuidance(value)).toContain(
+      "Never issue edit or apply_patch calls concurrently or in the same assistant message",
+    );
   });
 
   test("preserves every host alias-visibility state while hiding write and hashline_edit", async () => {

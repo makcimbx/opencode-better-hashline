@@ -218,9 +218,11 @@ native structured diff from Better Hashline metadata. The unique `hashline` surf
 production recommendation until the paid pilot and release gates in the
 [preview plan](docs/native-alias-preview-plan.md) pass.
 
-Native-alias pilot v1 stopped after one session because of a benchmark-oracle worktree mismatch. It
-produced no release or model-comparison evidence. Native aliases therefore remain unreleased, and
-version publication is blocked pending a separately approved corrected pilot.
+Native-alias pilots v1, v3, v4, v5, and v6 stopped fail-closed on terminal benchmark incidents and cannot
+resume or retry. Their privacy-safe incident records are tracked under `benchmarks/results/`. Pilot v7 is
+hard-disabled behind a new null approval anchor after a complete Luna/Sol development rehearsal; it still
+requires a separate exact A/B/C approval and reservation cycle. Native aliases therefore remain
+unreleased, and version publication is blocked.
 
 ## Why No Per-Line Hash?
 

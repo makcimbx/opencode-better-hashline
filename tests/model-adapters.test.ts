@@ -4,7 +4,7 @@ import {
   adapterPluginConfig,
   adapterSetManifest,
   modelAdapterSets,
-  nativeAliasPilotV6,
+  nativeAliasPilotV7,
   pilotProviderConfig,
   verificationSurfaceForAdapterSet,
 } from "../benchmarks/model/adapters.js";
@@ -35,10 +35,10 @@ describe("model benchmark adapters", () => {
     });
   });
 
-  test("freezes the unapproved 48-session native alias pilot-v6 proposal", () => {
-    expect(nativeAliasPilotV6).toEqual({
-      id: "native-alias-pilot-v6",
-      approvalAnchorPath: "benchmarks/model/native-alias-pilot-v6.approval.json",
+  test("freezes the unapproved 48-session native alias pilot-v7 proposal", () => {
+    expect(nativeAliasPilotV7).toEqual({
+      id: "native-alias-pilot-v7",
+      approvalAnchorPath: "benchmarks/model/native-alias-pilot-v7.approval.json",
       approvalRequirements: {
         externalBudgetReceipt: true,
         providerEndpointAttestation: true,
@@ -67,9 +67,9 @@ describe("model benchmark adapters", () => {
         { model: "openai/gpt-5.6-sol", variant: "medium", credential: "oauth" },
       ],
     });
-    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV6.taskManifestSha256);
+    expect(sha256(modelTaskSets["baseline-v1"])).toBe(nativeAliasPilotV7.taskManifestSha256);
     expect(sha256(adapterSetManifest("native-aliases-v1"))).toBe(
-      nativeAliasPilotV6.adapterManifestSha256,
+      nativeAliasPilotV7.adapterManifestSha256,
     );
   });
 

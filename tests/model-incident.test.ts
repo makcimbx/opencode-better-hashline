@@ -3,6 +3,7 @@ import incident from "../benchmarks/results/2026-07-20-native-alias-pilot-v1-inc
 import incidentV3 from "../benchmarks/results/2026-07-21-native-alias-pilot-v3-incident.json";
 import incidentV4 from "../benchmarks/results/2026-07-21-native-alias-pilot-v4-incident.json";
 import incidentV5 from "../benchmarks/results/2026-07-21-native-alias-pilot-v5-incident.json";
+import incidentV6 from "../benchmarks/results/2026-07-21-native-alias-pilot-v6-incident.json";
 
 describe("native alias pilot v1 incident", () => {
   test("publishes a sanitized immutable no-go record", () => {
@@ -158,6 +159,57 @@ describe("native alias pilot v5 incident", () => {
       },
     });
     const serialized = JSON.stringify(incidentV5);
+    expect(serialized).not.toMatch(
+      /[a-z]:(?:[\\/]|Users[\\/])|(?:^|["\\/])Users[\\/]|[\\/]home[\\/]|\\\\[^\\/]+[\\/]/iu,
+    );
+    expect(serialized).not.toMatch(
+      /"(?:access|refresh|key|access[_-]?token|refresh[_-]?token|api[_-]?key)"\s*:/iu,
+    );
+  });
+});
+
+describe("native alias pilot v6 incident", () => {
+  test("publishes a sanitized immutable consumed multi-file ledger no-go record", () => {
+    expect(incidentV6).toMatchObject({
+      schemaVersion: 1,
+      pilotId: "native-alias-pilot-v6",
+      accounting: {
+        observedRequests: 97,
+        reportedCostUsd: 0,
+        accountingComplete: false,
+        accountedRequestsUpperBound: 109,
+        accountedCostUpperBoundUsd: null,
+      },
+      reservation: {
+        consumed: true,
+        retryForbidden: true,
+        safeToResume: false,
+      },
+      rootCause: {
+        code: "multifile-ledger-cleared-unrelated-snapshots",
+        benchmarkDefect: true,
+        runtimeDefect: false,
+        unsafeMutation: false,
+      },
+      schedule: {
+        completedSessions: 23,
+        passedSessions: 22,
+        plannedSessions: 48,
+      },
+      sessionResults: {
+        firstTwentyTwoSessionsPassed: true,
+        failedProcessPassed: true,
+        failedTransportPassed: true,
+        failedExactFilesPassed: true,
+        failedAdapterIntegrityPassed: false,
+      },
+      terminal: {
+        status: "failed",
+        releaseDecision: "no-go",
+        safeToResume: false,
+      },
+    });
+    const serialized = JSON.stringify(incidentV6);
     expect(serialized).not.toMatch(
       /[a-z]:(?:[\\/]|Users[\\/])|(?:^|["\\/])Users[\\/]|[\\/]home[\\/]|\\\\[^\\/]+[\\/]/iu,
     );

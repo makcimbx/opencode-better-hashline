@@ -8,9 +8,9 @@ export const modelAdapterSets = {
 
 export type AdapterSetId = keyof typeof modelAdapterSets;
 
-export const nativeAliasPilotV6 = {
-  id: "native-alias-pilot-v6",
-  approvalAnchorPath: "benchmarks/model/native-alias-pilot-v6.approval.json",
+export const nativeAliasPilotV7 = {
+  id: "native-alias-pilot-v7",
+  approvalAnchorPath: "benchmarks/model/native-alias-pilot-v7.approval.json",
   approvalRequirements: {
     externalBudgetReceipt: true,
     providerEndpointAttestation: true,

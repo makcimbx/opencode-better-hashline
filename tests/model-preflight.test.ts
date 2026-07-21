@@ -59,7 +59,7 @@ const artifact = {
 };
 const platform = { name: process.platform, arch: process.arch, osRelease: "test-os" };
 const expected = {
-  pilotId: "native-alias-pilot-v6",
+  pilotId: "native-alias-pilot-v7",
   sourceCommit: "b".repeat(40),
   sourceStatusSha256: hash,
   runnerExecutableSha256: hash,

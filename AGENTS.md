@@ -29,7 +29,16 @@
 - Filesystem and plugin tests cover authorization, races, host hooks, and fail-closed behavior; update them when those paths change.
 - `bun run bench` is deterministic but result paths are write-once. Never `--force` published evidence; add a new dated result.
 - `bun run bench:model` is a no-cost dry run. `--preflight` performs installs/writes but no model call. Never use `--execute` without explicit user approval, a model/auth source, and `BENCHMARK_ACK_COSTS=yes`.
-- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted; pilots v3, v4, and v5 consumed their reservations and failed closed after one, two, and seventeen sessions. None may resume or retry. Any v6 candidate must start from a new null anchor and produce exact receipt/artifact/package-tree/staged-runner evidence; external bundle B must bind auth, endpoint, hard-budget, user approval, toolchain, schedule, and broker hashes; direct-child commit C may change only the anchor to B's hash and must reuse A's runner bytes. The approved external broker must atomically reserve v6 outside every repository/worktree before any model process. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
+- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted; pilots v3, v4, v5, and v6 consumed their reservations and failed closed. None may resume or retry. A new pilot identity is created only after a paid launch consumed its durable reservation, never for pre-reservation failures or ordinary development findings. Any next candidate must start from a new null anchor and exact A/B/C/broker evidence. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
+
+## Fast Benchmark Development
+
+- Iterate with focused tests and batch related fixes. Do not rerun full CI, pack checks, audits, or approval preparation after every small finding.
+- Before candidate A, run an exhaustive model-free task x adapter evidence matrix and one full development rehearsal of the complete proposed model/task/adapter schedule. Rehearsals use write-once ignored outputs, explicit request/cost bounds, and no pilot reservation.
+- Candidate A is forbidden until the full rehearsal passes. Then run one consolidated independent audit, remediate its findings, and run the final verifier/CI/pack matrix once on the unchanged tree.
+- Build external bundle B and anchor-only commit C only after candidate A and its clean eligible preflight are final. Do not rebuild approval evidence while implementation or schedule bytes are changing.
+- Parallelize independent checks and per-model rehearsals. Communicate only material blockers, terminal outcomes, and evidence changes.
+- Ignored local preflights, raw pilot outputs, and development-probe results are temporary. After diagnosis and a sanitized terminal incident, delete them before candidate A. Track only publishable deterministic results and privacy-safe terminal incidents.
 
 ## Workflow
 

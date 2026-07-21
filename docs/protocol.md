@@ -223,6 +223,9 @@ different input, or more than one active alias remains incompatible. A restart c
 process bindings; resume requires compatible unsanitized history plus a fresh `hashline_read`. Changing
 surfaces requires a restart and a new session.
 
+Native alias edits are sequential. Models must not issue `edit` or `apply_patch` concurrently or in the
+same assistant message. Multi-file edits wait for each tool result before starting the next call.
+
 ## Permission and Publication Order
 
 For an existing file:

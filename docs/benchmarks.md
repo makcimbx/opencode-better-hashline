@@ -206,14 +206,18 @@ comparison result exists. See the
 16 sessions and stopped fail-closed on session 17 because the create-file fixture omitted the parent
 directory required by strict create-only `hashline_write`. Its reservation is consumed, it may never
 resume or retry, and no unsafe mutation occurred. See the
-[v5 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v5-incident.json). Any pilot v6 requires
+[v5 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v5-incident.json). Pilot v6 then passed
+22 sessions and stopped fail-closed after its benchmark ledger cleared a still-valid
+snapshot for another file. Its reservation is consumed, it may never resume or retry, and exact expected
+bytes were preserved. See the
+[v6 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v6-incident.json). Any pilot v7 requires
 a new identity and null anchor.
 Candidate A must produce an exact schema-v6 receipt, tarball, package-tree manifest, and runner. External
 bundle B binds those artifacts to auth, endpoint, hard-budget, exact user approval, toolchain, schedule,
 and broker evidence. Direct-child commit C may change only the anchor to B's hash. A new approved broker
 must atomically consume a durable reservation outside every repository/worktree before any model process.
 
-The frozen v6 proposal uses the same 12 tasks and paired surfaces with the two stable OpenAI routes: Luna
+The frozen v7 proposal uses the same 12 tasks and paired surfaces with the two stable OpenAI routes: Luna
 and Sol, both medium. It contains 48 sessions and at most 576 requests. Nano was excluded after an
 intermittent malformed-argument development failure; Ultra and alternative NVIDIA candidates were
 excluded after provider-capacity, model-format, reasoning-length, or no-tool instability. Development

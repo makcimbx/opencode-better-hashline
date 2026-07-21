@@ -44,7 +44,8 @@ export function inspectMutationLedger(
   const editExecutorTools = new Set(["edit", "apply_patch", "hashline_edit"]);
   const unauthorized: string[] = [];
   const wrongExecutor: string[] = [];
-  const issuedSnapshots = new Map<string, string>();
+  const snapshotBindings = new Map<string, string>();
+  const eligibleSnapshots = new Map<string, string>();
 
   for (const event of [...trace.toolEvents].sort((left, right) => left.sequence - right.sequence)) {
     const targetPath = event.targetPath ? normalizedPath(event.targetPath) : undefined;
@@ -60,19 +61,23 @@ export function inspectMutationLedger(
     if (event.status !== "completed" || !targetPath) continue;
     if (event.tool === "hashline_read") {
       reads.push(targetPath);
-      if (!event.snapshotId || issuedSnapshots.has(event.snapshotId)) {
+      const boundPath = event.snapshotId ? snapshotBindings.get(event.snapshotId) : undefined;
+      if (!event.snapshotId || (boundPath !== undefined && boundPath !== targetPath)) {
         missing.push(`read-snapshot:${targetPath}`);
       } else {
-        issuedSnapshots.set(event.snapshotId, targetPath);
+        snapshotBindings.set(event.snapshotId, targetPath);
+        eligibleSnapshots.set(event.snapshotId, targetPath);
       }
       continue;
     }
     if (editTools.includes(event.tool)) {
       edits.push(targetPath);
-      if (!event.snapshotId || issuedSnapshots.get(event.snapshotId) !== targetPath) {
+      if (!event.snapshotId || eligibleSnapshots.get(event.snapshotId) !== targetPath) {
         missing.push(`edit-snapshot:${targetPath}`);
       }
-      issuedSnapshots.clear();
+      for (const [snapshotId, snapshotPath] of eligibleSnapshots) {
+        if (snapshotPath === targetPath) eligibleSnapshots.delete(snapshotId);
+      }
       continue;
     }
     if (event.tool === "hashline_write") {
