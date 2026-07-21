@@ -11,12 +11,13 @@
 
 ## Architecture And Invariants
 
-- `src/index.ts` is the public library entry and `src/server.ts` is OpenCode's preferred `./server` entry. Keep the explicit import/default export in `server.ts` and the two separate Bun build invocations; collapsing either previously produced an invalid bundle.
-- Protocol logic stays pure in `text.ts`, `snapshots.ts`, `render.ts`, `rebase.ts`, and `edits.ts`; filesystem authorization/publication belongs in `filesystem.ts`; OpenCode schemas and hooks belong in `plugin.ts`.
+- `src/index.ts` is the public library entry, `src/server.ts` is OpenCode's preferred `./server` entry, and `src/cli.ts` is the verifier bin. Keep the explicit import/default export in `server.ts` and all three separate Bun build invocations; collapsing entry builds previously produced an invalid bundle.
+- Protocol and shared evidence logic stays pure or bounded in `text.ts`, `snapshots.ts`, `render.ts`, `rebase.ts`, `edits.ts`, `presentation.ts`, `session-protocol.ts`, `session-export.ts`, `model-trace.ts`, `path-identity.ts`, `process-capture.ts`, and `exact-tree.ts`; filesystem authorization/publication belongs in `filesystem.ts`; OpenCode schemas and hooks belong in `plugin.ts`.
 - Keep `.js` specifiers in TypeScript imports. Do not edit generated `dist/` or `coverage/`.
 - Snapshot refs become editable only in `tool.execute.after`, after host truncation and output-digest checks. Retained or pending bytes are not issued provenance.
 - Exact retained bytes are freshness authority. `rebase: "none"` stays strict by default; `"unique"` is explicit, exact, and ambiguity-rejecting. Do not add fuzzy matching, normalization, nearest-match selection, source repair, or silent fallback.
-- Keep unique `hashline_*` IDs and native `read`. `enforce` hides and tripwires native `edit`, `write`, and `apply_patch`; it is not a shell sandbox.
+- Keep `hashline` as the default unique-ID surface and native `read`. Experimental `native-aliases` requires `enforce:true`, exact OpenCode 1.18.3, bounded history/metadata, and no silent fallback; it never aliases native `write`. Neither surface is a shell sandbox.
+- Current native-alias history may be reread only within the bounded stabilization window for the same exact active call ID and tool; execution still requires exact persisted input equality. Never substitute fuzzy, cross-ID, or stale-input correlation.
 - Preserve the filesystem order: canonicalize and authorize, plan one immutable result, approve that exact diff, reread bytes/identity, then stage and publish. Never replan after approval.
 - OpenCode may swallow plugin initialization failures. Option errors must retain diagnostic fail-closed mode rather than escaping initialization.
 - Keep public tool schemas flat/provider-friendly; validate operation-specific field combinations at runtime instead of adding union-heavy schemas.
@@ -28,6 +29,16 @@
 - Filesystem and plugin tests cover authorization, races, host hooks, and fail-closed behavior; update them when those paths change.
 - `bun run bench` is deterministic but result paths are write-once. Never `--force` published evidence; add a new dated result.
 - `bun run bench:model` is a no-cost dry run. `--preflight` performs installs/writes but no model call. Never use `--execute` without explicit user approval, a model/auth source, and `BENCHMARK_ACK_COSTS=yes`.
+- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted; pilots v3, v4, v5, and v6 consumed their reservations and failed closed, while pilot v7 consumed its reservation and completed 48/48 sessions. None may resume or retry. A new pilot identity is created only after a paid launch consumed its durable reservation, never for pre-reservation failures or ordinary development findings. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
+
+## Fast Benchmark Development
+
+- Iterate with focused tests and batch related fixes. Do not rerun full CI, pack checks, audits, or approval preparation after every small finding.
+- Before candidate A, run an exhaustive model-free task x adapter evidence matrix and one full development rehearsal of the complete proposed model/task/adapter schedule. Rehearsals use write-once ignored outputs, explicit request/cost bounds, and no pilot reservation.
+- Candidate A is forbidden until the full rehearsal passes. Then run one consolidated independent audit, remediate its findings, and run the final verifier/CI/pack matrix once on the unchanged tree.
+- Build external bundle B and anchor-only commit C only after candidate A and its clean eligible preflight are final. Do not rebuild approval evidence while implementation or schedule bytes are changing.
+- Parallelize independent checks and per-model rehearsals. Communicate only material blockers, terminal outcomes, and evidence changes.
+- Ignored local preflights, raw pilot outputs, and development-probe results are temporary. After diagnosis and a sanitized terminal incident, delete them before candidate A. Track only publishable deterministic results and privacy-safe terminal incidents.
 
 ## Workflow
 

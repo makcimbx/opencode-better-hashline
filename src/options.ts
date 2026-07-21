@@ -3,6 +3,8 @@ import { fail } from "./errors.js";
 export interface BetterHashlineOptions {
   /** Hide and reject OpenCode's built-in file-writing tools. Defaults to true. */
   enforce?: boolean;
+  /** Tool IDs used for editing. Experimental native aliases require enforce: true. */
+  toolSurface?: "hashline" | "native-aliases";
   /** Maximum retained bytes for one editable text file. */
   maxFileBytes?: number;
   /** Maximum logical lines in one editable text file. */
@@ -25,6 +27,7 @@ export interface BetterHashlineOptions {
 
 export interface ResolvedOptions {
   enforce: boolean;
+  toolSurface: "hashline" | "native-aliases";
   maxFileBytes: number;
   maxLines: number;
   maxCacheBytes: number;
@@ -38,6 +41,7 @@ export interface ResolvedOptions {
 
 const DEFAULTS: ResolvedOptions = {
   enforce: true,
+  toolSurface: "hashline",
   maxFileBytes: 8 * 1024 * 1024,
   maxLines: 100_000,
   maxCacheBytes: 64 * 1024 * 1024,
@@ -69,6 +73,7 @@ export function resolveOptions(input: Record<string, unknown> | undefined): Reso
   const value = input ?? {};
   const knownOptions = new Set<keyof BetterHashlineOptions>([
     "enforce",
+    "toolSurface",
     "maxFileBytes",
     "maxLines",
     "maxCacheBytes",
@@ -87,9 +92,17 @@ export function resolveOptions(input: Record<string, unknown> | undefined): Reso
   if (value.enforce !== undefined && typeof value.enforce !== "boolean") {
     fail("INVALID_ARGUMENT", "Option enforce must be a boolean.");
   }
+  if (
+    value.toolSurface !== undefined &&
+    value.toolSurface !== "hashline" &&
+    value.toolSurface !== "native-aliases"
+  ) {
+    fail("INVALID_ARGUMENT", "Option toolSurface must be hashline or native-aliases.");
+  }
 
   const options: ResolvedOptions = {
     enforce: value.enforce ?? DEFAULTS.enforce,
+    toolSurface: value.toolSurface ?? DEFAULTS.toolSurface,
     maxFileBytes:
       integerOption(value.maxFileBytes, "maxFileBytes", 1024, 16 * 1024 * 1024) ??
       DEFAULTS.maxFileBytes,
@@ -117,6 +130,9 @@ export function resolveOptions(input: Record<string, unknown> | undefined): Reso
 
   if (options.maxCacheBytes < options.maxFileBytes * 3) {
     fail("INVALID_ARGUMENT", "Option maxCacheBytes must be at least three times maxFileBytes.");
+  }
+  if (options.toolSurface === "native-aliases" && !options.enforce) {
+    fail("INVALID_ARGUMENT", "Option toolSurface=native-aliases requires enforce=true.");
   }
   if (
     options.maxSnapshotsPerPath > options.maxSnapshots ||

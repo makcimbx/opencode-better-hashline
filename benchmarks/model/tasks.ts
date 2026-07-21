@@ -112,9 +112,10 @@ export const modelTasks: ModelTask[] = [
     category: "creation",
     prompt:
       'Create src/version.ts containing exactly `export const version = "1.0.0";` followed by one newline. Do not change README.md.',
-    files: { "README.md": "fixture\n" },
+    files: { "README.md": "fixture\n", "src/.gitkeep": "" },
     expectedFiles: {
       "README.md": "fixture\n",
+      "src/.gitkeep": "",
       "src/version.ts": 'export const version = "1.0.0";\n',
     },
   },
@@ -268,8 +269,35 @@ export const transferModelTasks: ModelTask[] = [
   },
 ];
 
+const nativeAliasProbeTask: ModelTask = {
+  id: "native-alias-probe-single-constant",
+  category: "mechanical",
+  prompt: "In src/config.ts, change DEFAULT_RETRIES from 2 to 5. Make no other changes.",
+  files: {
+    "src/config.ts": "export const DEFAULT_RETRIES = 2;\nexport const TIMEOUT_MS = 5000;\n",
+  },
+  expectedFiles: {
+    "src/config.ts": "export const DEFAULT_RETRIES = 5;\nexport const TIMEOUT_MS = 5000;\n",
+  },
+};
+
+const nativeAliasCreateProbeTask: ModelTask = {
+  id: "native-alias-probe-create-file",
+  category: "creation",
+  prompt:
+    'Create src/version.ts containing exactly `export const version = "1.0.0";` followed by one newline. Do not change README.md.',
+  files: { "README.md": "fixture\n", "src/.gitkeep": "" },
+  expectedFiles: {
+    "README.md": "fixture\n",
+    "src/.gitkeep": "",
+    "src/version.ts": 'export const version = "1.0.0";\n',
+  },
+};
+
 export const modelTaskSets = {
   "baseline-v1": modelTasks,
+  "create-file-probe-v1": [nativeAliasCreateProbeTask],
+  "single-constant-probe-v1": [nativeAliasProbeTask],
   "transfer-v1": transferModelTasks,
 } as const satisfies Record<string, readonly ModelTask[]>;
 

@@ -17,8 +17,10 @@ export type HashlineErrorCode =
   | "SNAPSHOT_EXPIRED"
   | "SNAPSHOT_REQUIRED"
   | "SNAPSHOT_UNKNOWN"
+  | "SESSION_PROTOCOL_MISMATCH"
   | "TARGET_CHANGED"
   | "TARGET_EXISTS"
+  | "TOOL_SURFACE_UNAVAILABLE"
   | "UNSUPPORTED_FILE";
 
 export class HashlineError extends Error {

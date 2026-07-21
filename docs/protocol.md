@@ -14,6 +14,22 @@ Better Hashline provides compact model-facing line addressing while keeping edit
 
 It does not attempt semantic merge, multi-file transactions, hostile-writer CAS, or general filesystem sandboxing.
 
+## Tool Surfaces
+
+`toolSurface: "hashline"` is the default and exposes `hashline_read`, `hashline_edit`, and
+create-only `hashline_write`. With enforcement enabled, native `edit`, `write`, and `apply_patch`
+are hidden and tripwired.
+
+The experimental `toolSurface: "native-aliases"` requires `enforce: true` and an allowlisted exact
+OpenCode host, currently only `1.18.3`. It exposes `hashline_read`, create-only `hashline_write`, and
+both Better Hashline edit definitions under `edit` and `apply_patch`; OpenCode's model-family filter
+retains exactly one alias. It does not register `hashline_edit` and never aliases native `write`.
+Unavailable hosts or schemas remain diagnostic and fail closed without changing surfaces.
+
+All three edit IDs use the same strict schema and snapshot-bound executor. Alias executors parse a
+second time, so native `oldString`/`newString` and `patchText` shapes reject with `INVALID_ARGUMENT`
+before history, permission, or filesystem work.
+
 ## Snapshot Scope
 
 `hashline_read` produces a snapshot with:
@@ -76,7 +92,7 @@ Output grammar:
 
 ## Edit
 
-Tool: `hashline_edit`
+Tool: `hashline_edit`, or `edit`/`apply_patch` on the explicit native-alias surface
 
 ```json
 {
@@ -184,6 +200,32 @@ This global topology and canonical anchor ordering applies only to batches conta
 
 There is no fuzzy normalization, whitespace tolerance, nearest candidate, conflict marker, or fallback from strict to unique.
 
+## Native-Alias Session and Metadata Contract
+
+Native aliases use protocol marker `native-aliases/v1`. Completed `edit` metadata contains the exact
+unified diff in `diff` and `filediff.patch`; completed `apply_patch` metadata contains one update in
+`files[]`. Both include additions/deletions, empty `diagnostics`, and `betterHashline` fields for the
+protocol, package version, canonical schema SHA-256, exact host version, active alias, and canonical
+path SHA-256. Serialized metadata is measured before permission and publication and may not exceed
+1 MiB.
+
+Each plugin instance binds a session to one protocol fingerprint. Before the first edit it reads a
+bounded history of at most 200 messages, 2,000 parts, and 1 MiB, then validates every historical
+mutator. Message, part, call, session, input path, metadata keys, single-file unified-diff hunks, counts,
+and renderer path must agree exactly. Native `write`, `hashline_edit`, unknown fields, malformed hunks,
+and anything except the exact known native-shaped `INVALID_ARGUMENT` rejection are incompatible.
+Unmarked, malformed, sanitized, conflicting, unreadable, or cross-surface history returns
+`SESSION_PROTOCOL_MISMATCH`. Only the exact current running call is excluded. OpenCode can expose that
+call before its persisted input has caught up with the parsed before-hook arguments. For the same exact
+call ID and tool, the plugin may reread bounded local history five times under one 160 ms stabilization
+deadline after the initial bounded read; exclusion still requires exact input equality. A different call ID, tool, path, snapshot, operation, permanently
+different input, or more than one active alias remains incompatible. A restart clears snapshots and
+process bindings; resume requires compatible unsanitized history plus a fresh `hashline_read`. Changing
+surfaces requires a restart and a new session.
+
+Native alias edits are sequential. Models must not issue `edit` or `apply_patch` concurrently or in the
+same assistant message. Multi-file edits wait for each tool result before starting the next call.
+
 ## Permission and Publication Order
 
 For an existing file:
@@ -241,6 +283,8 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `INVALID_ARGUMENT` | Tool shape, fields, coordinates, intrinsic geometry, or the snapshot's move EOL layout is invalid |
 | `NO_CHANGE` | The final result, or an individually invalid identity move, changes no bytes |
 | `NATIVE_TOOL_DISABLED` | Enforcement rejected a hidden native mutator |
+| `TOOL_SURFACE_UNAVAILABLE` | The requested alias surface cannot be safely activated on this host |
+| `SESSION_PROTOCOL_MISMATCH` | Session history or its bound protocol is missing, unreadable, or incompatible |
 | `PATH_NOT_FOUND` | Requested source path does not exist |
 | `TARGET_EXISTS` | Create-only publication found an existing path |
 | `SNAPSHOT_REQUIRED` | No valid issued snapshot is available |

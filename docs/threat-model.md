@@ -34,7 +34,20 @@ The plugin rereads immediately before rename, but ordinary portable filesystems 
 
 ### Shell and other plugins
 
-`enforce: true` hides and rejects OpenCode tool IDs `edit`, `write`, and `apply_patch`. It does not intercept shell redirection, scripts, language servers, formatters, MCP tools, or another plugin's I/O. Use OpenCode permissions and OS isolation for adversarial workloads.
+On the default surface, `enforce: true` hides and rejects OpenCode tool IDs `edit`, `write`, and
+`apply_patch`. The experimental alias surface intentionally owns `edit` and `apply_patch` while still
+hiding and rejecting `write`. Neither mode intercepts shell redirection, scripts, language servers,
+formatters, MCP tools, or another plugin's I/O. Use OpenCode permissions and OS isolation for
+adversarial workloads.
+
+### Native-alias ownership
+
+OpenCode 1.18.3 does not expose final executable ownership. A later configured plugin, directory
+tool, or MCP tool can replace `edit` or `apply_patch`; a later after-hook can remove or rewrite a
+valid result marker. Matching schemas are not proof of matching executors, and historical markers
+are evidence only for the persisted completed call. Alias mode therefore trusts plugin ordering,
+requires Better Hashline to be the last external collider, and must be reverified after configuration
+changes. It cannot provide the default unique IDs' collision isolation or continuous-ownership claim.
 
 ### Privileged filesystem attacks
 
@@ -56,6 +69,8 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | Publication visibility | At most one final replacement attempt where rename supports it |
 | New file safety | Staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
 | Memory bounds | Global, session, path, byte, and TTL limits |
+| Alias history | Bounded completed-call validation and one process-local protocol binding per session |
+| Alias renderer metadata | Exact contract measured before publication and capped at 1 MiB |
 
 Transfer operations are source-referenced compound edits. Copy requires complete source provenance plus destination-boundary provenance. Move requires complete provenance for the source-to-destination corridor because logical texts are permuted over its positional EOL slots. Exact-unique relocation maps every source, corridor, and destination anchor through one cumulative budget, then rejects changed topology. Copy amplification is projected against configured output limits before materializing the final document. Projection composes CRLF across segment boundaries, and move rendering is reparsed against its expected logical texts and EOL slots. This prevents empty-text moves from merging a lone CR with a relocated LF or changing the no-phantom EOF model.
 
@@ -65,7 +80,14 @@ The plugin attempts to preserve executable mode and ownership where supported. I
 
 ## Sensitive Data
 
-Snapshots retain complete file bytes in memory for up to the configured TTL and cache limits. Tool output is subject to OpenCode's own transcript/history handling. Benchmark model traces may contain fixture or model output and are ignored by Git by default under `benchmarks/results/model/`; review and redact them before publication.
+Snapshots retain complete file bytes in memory for up to the configured TTL and cache limits. Tool
+output is subject to OpenCode's own transcript/history handling. Native alias metadata contains the
+canonical path, relative path, exact unified diff, and a canonical-path digest because stock renderers
+require those fields. Ordinary exports retain this metadata; OpenCode's sanitized export removes the
+tool metadata but retains a safe root-relative session locator. Review even sanitized exports before
+disclosure. Removing the marker also makes that history unusable for alias continuation. Benchmark model traces may contain
+fixture or model output and are ignored by Git by default under `benchmarks/results/model/`; review
+and redact them before publication.
 
 Do not benchmark proprietary repositories or secrets without an explicit data-handling policy.
 

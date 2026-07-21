@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { constants } from "node:fs";
 import { access, link, lstat, open, realpath, rename, rm, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { fail } from "./errors.js";
+import { exactRelativePath, isInsideCanonicalPath } from "./path-identity.js";
 import { bytesEqual } from "./text.js";
 
 export type ResolvedFile = {
@@ -51,12 +52,7 @@ function absoluteFrom(filePath: string, directory: string): string {
 }
 
 function samePath(left: string, right: string): boolean {
-  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
-}
-
-function isInside(root: string, target: string): boolean {
-  const value = relative(resolve(root), resolve(target));
-  return value === "" || (!value.startsWith(`..${sep}`) && value !== ".." && !isAbsolute(value));
+  return left === right;
 }
 
 async function canonicalRoot(root: string): Promise<string> {
@@ -68,15 +64,16 @@ async function canonicalRoot(root: string): Promise<string> {
 }
 
 async function isExternal(context: ToolContext, canonicalPath: string): Promise<boolean> {
-  const [directory, worktree] = await Promise.all([
-    canonicalRoot(context.directory),
-    canonicalRoot(context.worktree),
-  ]);
-  return !isInside(directory, canonicalPath) && !isInside(worktree, canonicalPath);
+  const directory = await canonicalRoot(context.directory);
+  if (isInsideCanonicalPath(directory, canonicalPath)) return false;
+  if (context.worktree === "/") return true;
+  const worktree = await canonicalRoot(context.worktree);
+  return !isInsideCanonicalPath(worktree, canonicalPath);
 }
 
 function permissionPath(context: ToolContext, canonicalPath: string): string {
-  return relative(context.worktree, canonicalPath) || basename(canonicalPath);
+  const value = exactRelativePath(context.worktree, canonicalPath);
+  return value === "" ? basename(canonicalPath) : (value ?? canonicalPath);
 }
 
 function assertRegular(stats: Stats): void {
@@ -101,7 +98,7 @@ function sameMetadata(left: Stats, right: Stats): boolean {
 }
 
 function lockKey(canonicalPath: string): string {
-  return process.platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath;
+  return canonicalPath;
 }
 
 async function syncDirectory(directory: string): Promise<void> {

@@ -20,6 +20,8 @@ transfer development set is also dry-run by default:
 
 ```sh
 bun run bench:model --task-set=transfer-v1
+bun run bench:model --adapter-set=native-aliases-v1 --repeats=1
+bun run bench:model --native-alias-pilot
 ```
 
 A model-free adapter/package check is available separately:
@@ -30,13 +32,22 @@ bun run bench:model --preflight --output=benchmarks/results/local/preflight
 
 Preflight performs builds, package installation, registry access when needed, OpenCode subprocesses, and local writes, but no model request. Its output directory must be new.
 
-Paid execution requires all three controls:
+`--adapter-set=native-aliases-v1` pairs the unique and experimental alias surfaces. Its preflight
+also runs the credential-free packed verifier through unique `hashline_edit`, non-GPT `edit`, and
+GPT-like `apply_patch`. Pilot v7 completed Luna and Sol across all 48 paired sessions in 181 observed
+requests with complete accounting and no retry, timeout, process, transport, or trace failures. Pilot v2 is
+retired unexecuted and consumed pilots v3, v4, v5, and v6 are terminal no-go incidents.
+
+Paid execution requires the exact immutable session/request schedule, a reported-cost stop threshold
+(not a provider billing cap), cost
+acknowledgement, and exactly one authentication source:
 
 ```sh
 BENCHMARK_MODEL=provider/model \
 BENCHMARK_AUTH_FILE=/path/to/opencode-auth.json \
 BENCHMARK_ACK_COSTS=yes \
-bun run bench:model --execute --task-set=baseline-v1 --repeats=2
+bun run bench:model --execute --task-set=baseline-v1 --repeats=2 \
+  --approved-sessions=48 --approved-max-requests=576 --approved-max-cost-usd=10
 ```
 
 On PowerShell:
@@ -45,10 +56,26 @@ On PowerShell:
 $env:BENCHMARK_MODEL = "provider/model"
 $env:BENCHMARK_AUTH_FILE = "C:\path\to\opencode-auth.json"
 $env:BENCHMARK_ACK_COSTS = "yes"
-bun run bench:model --execute --repeats=2
+bun run bench:model --execute --repeats=2 --approved-sessions=48 `
+  --approved-max-requests=576 --approved-max-cost-usd=10
 ```
 
 Instead of an auth file, provider variables can be allowlisted explicitly with `--pass-env=KEY_ONE,KEY_TWO` or `BENCHMARK_PASS_ENV`. The runner refuses OpenCode, home, XDG, configuration, and temporary-directory passthrough variables.
+
+Native-alias pilot v3 executed one session and stopped fail-closed; its reservation is consumed and it may
+never resume or retry. See the
+[sanitized incident](results/2026-07-21-native-alias-pilot-v3-incident.json). Pilot v4 stopped after two
+sessions on a baseline trace-path oracle false negative; its reservation is also consumed and it may never
+resume or retry. See the [v4 incident](results/2026-07-21-native-alias-pilot-v4-incident.json). Pilot v5
+stopped after 17 sessions because the create-file fixture omitted the parent `src/` directory; its
+reservation is consumed and it may never resume or retry. See the
+[v5 incident](results/2026-07-21-native-alias-pilot-v5-incident.json). Pilot v6
+stopped after 23 sessions when the benchmark ledger cleared a still-valid snapshot for another file;
+its reservation is consumed and it may never resume or retry. See the
+[v6 incident](results/2026-07-21-native-alias-pilot-v6-incident.json). Pilot v7 then completed 48/48
+Luna/Sol paired sessions with 181 observed requests and USD 0 reported cost. See the
+[privacy-safe summary](results/2026-07-21-native-alias-pilot-v7.json). This technical pass is not a
+model-superiority claim or release authorization.
 
 Raw outputs are written under `benchmarks/results/model/` and ignored by Git. Review them before moving a result into a publishable location.
 

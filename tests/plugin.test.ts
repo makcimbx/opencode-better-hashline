@@ -117,6 +117,16 @@ async function activateRead(value: Hooks, result: StructuredResult): Promise<voi
 }
 
 describe("OpenCode plugin protocol", () => {
+  test("keeps the production registry on unique tool IDs", async () => {
+    const value = await hooks();
+    expect(Object.keys(value.tool ?? {}).sort()).toEqual([
+      "hashline_edit",
+      "hashline_read",
+      "hashline_write",
+    ]);
+    await value.dispose?.();
+  });
+
   test("issues refs only after delivery and applies an exact permitted edit", async () => {
     const file = join(root, "file.txt");
     await writeFile(file, "one\ntwo\nthree\n");

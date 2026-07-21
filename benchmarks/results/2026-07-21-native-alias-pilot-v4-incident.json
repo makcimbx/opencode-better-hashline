@@ -1,0 +1,79 @@
+{
+  "accounting": {
+    "accountedCostUpperBoundUsd": null,
+    "accountedRequestsUpperBound": 20,
+    "accountingComplete": false,
+    "observedRequests": 8,
+    "reportedCostUsd": 0
+  },
+  "approval": {
+    "approvalCommit": "665dc155807af3e23992413befcc8fdcbd14f2af",
+    "candidateCommit": "3d355b25bd33a0321299b17fa7b6cbc01dc9bb60",
+    "externalBundleSha256": "a01e4c8d101d84df28fa45063b389dec83cd4210bf386af2bd3b7ed33f940942"
+  },
+  "evidence": {
+    "journal": {
+      "bytes": 32021,
+      "sha256": "e97408289a59d3cd6224eda075a8959e5ba68b0da5a3c2248547860d01547b92"
+    },
+    "reservation": {
+      "bytes": 591,
+      "sha256": "5bcbb4e127a0f791a3ccaf221b60606a93c9e234dc02ae488d476742ec06152b"
+    },
+    "session1SanitizedExport": {
+      "bytes": 13455,
+      "sha256": "951aaceed8f104e9673a969deada715f5ef33b100d0f1e3a019ba5fd97d206fd"
+    },
+    "session1Trace": {
+      "bytes": 7121,
+      "sha256": "6719d58f7363a8c74d9ff1543f34178f56d3a7e263d07f45bfbb91cd6cee4414"
+    },
+    "session2SanitizedExport": {
+      "bytes": 13475,
+      "sha256": "4ac2e3ab44e859ce40e4c69aed60aaab1b4352a4dbac79f4c8954b379433086c"
+    },
+    "session2Trace": {
+      "bytes": 6649,
+      "sha256": "ab71f39c4da4ce54d5ee579e4ebae6349165c5357623598a7b1f7b2355b15ad8"
+    }
+  },
+  "occurredAt": "2026-07-21T10:21:40.9871334Z",
+  "pilotId": "native-alias-pilot-v4",
+  "reservation": {
+    "consumed": true,
+    "requestSha256": "7b7923b44ada0b48283256ad792c483eb662e1991eaa6db687fe3c311e6278a2",
+    "retryForbidden": true,
+    "safeToResume": false
+  },
+  "rootCause": {
+    "code": "baseline-trace-missing-path-authority",
+    "detail": "The baseline session changed the exact expected bytes, but initial JSONL trace parsing had no fixture-root authority, so hashline_read and hashline_edit target paths were absent and the mutation ledger rejected the successful edit as unbound.",
+    "runtimeDefect": false,
+    "unsafeMutation": false
+  },
+  "schedule": {
+    "completedSessions": 2,
+    "failedSession": {
+      "adapter": "better-hashline",
+      "index": 2,
+      "model": "openai/gpt-5.6-luna",
+      "repeat": 1,
+      "task": "single-constant",
+      "variant": "medium"
+    },
+    "plannedSessions": 72
+  },
+  "schemaVersion": 1,
+  "sessionResults": {
+    "firstNativeAliasSessionPassed": true,
+    "secondBaselineAdapterIntegrityPassed": false,
+    "secondExactFilesPassed": true,
+    "secondProcessPassed": true,
+    "secondTransportPassed": true
+  },
+  "terminal": {
+    "releaseDecision": "no-go",
+    "safeToResume": false,
+    "status": "failed"
+  }
+}

@@ -136,6 +136,7 @@ OpenCode accepts plugin options as the second tuple element:
       "opencode-better-hashline",
       {
         "enforce": true,
+        "toolSurface": "hashline",
         "maxFileBytes": 8388608,
         "maxLines": 100000,
         "maxCacheBytes": 67108864,
@@ -154,6 +155,7 @@ OpenCode accepts plugin options as the second tuple element:
 | Option | Default | Purpose |
 | --- | ---: | --- |
 | `enforce` | `true` | Hide and reject native `edit`, `write`, and `apply_patch` |
+| `toolSurface` | `"hashline"` | Tool-ID surface; `"native-aliases"` is an experimental OpenCode 1.18.3-only preview |
 | `maxFileBytes` | 8 MiB | Maximum editable or creatable text file |
 | `maxLines` | 100,000 | Maximum logical lines per editable file |
 | `maxCacheBytes` | 64 MiB | Approximate retained snapshot memory budget |
@@ -167,6 +169,60 @@ OpenCode accepts plugin options as the second tuple element:
 Unknown or inconsistent options put the plugin into a diagnostic fail-closed mode: native mutators remain hidden and every Better Hashline tool returns `CONFIG_INVALID`. Fix the configuration and restart OpenCode. `maxCacheBytes` must be at least three times `maxFileBytes`.
 
 Set `enforce: false` only for migration or A/B evaluation. It leaves native mutators enabled and changes the system instruction from required to preferred usage.
+
+### Experimental native aliases
+
+`toolSurface: "native-aliases"` keeps the Better Hashline snapshot executor but publishes it as
+`edit` on non-GPT routes and `apply_patch` on GPT-5-like patch routes so stock OpenCode can use its
+native diff renderers. It requires `enforce: true`, exact OpenCode `1.18.3`, a restart, and a new
+session:
+
+```json
+{
+  "plugin": [
+    [
+      "opencode-better-hashline",
+      { "enforce": true, "toolSurface": "native-aliases" }
+    ]
+  ]
+}
+```
+
+The mode still exposes unique `hashline_read` and create-only `hashline_write`; it never aliases
+native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Host, schema, or
+session incompatibility fails closed without falling back to a builtin or to `hashline_edit`.
+
+Run the credential-free clean-room verifier after installation and after every plugin-order or
+configuration change:
+
+```sh
+bunx opencode-better-hashline verify --surface all
+```
+
+The verifier checks both model routes, schemas, malformed-call confinement, hooks, exact bytes,
+resumed, forked, and imported edits, sanitized export behavior, stock terminal rendering, pinned
+GPT-4/GPT-OSS/GPT-5 routing, wildcard/path edit permissions, protocol fingerprints, and rollback to
+unique IDs in an isolated configuration. It is a package self-test, not
+an audit of your merged
+OpenCode configuration. It cannot prove continuous executor ownership: a later plugin or MCP tool can
+replace an alias, and a later after-hook can mutate persisted output. Keep Better Hashline last among
+plugins that define `edit` or `apply_patch`.
+
+Native-looking IDs persist in session history. Removing the plugin or changing surfaces can leave old
+native-looking cards while new calls resolve to OpenCode builtins; do not continue or import that
+session for editing. Rejected native-shaped calls may consume an extra model retry. Unsanitized exports
+and shares contain paths and diffs. Sanitized exports remove tool paths, diffs, and protocol markers but
+OpenCode 1.18.3 retains a safe root-relative session locator; review it before disclosure. The removed
+marker makes alias continuation fail closed. ACP can classify the alias as an edit but cannot reconstruct the
+native structured diff from Better Hashline metadata. The unique `hashline` surface remains the
+production default and recommendation; the completed paid pilot supports only an opt-in experimental
+native-alias release under the [preview plan](docs/native-alias-preview-plan.md).
+
+Native-alias pilots v1, v3, v4, v5, and v6 stopped fail-closed on terminal benchmark incidents and cannot
+resume or retry. Their privacy-safe incident records are tracked under `benchmarks/results/`. Pilot v7
+completed all 48 Luna/Sol sessions across the unique and native-alias surfaces with complete accounting,
+zero retries/failures/timeouts, and USD 0 reported cost. The privacy-safe summary is tracked under
+`benchmarks/results/`; the maintainer approved native aliases for an opt-in experimental release.
 
 ## Why No Per-Line Hash?
 
@@ -209,6 +265,7 @@ See [benchmark methodology and raw results](docs/benchmarks.md), [prior-art audi
 | Component | Status |
 | --- | --- |
 | OpenCode 1.18.3 stable V1 plugin API | Tested |
+| Experimental native aliases | OpenCode 1.18.3 only; explicit opt-in |
 | Windows, Linux, macOS | CI and filesystem tests |
 | UTF-8, optional BOM, LF, CRLF, mixed EOL, lone CR | Supported |
 | Directories, images, PDFs, binary files | Use native `read`; not editable here |
@@ -226,6 +283,7 @@ The custom read tool intentionally does not imitate OpenCode's native media atta
 - Create-only `hashline_write` requires same-directory hard-link support for no-replace publication. A detected race after the link can leave the new file committed, but returns failure and never deletes a possibly newer writer's path.
 - Executable mode and ownership are preserved where supported; all metadata preservation is not promised.
 - `enforce` blocks OpenCode's native mutator tool IDs, but it does not sandbox shell commands or other plugins.
+- Native aliases cannot attest final registry ownership or prevent later hooks from mutating renderer metadata.
 - Snapshot caches are in memory and disappear on restart, expiry, eviction, or successful publication.
 
 Full boundaries and trust assumptions are in [docs/threat-model.md](docs/threat-model.md).
@@ -237,6 +295,7 @@ Full boundaries and trust assumptions are in [docs/threat-model.md](docs/threat-
 - [Threat model](docs/threat-model.md)
 - [Research and prior art](docs/research.md)
 - [Benchmarks](docs/benchmarks.md)
+- [Experimental native-alias preview plan](docs/native-alias-preview-plan.md)
 - [Release process](docs/releasing.md)
 - [Contributing](CONTRIBUTING.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)

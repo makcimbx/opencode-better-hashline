@@ -1,27 +1,81 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
   access,
+  chmod,
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
-  readdir,
+  open,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { release, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { tool } from "@opencode-ai/plugin";
+import { openCode1183ProviderSchema } from "../../src/native-alias.js";
+import { hashlineEditArgumentsSchema } from "../../src/plugin.js";
+import { jsonSha256 } from "../../src/presentation.js";
+import {
+  type AdapterId,
+  type AdapterSetId,
+  adapterPluginConfig,
+  adapterSetManifest,
+  modelAdapterSets,
+  nativeAliasPilotV7,
+  pilotProviderConfig,
+  verificationSurfaceForAdapterSet,
+} from "./adapters.js";
+import {
+  consumeValidatedExternalReservation,
+  type PilotV7ReservationReceipt,
+  type ValidatedPilotV7Approval,
+  validatePilotV7ApprovalCommit,
+  validatePilotV7ExternalApprovalBundle,
+} from "./approval.js";
+import { assertPilotAuthTransition, parsePilotAuth, pilotAuthIdentitySha256 } from "./auth.js";
+import { evaluateExactTree } from "./evaluator.js";
+import {
+  journalAccounting,
+  journalFailure,
+  modelEvidenceSourceStatus,
+  reserveOutput,
+  reservePilotOutput,
+  terminalDecision,
+  writeBytesAtomic,
+  writeJsonAtomic,
+} from "./evidence.js";
+import { inspectMutationLedger } from "./ledger.js";
+import { verifyNativeAliasOracleFixture } from "./oracle-fixture.js";
+import {
+  assertNativeAliasPreflightReceipt,
+  NATIVE_ALIAS_PREFLIGHT_SCHEMA_VERSION,
+  NATIVE_ALIAS_PREFLIGHT_SIDE_EFFECTS,
+  type NativeAliasPreflightReceipt,
+} from "./preflight.js";
+import { captureBoundedProcess } from "./process.js";
+import {
+  assertEffectiveToolIdentitiesUnchanged,
+  assertPackageManifestsEqual,
+  deriveEffectiveToolIdentities,
+  deriveInstalledPackageManifest,
+  deriveNpmTarballManifest,
+  packageTreeSha256,
+} from "./provenance.js";
 import { type ModelTask, modelTaskSets } from "./tasks.js";
 import {
   inspectJsonlTrace,
+  inspectNativeAliasTrace,
   inspectSessionExport,
   type SessionExportInspection,
   type TokenUsage,
   type TraceInspection,
+  terminalSkeletonMatches,
 } from "./trace.js";
-
-type AdapterId = "native" | "better-hashline";
 
 interface CapturedProcess {
   success: boolean;
@@ -29,6 +83,40 @@ interface CapturedProcess {
   stdout: string;
   stderr: string;
 }
+
+const SESSION_EXPORT_BYTE_LIMIT = 16 * 1024 * 1024;
+
+async function captureSessionExport(
+  command: string[],
+  cwd: string,
+  env: Record<string, string | undefined>,
+  timeoutMs: number,
+) {
+  const result = await captureBoundedProcess({
+    command,
+    cwd,
+    env,
+    timeoutMs,
+    stdoutLimit: SESSION_EXPORT_BYTE_LIMIT,
+    stderrLimit: 1024 * 1024,
+  });
+  return {
+    ...result,
+    success:
+      result.exitCode === 0 && !result.timedOut && !result.stdoutOverflow && !result.stderrOverflow,
+  };
+}
+
+function excludesSensitivePaths(value: string, paths: string[]): boolean {
+  return paths.every(
+    (path) => !value.includes(path) && !value.includes(path.replaceAll("\\", "/")),
+  );
+}
+
+const MAX_AGENT_STEPS = nativeAliasPilotV7.maxAgentSteps;
+const EDIT_SCHEMA_SHA256 = jsonSha256(
+  openCode1183ProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+);
 
 function option(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -53,35 +141,117 @@ function boundedInteger(
   return parsed;
 }
 
-function capture(
+function positiveNumber(name: string, value: string | undefined): number {
+  const parsed = Number(value);
+  if (!value || !Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`--${name} must be a positive number.`);
+  }
+  return parsed;
+}
+
+async function capture(
   command: string[],
   cwd: string,
   env?: Record<string, string | undefined>,
-): CapturedProcess {
-  const result = Bun.spawnSync(command, {
+): Promise<CapturedProcess> {
+  const result = await captureBoundedProcess({
+    command,
     cwd,
-    ...(env ? { env } : {}),
-    stderr: "pipe",
-    stdout: "pipe",
+    env: env ?? { ...process.env },
+    timeoutMs: 20 * 60 * 1000,
+    stdoutLimit: 32 * 1024 * 1024,
+    stderrLimit: 8 * 1024 * 1024,
   });
   return {
-    success: result.success,
+    success:
+      result.exitCode === 0 && !result.timedOut && !result.stdoutOverflow && !result.stderrOverflow,
     exitCode: result.exitCode,
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
   };
 }
 
-function run(command: string[], cwd: string): string {
-  const result = capture(command, cwd);
+async function run(command: string[], cwd: string): Promise<string> {
+  const result = await capture(command, cwd);
   if (!result.success) {
-    throw new Error(`${command.join(" ")} failed:\n${result.stderr || result.stdout}`);
+    throw new Error(
+      `${command.join(" ")} failed:\n${result.stderr}${result.stdout ? `\n${result.stdout}` : ""}`,
+    );
   }
   return result.stdout;
 }
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function readBoundedRegularFile(
+  path: string,
+  label: string,
+  maximumBytes = 16 * 1024 * 1024,
+): Promise<Uint8Array> {
+  const resolved = resolve(path);
+  const before = await lstat(resolved);
+  if (before.isSymbolicLink() || !before.isFile() || before.size > maximumBytes) {
+    throw new Error(`${label} must be a bounded regular file.`);
+  }
+  const canonical = await realpath(resolved);
+  const canonicalBefore = await lstat(canonical);
+  if (canonicalBefore.dev !== before.dev || canonicalBefore.ino !== before.ino) {
+    throw new Error(`${label} identity is ambiguous.`);
+  }
+  const handle = await open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  let bytes: Uint8Array;
+  try {
+    const handleBefore = await handle.stat();
+    if (handleBefore.dev !== before.dev || handleBefore.ino !== before.ino) {
+      throw new Error(`${label} changed before it was read.`);
+    }
+    bytes = new Uint8Array(await handle.readFile());
+    const handleAfter = await handle.stat();
+    if (
+      handleAfter.dev !== handleBefore.dev ||
+      handleAfter.ino !== handleBefore.ino ||
+      handleAfter.size !== bytes.byteLength
+    ) {
+      throw new Error(`${label} changed while it was read.`);
+    }
+  } finally {
+    await handle.close();
+  }
+  const after = await lstat(resolved);
+  if (
+    after.isSymbolicLink() ||
+    !after.isFile() ||
+    after.dev !== before.dev ||
+    after.ino !== before.ino ||
+    (await realpath(resolved)) !== canonical ||
+    after.size !== bytes.byteLength ||
+    after.size > maximumBytes
+  ) {
+    throw new Error(`${label} changed while it was read.`);
+  }
+  return bytes;
+}
+
+async function stagePrivateExecutable(identity: { path: string; sha256: string }, label: string) {
+  const bytes = await readBoundedRegularFile(identity.path, label, 512 * 1024 * 1024);
+  if (sha256(bytes) !== identity.sha256) {
+    throw new Error(`${label} bytes do not match their approved identity.`);
+  }
+  const root = await mkdtemp(join(tmpdir(), "better-hashline-private-tool-"));
+  const path = join(root, basename(identity.path));
+  try {
+    await writeFile(path, bytes, { flag: "wx", mode: 0o500 });
+    await chmod(path, 0o500);
+    if (sha256(await readFile(path)) !== identity.sha256) {
+      throw new Error(`${label} private copy failed identity verification.`);
+    }
+    return { path, root };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 const SYSTEM_ENVIRONMENT_KEYS = [
@@ -129,7 +299,8 @@ function parsePassthroughEnvironment(value: string | undefined): string[] {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
       throw new Error(`Invalid environment variable name in --pass-env: ${name}`);
     }
-    if (name.startsWith("OPENCODE_") || FORBIDDEN_PASSTHROUGH_ENVIRONMENT.has(name)) {
+    const normalized = name.toUpperCase();
+    if (normalized.startsWith("OPENCODE_") || FORBIDDEN_PASSTHROUGH_ENVIRONMENT.has(normalized)) {
       throw new Error(`Benchmark isolation forbids passing ${name}.`);
     }
     if (process.env[name] === undefined) {
@@ -153,40 +324,6 @@ async function writeFixture(root: string, task: ModelTask): Promise<void> {
     await mkdir(dirname(absolute), { recursive: true });
     await writeFile(absolute, content);
   }
-}
-
-async function listFiles(root: string, directory = root): Promise<string[]> {
-  const paths: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const absolute = join(directory, entry.name);
-    if (entry.isDirectory()) paths.push(...(await listFiles(root, absolute)));
-    else if (entry.isFile()) paths.push(relative(root, absolute).replaceAll("\\", "/"));
-  }
-  return paths.sort();
-}
-
-async function evaluate(root: string, task: ModelTask) {
-  const mismatches: string[] = [];
-  for (const [path, expected] of Object.entries(task.expectedFiles)) {
-    try {
-      const actual = await readFile(join(root, path), "utf8");
-      if (actual !== expected) mismatches.push(`${path}: content mismatch`);
-    } catch {
-      mismatches.push(`${path}: missing`);
-    }
-  }
-  for (const path of task.absentFiles ?? []) {
-    try {
-      await access(join(root, path));
-      mismatches.push(`${path}: should not exist`);
-    } catch {
-      // Expected absence.
-    }
-  }
-  const expected = new Set(Object.keys(task.expectedFiles));
-  const unexpected = (await listFiles(root)).filter((path) => !expected.has(path));
-  for (const path of unexpected) mismatches.push(`${path}: unexpected file`);
-  return { exactFiles: mismatches.length === 0, mismatches };
 }
 
 async function isolatedEnvironment(input: {
@@ -250,27 +387,94 @@ async function isolatedEnvironment(input: {
   };
 }
 
-async function prepareArtifact(repository: string, output: string) {
-  run([process.execPath, "run", "build"], repository);
-  const work = await mkdtemp(join(tmpdir(), "better-hashline-artifact-"));
-  const packedJson = run(
-    ["npm", "pack", "--json", "--ignore-scripts", "--pack-destination", work],
-    repository,
+async function installArtifactBytes(work: string, artifactBytes: Uint8Array, filename: string) {
+  if (filename !== basename(filename)) throw new Error("Artifact filename must be a basename.");
+  const expectedManifest = deriveNpmTarballManifest(artifactBytes);
+  const installRoot = join(work, "install");
+  await mkdir(installRoot, { recursive: true });
+  await writeFile(join(installRoot, "package.json"), '{"private":true,"type":"module"}\n');
+  const privateTarball = join(installRoot, filename);
+  await writeFile(privateTarball, artifactBytes, { flag: "wx", mode: 0o400 });
+  await run(
+    [process.execPath, "add", "--ignore-scripts", "--backend=copyfile", `./${filename}`],
+    installRoot,
   );
+  if (sha256(await readFile(privateTarball)) !== sha256(artifactBytes)) {
+    throw new Error("Private artifact bytes changed during installation.");
+  }
+  const packageDirectory = join(installRoot, "node_modules", "opencode-better-hashline");
+  const installedManifest = await deriveInstalledPackageManifest(packageDirectory);
+  assertPackageManifestsEqual(expectedManifest, installedManifest);
+  return {
+    packageDirectory,
+    packageTreeSha256: packageTreeSha256(expectedManifest),
+    installedLockfileSha256: sha256(await readFile(join(installRoot, "bun.lock"))),
+  };
+}
+
+async function prepareArtifact(
+  repository: string,
+  output: string,
+  npmCommand: readonly string[],
+  sourceCommit?: string,
+) {
+  let source = repository;
+  let snapshotParent: string | undefined;
+  if (sourceCommit) {
+    snapshotParent = await mkdtemp(join(tmpdir(), "better-hashline-source-"));
+    source = join(snapshotParent, "source");
+    try {
+      await run(["git", "worktree", "add", "--detach", source, sourceCommit], repository);
+      await run(
+        [
+          process.execPath,
+          "install",
+          "--frozen-lockfile",
+          "--ignore-scripts",
+          "--backend=copyfile",
+        ],
+        source,
+      );
+    } catch (error) {
+      await capture(["git", "worktree", "remove", "--force", source], repository);
+      await rm(snapshotParent, { recursive: true, force: true });
+      throw error;
+    }
+  }
+  const work = await mkdtemp(join(tmpdir(), "better-hashline-artifact-"));
+  let packedJson: string;
+  try {
+    await run([process.execPath, "run", "build"], source);
+    packedJson = await run(
+      [...npmCommand, "pack", "--json", "--ignore-scripts", "--pack-destination", work],
+      source,
+    );
+  } catch (error) {
+    await rm(work, { recursive: true, force: true });
+    throw error;
+  } finally {
+    if (snapshotParent) {
+      try {
+        await run(["git", "worktree", "remove", "--force", source], repository);
+      } finally {
+        await rm(snapshotParent, { recursive: true, force: true });
+      }
+    }
+  }
   const packed = JSON.parse(packedJson) as { filename?: string }[];
   const filename = packed[0]?.filename;
   if (!filename) throw new Error("npm pack returned no artifact filename.");
   const sourceTarball = join(work, basename(filename));
+  const artifactBytes = await readFile(sourceTarball);
   const artifactDirectory = join(output, "artifacts");
   await mkdir(artifactDirectory, { recursive: true });
   const retainedTarball = join(artifactDirectory, basename(filename));
-  await copyFile(sourceTarball, retainedTarball);
-
-  const installRoot = join(work, "install");
-  await mkdir(installRoot, { recursive: true });
-  await writeFile(join(installRoot, "package.json"), '{"private":true,"type":"module"}\n');
-  run([process.execPath, "add", "--ignore-scripts", sourceTarball], installRoot);
-  const packageDirectory = join(installRoot, "node_modules", "opencode-better-hashline");
+  await writeBytesAtomic(retainedTarball, artifactBytes);
+  if (sha256(await readFile(retainedTarball)) !== sha256(artifactBytes)) {
+    throw new Error("Retained artifact bytes changed before receipt generation.");
+  }
+  const installed = await installArtifactBytes(work, artifactBytes, basename(filename));
+  const packageDirectory = installed.packageDirectory;
   await access(join(packageDirectory, "dist", "server.js"));
   const packageJson = JSON.parse(
     await readFile(join(packageDirectory, "package.json"), "utf8"),
@@ -282,15 +486,64 @@ async function prepareArtifact(repository: string, output: string) {
     packageDirectory,
     packageVersion: packageJson.version,
     artifactFilename: basename(filename),
-    artifactSha256: sha256(await readFile(retainedTarball)),
-    installedLockfileSha256: sha256(await readFile(join(installRoot, "bun.lock"))),
+    artifactSha256: sha256(artifactBytes),
+    installedLockfileSha256: installed.installedLockfileSha256,
+    packageTreeSha256: installed.packageTreeSha256,
   };
+}
+
+async function preparePreflightArtifact(
+  output: string,
+  receipt: NativeAliasPreflightReceipt,
+  artifactBytes: Uint8Array,
+) {
+  if (sha256(artifactBytes) !== receipt.artifact.sha256) {
+    throw new Error("The approved preflight artifact hash does not match its receipt.");
+  }
+
+  const work = await mkdtemp(join(tmpdir(), "better-hashline-approved-artifact-"));
+  try {
+    const artifactDirectory = join(output, "artifacts");
+    await mkdir(artifactDirectory, { recursive: true });
+    const retainedTarball = join(artifactDirectory, receipt.artifact.filename);
+    await writeBytesAtomic(retainedTarball, artifactBytes);
+    if (sha256(await readFile(retainedTarball)) !== receipt.artifact.sha256) {
+      throw new Error("The retained preflight artifact hash does not match its receipt.");
+    }
+    const installed = await installArtifactBytes(work, artifactBytes, receipt.artifact.filename);
+    const packageDirectory = installed.packageDirectory;
+    const packageJson = JSON.parse(
+      await readFile(join(packageDirectory, "package.json"), "utf8"),
+    ) as { version?: string };
+    const installedLockfileSha256 = installed.installedLockfileSha256;
+    if (
+      packageJson.version !== receipt.artifact.packageVersion ||
+      installedLockfileSha256 !== receipt.artifact.installedLockfileSha256 ||
+      installed.packageTreeSha256 !== receipt.artifact.packageTreeSha256
+    ) {
+      throw new Error("The approved preflight artifact installation does not match its receipt.");
+    }
+    return {
+      work,
+      packageDirectory,
+      packageVersion: receipt.artifact.packageVersion,
+      artifactFilename: receipt.artifact.filename,
+      artifactSha256: receipt.artifact.sha256,
+      installedLockfileSha256,
+      packageTreeSha256: installed.packageTreeSha256,
+    };
+  } catch (error) {
+    await rm(work, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function verifyAdapterIsolation(input: {
   opencode: string;
+  packageDirectory: string;
   packageUrl: string;
-}): Promise<void> {
+  adapterSet: AdapterSetId;
+}) {
   const root = await mkdtemp(join(tmpdir(), "better-hashline-preflight-"));
   try {
     await writeFile(join(root, "probe.txt"), "probe\n");
@@ -308,16 +561,50 @@ async function verifyAdapterIsolation(input: {
       root: join(root, "treatment"),
       config: { plugin: [input.packageUrl] },
     });
-    const treatment = capture(command, root, treatmentEnvironment);
+    const treatment = await capture(command, root, treatmentEnvironment);
     if (!treatment.success || !treatment.stdout.includes('"@hashline snapshot=')) {
       throw new Error(`Packed plugin preflight failed:\n${treatment.stderr || treatment.stdout}`);
     }
 
     const nativeEnvironment = await isolatedEnvironment({ root: join(root, "native"), config: {} });
-    const native = capture(command, root, nativeEnvironment);
+    const native = await capture(command, root, nativeEnvironment);
     if (native.stdout.includes('"@hashline snapshot=')) {
       throw new Error("Native benchmark environment unexpectedly loaded Better Hashline.");
     }
+
+    const verification = await capture(
+      [
+        process.execPath,
+        join(input.packageDirectory, "dist", "cli.js"),
+        "verify",
+        "--surface",
+        verificationSurfaceForAdapterSet(input.adapterSet),
+        "--opencode",
+        input.opencode,
+        "--json",
+      ],
+      root,
+    );
+    if (!verification.success) {
+      throw new Error(
+        `Packed native-alias preflight failed:\n${verification.stderr || verification.stdout}`,
+      );
+    }
+    const report = JSON.parse(verification.stdout) as { ok?: boolean; cases?: unknown[] };
+    const expectedCases = input.adapterSet === "native-aliases-v1" ? 3 : 1;
+    if (!report.ok || report.cases?.length !== expectedCases) {
+      throw new Error(`Packed verifier did not produce ${expectedCases} expected route(s).`);
+    }
+    return {
+      verifierReport: report,
+      oracleFixture: await verifyNativeAliasOracleFixture({
+        packageVersion: JSON.parse(
+          await readFile(join(input.packageDirectory, "package.json"), "utf8"),
+        ).version as string,
+        schemaSha256: EDIT_SCHEMA_SHA256,
+        hostVersion: "1.18.3",
+      }),
+    };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -351,12 +638,75 @@ function inspectAdapter(adapter: AdapterId, task: ModelTask, trace: TraceInspect
     const forbidden = ["edit", "write", "apply_patch", ...isolatedForbidden].filter(
       (tool, index, values) => trace.toolAttempts[tool] && values.indexOf(tool) === index,
     );
+    const mutationLedger = inspectMutationLedger(task, trace, "hashline");
+    if (!mutationLedger.valid) forbidden.push("mutation ledger mismatch");
     return {
       valid: missing.length === 0 && forbidden.length === 0,
       firstAttemptToolsSucceeded: required.every((tool) => firstAttemptCompleted(trace, [tool])),
       required,
       missing,
       forbidden,
+      mutationLedger,
+    };
+  }
+  if (adapter === "better-hashline-native-aliases") {
+    const uniqueRequired = requiredTreatmentTools(task).filter((tool) => tool !== "hashline_edit");
+    const requiresEdit = requiredTreatmentTools(task).includes("hashline_edit");
+    const completedAliases = ["edit", "apply_patch"].filter((tool) => trace.tools[tool]);
+    const attemptedAliases = ["edit", "apply_patch"].filter((tool) => trace.toolAttempts[tool]);
+    const missing = uniqueRequired.filter((tool) => !trace.tools[tool]);
+    if (requiresEdit && completedAliases.length !== 1)
+      missing.push("exactly one of edit/apply_patch");
+    const aliasEvents = trace.toolEvents.filter((event) =>
+      ["edit", "apply_patch"].includes(event.tool),
+    );
+    const invalidMarkers = aliasEvents.filter(
+      (event) => event.status === "completed" && event.protocolMarker !== "valid",
+    ).length;
+    const unsafeShapedAccepted = aliasEvents.filter(
+      (event) =>
+        event.status === "completed" &&
+        (event.argumentShape === "native" || event.argumentShape === "hybrid"),
+    ).length;
+    const unsafeShapedRejected = aliasEvents.filter(
+      (event) =>
+        event.status === "error" &&
+        (event.argumentShape === "native" || event.argumentShape === "hybrid") &&
+        event.errorCode === "INVALID_ARGUMENT",
+    ).length;
+    const unsafeShapedWrongError = aliasEvents.filter(
+      (event) =>
+        event.status === "error" &&
+        (event.argumentShape === "native" || event.argumentShape === "hybrid") &&
+        event.errorCode !== "INVALID_ARGUMENT",
+    ).length;
+    const forbidden = ["hashline_edit", "write", ...isolatedForbidden].filter(
+      (tool, index, values) => trace.toolAttempts[tool] && values.indexOf(tool) === index,
+    );
+    if (attemptedAliases.length > 1) forbidden.push("multiple alias surfaces");
+    if (unsafeShapedAccepted > 0) forbidden.push("accepted native/hybrid alias call");
+    if (unsafeShapedWrongError > 0)
+      forbidden.push("native/hybrid alias call returned the wrong error");
+    if (invalidMarkers > 0) forbidden.push("missing or invalid alias protocol marker");
+    if (trace.oracleDecision !== "valid")
+      forbidden.push(`oracle:${trace.oracleReason ?? "missing"}`);
+    const mutationLedger = inspectMutationLedger(task, trace, "native-aliases");
+    if (!mutationLedger.valid) forbidden.push("mutation ledger mismatch");
+    return {
+      valid: missing.length === 0 && forbidden.length === 0,
+      firstAttemptToolsSucceeded:
+        uniqueRequired.every((tool) => firstAttemptCompleted(trace, [tool])) &&
+        (!requiresEdit || firstAttemptCompleted(trace, ["edit", "apply_patch"])),
+      required: [...uniqueRequired, ...(requiresEdit ? ["exactly one of edit/apply_patch"] : [])],
+      missing,
+      forbidden,
+      activeAlias: completedAliases.length === 1 ? completedAliases[0] : null,
+      unsafeShapedRejected,
+      unsafeShapedAccepted,
+      unsafeShapedWrongError,
+      invalidMarkers,
+      mutationLedger,
+      oracleReason: trace.oracleReason ?? null,
     };
   }
   const nativeToolIds = ["edit", "write", "apply_patch"];
@@ -371,19 +721,6 @@ function inspectAdapter(adapter: AdapterId, task: ModelTask, trace: TraceInspect
     missing: nativeMutators.length > 0 ? [] : ["native mutator"],
     forbidden,
   };
-}
-
-async function reserveOutput(path: string): Promise<void> {
-  try {
-    await access(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      await mkdir(path, { recursive: true });
-      return;
-    }
-    throw error;
-  }
-  throw new Error(`Output path already exists; refusing to overwrite benchmark evidence: ${path}`);
 }
 
 function tokensEqual(left: TokenUsage, right: TokenUsage): boolean {
@@ -441,14 +778,59 @@ async function runSession(input: {
   passthroughEnvironment: readonly string[];
   output: string;
   timeoutMs: number;
+  providerConfig?: Record<string, unknown>;
+  outputTokenLimit?: number;
+  traceByteLimit?: number;
+  captureProbeHooks?: boolean;
+  onAuthState?: (bytes: Uint8Array) => Promise<void>;
+  packageVersion: string;
+  hostVersion: string;
+  scheduleIndex: number;
 }) {
-  const fixture = await mkdtemp(join(tmpdir(), "better-hashline-model-"));
+  const fixture = await realpath(await mkdtemp(join(tmpdir(), "better-hashline-model-")));
   const environmentRoot = await mkdtemp(join(tmpdir(), "better-hashline-env-"));
-  const rawName = `${input.task.id}.${input.adapter}.${input.repeat}`;
+  const modelName = input.model.replaceAll(/[^A-Za-z0-9_-]+/gu, "_");
+  const rawName = `${String(input.scheduleIndex).padStart(3, "0")}.${modelName}.${input.task.id}.${input.adapter}.${input.repeat}`;
   try {
     await writeFixture(fixture, input.task);
+    const expectedWorktree = parse(fixture).root;
+    const retryGuardState = join(environmentRoot, "provider-retry.json");
+    const retryGuard = join(environmentRoot, "provider-retry-guard.ts");
+    const probeObserver = join(environmentRoot, "probe-observer.ts");
+    const probeHookLog = join(input.output, "raw", `${rawName}.hooks.jsonl`);
+    await writeFile(
+      retryGuard,
+      `export default async () => ({ event: async ({ event }) => {
+  if (event?.type === "session.status" && event.properties?.status?.type === "retry") {
+    await Bun.write(${JSON.stringify(retryGuardState)}, JSON.stringify({ retry: true }));
+    process.exit(86);
+  }
+      } });\n`,
+    );
+    if (input.captureProbeHooks) {
+      await writeFile(
+        probeObserver,
+        `import { appendFile } from "node:fs/promises";
+const relevant = new Set(["hashline_read", "edit", "apply_patch"]);
+export default async () => ({
+  async "tool.execute.before"(input, output) {
+    if (!relevant.has(input.tool)) return;
+    await appendFile(${JSON.stringify(probeHookLog)}, JSON.stringify({ hook: "before", tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args }) + "\\n", "utf8");
+  },
+});
+`,
+      );
+    }
+    const adapterConfig = adapterPluginConfig(input.adapter, input.packageUrl);
+    const adapterPlugins = Array.isArray(adapterConfig.plugin) ? adapterConfig.plugin : [];
     const config = {
-      ...(input.adapter === "better-hashline" ? { plugin: [input.packageUrl] } : {}),
+      ...input.providerConfig,
+      ...adapterConfig,
+      plugin: [
+        ...(input.captureProbeHooks ? [pathToFileURL(probeObserver).href] : []),
+        ...adapterPlugins,
+        pathToFileURL(retryGuard).href,
+      ],
       permission: {
         "*": "allow",
         bash: "deny",
@@ -457,6 +839,9 @@ async function runSession(input: {
         webfetch: "deny",
         websearch: "deny",
       },
+      agent: {
+        [input.agent]: { steps: MAX_AGENT_STEPS },
+      },
     };
     const environment = await isolatedEnvironment({
       root: environmentRoot,
@@ -464,6 +849,9 @@ async function runSession(input: {
       ...(input.authFile ? { authFile: input.authFile } : {}),
       passthroughEnvironment: input.passthroughEnvironment,
     });
+    if (input.outputTokenLimit) {
+      environment.OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX = String(input.outputTokenLimit);
+    }
     const command = [
       input.opencode,
       "run",
@@ -481,37 +869,74 @@ async function runSession(input: {
       input.task.prompt,
     ];
     const started = performance.now();
-    const processHandle = Bun.spawn(command, {
+    const remainingSessionTime = () => Math.max(1, input.timeoutMs - (performance.now() - started));
+    const outcome = await captureBoundedProcess({
+      command,
       cwd: fixture,
       env: environment,
-      stdout: "pipe",
-      stderr: "pipe",
+      timeoutMs: input.timeoutMs,
+      stdoutLimit: input.traceByteLimit ?? 8 * 1024 * 1024,
+      stderrLimit: 1024 * 1024,
     });
-    const stdoutPromise = new Response(processHandle.stdout).text();
-    const stderrPromise = new Response(processHandle.stderr).text();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const outcome = await Promise.race([
-      processHandle.exited.then((exitCode) => ({ exitCode, timedOut: false as const })),
-      new Promise<{ exitCode: number; timedOut: true }>((resolveTimeout) => {
-        timeout = setTimeout(() => {
-          processHandle.kill();
-          resolveTimeout({ exitCode: -1, timedOut: true });
-        }, input.timeoutMs);
-      }),
-    ]);
-    if (timeout) clearTimeout(timeout);
-    const exitCode = outcome.timedOut ? await processHandle.exited : outcome.exitCode;
-    const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+    const { exitCode, stdout, stderr } = outcome;
     const modelWallDurationMs = Math.round(performance.now() - started);
+    const traceBytes = outcome.stdoutBytes;
+    const traceWithinLimit = !outcome.stdoutOverflow;
 
-    const evaluation = await evaluate(fixture, input.task);
-    const trace = inspectJsonlTrace(stdout);
+    const evaluation = await evaluateExactTree(fixture, input.task);
+    const initialTrace = inspectJsonlTrace(traceWithinLimit ? stdout : "", {
+      allowedPathRoot: fixture,
+    });
+    const sessionId = initialTrace.sessionIds.length === 1 ? initialTrace.sessionIds[0] : undefined;
+    const nativeAliasExport =
+      input.adapter === "better-hashline-native-aliases" && sessionId
+        ? await captureSessionExport(
+            [input.opencode, "export", sessionId],
+            fixture,
+            environment,
+            remainingSessionTime(),
+          )
+        : undefined;
+    const trace = nativeAliasExport
+      ? await inspectNativeAliasTrace(
+          stdout,
+          nativeAliasExport.success ? nativeAliasExport.stdout : "",
+          {
+            packageVersion: input.packageVersion,
+            schemaSha256: EDIT_SCHEMA_SHA256,
+            hostVersion: input.hostVersion,
+            allowedPathRoot: fixture,
+            expectedDirectory: fixture,
+            expectedWorktree,
+            requireNativeAliasMarker: !Object.keys(input.task.expectedFiles).some(
+              (path) => !(path in input.task.files),
+            ),
+          },
+        )
+      : initialTrace;
     const adapterIntegrity = inspectAdapter(input.adapter, input.task, trace);
-    const sessionId = trace.sessionIds.length === 1 ? trace.sessionIds[0] : undefined;
     const exportedProcess = sessionId
-      ? capture([input.opencode, "export", sessionId, "--sanitize"], fixture, environment)
-      : { success: false, exitCode: -1, stdout: "", stderr: "No unique session ID in trace." };
-    const exported = inspectSessionExport(exportedProcess.stdout);
+      ? await captureSessionExport(
+          [input.opencode, "export", sessionId, "--sanitize"],
+          fixture,
+          environment,
+          remainingSessionTime(),
+        )
+      : {
+          success: false,
+          exitCode: -1,
+          timedOut: false,
+          stdout: "",
+          stderr: "No unique session ID in trace.",
+          stdoutBytes: 0,
+          stderrBytes: 0,
+          stdoutOverflow: false,
+          stderrOverflow: false,
+        };
+    const sanitizedExportVerified =
+      exportedProcess.success &&
+      excludesSensitivePaths(exportedProcess.stdout, [fixture, environmentRoot, input.output]);
+    const exported = inspectSessionExport(sanitizedExportVerified ? exportedProcess.stdout : "");
     const observedIdentity = inspectIdentity({
       requestedModel: input.model,
       requestedAgent: input.agent,
@@ -520,22 +945,44 @@ async function runSession(input: {
     });
     const usageConsistent =
       tokensEqual(trace.tokens, exported.tokens) && Math.abs(trace.cost - exported.cost) < 1e-9;
-    const processSucceeded = exitCode === 0 && !outcome.timedOut;
+    const retryGuardTriggered = await readFile(retryGuardState, "utf8").then(
+      () => true,
+      () => false,
+    );
+    const modelRequests = exported.assistantMessages + exported.retries;
+    const accountedCost = Math.max(trace.cost, exported.cost);
+    const processSucceeded =
+      exitCode === 0 && !outcome.timedOut && !outcome.stdoutOverflow && !outcome.stderrOverflow;
     const transportValid =
+      traceWithinLimit &&
       trace.parseErrors === 0 &&
       trace.schemaErrors === 0 &&
+      trace.duplicateToolEvents === 0 &&
       trace.errorEvents === 0 &&
+      !retryGuardTriggered &&
+      exported.retries === 0 &&
+      terminalSkeletonMatches(trace, exported) &&
+      exported.assistantMessages <= MAX_AGENT_STEPS &&
       trace.sessionIds.length === 1 &&
-      exportedProcess.success &&
+      sanitizedExportVerified &&
       observedIdentity.valid &&
       usageConsistent;
     await writeFile(join(input.output, "raw", `${rawName}.jsonl`), stdout);
     if (stderr) await writeFile(join(input.output, "raw", `${rawName}.stderr.txt`), stderr);
-    if (exportedProcess.stdout) {
+    if (sanitizedExportVerified) {
       await writeFile(
         join(input.output, "raw", `${rawName}.session.sanitized.json`),
         exportedProcess.stdout,
       );
+    }
+    const finalEvaluation = await evaluateExactTree(fixture, input.task);
+    const exactFiles = evaluation.exactFiles && finalEvaluation.exactFiles;
+    const mismatches = [
+      ...new Set([...evaluation.mismatches, ...finalEvaluation.mismatches]),
+    ].sort();
+    if (input.onAuthState) {
+      const sessionAuth = await readFile(join(environmentRoot, "data", "opencode", "auth.json"));
+      await input.onAuthState(sessionAuth);
     }
     return {
       task: input.task.id,
@@ -549,15 +996,41 @@ async function runSession(input: {
       adapterIntegrity,
       observedIdentity,
       usageConsistent,
-      exactFiles: evaluation.exactFiles,
-      passed: processSucceeded && transportValid && evaluation.exactFiles && adapterIntegrity.valid,
-      mismatches: evaluation.mismatches,
+      retryGuardTriggered,
+      modelRequests,
+      accountedCost,
+      requestedModel: input.model,
+      requestedVariant: input.variant ?? null,
+      exactFiles,
+      passed: processSucceeded && transportValid && exactFiles && adapterIntegrity.valid,
+      mismatches,
       modelWallDurationMs,
       totalDurationMs: Math.round(performance.now() - started),
-      traceBytes: Buffer.byteLength(stdout),
+      traceBytes,
+      traceWithinLimit,
+      stdoutOverflow: outcome.stdoutOverflow,
+      stderrBytes: outcome.stderrBytes,
+      stderrOverflow: outcome.stderrOverflow,
       traceSha256: sha256(stdout),
       stderrSha256: stderr ? sha256(stderr) : null,
       sessionExportSucceeded: exportedProcess.success,
+      sessionExportStdoutBytes: exportedProcess.stdoutBytes,
+      sessionExportStderrBytes: exportedProcess.stderrBytes,
+      sessionExportStdoutOverflow: exportedProcess.stdoutOverflow,
+      sessionExportStderrOverflow: exportedProcess.stderrOverflow,
+      sanitizedExportVerified,
+      nativeAliasExport:
+        nativeAliasExport === undefined
+          ? null
+          : {
+              success: nativeAliasExport.success,
+              exitCode: nativeAliasExport.exitCode,
+              timedOut: nativeAliasExport.timedOut,
+              stdoutBytes: nativeAliasExport.stdoutBytes,
+              stderrBytes: nativeAliasExport.stderrBytes,
+              stdoutOverflow: nativeAliasExport.stdoutOverflow,
+              stderrOverflow: nativeAliasExport.stderrOverflow,
+            },
       sessionExportSha256: exportedProcess.stdout ? sha256(exportedProcess.stdout) : null,
       sessionExportStderrSha256: exportedProcess.stderr ? sha256(exportedProcess.stderr) : null,
       trace,
@@ -573,222 +1046,864 @@ async function runSession(input: {
 
 const execute = hasFlag("execute");
 const preflight = hasFlag("preflight");
-const repeats = boundedInteger("repeats", option("repeats"), 2, 20);
-const timeoutMs = boundedInteger("timeout-ms", option("timeout-ms"), 5 * 60_000, 30 * 60_000);
-const model = option("model") ?? process.env.BENCHMARK_MODEL;
+const nativeAliasPilot = hasFlag("native-alias-pilot");
+const nativeAliasProbe = hasFlag("native-alias-probe");
+const captureProbeHooks = hasFlag("capture-probe-hooks");
+const repeats = boundedInteger(
+  "repeats",
+  option("repeats"),
+  nativeAliasPilot || nativeAliasProbe ? 1 : 2,
+  20,
+);
+const requestedTimeoutMs = option("timeout-ms");
+const timeoutMs = boundedInteger(
+  "timeout-ms",
+  requestedTimeoutMs,
+  nativeAliasPilot ? nativeAliasPilotV7.sessionTimeoutMs : 5 * 60_000,
+  30 * 60_000,
+);
+const requestedModel = option("model") ?? process.env.BENCHMARK_MODEL;
 const variant = option("variant");
 const agent = option("agent") ?? "build";
 const authFile = option("auth-file") ?? process.env.BENCHMARK_AUTH_FILE;
-const taskSetName = option("task-set") ?? "baseline-v1";
+const taskSetName =
+  option("task-set") ??
+  (nativeAliasProbe ? "single-constant-probe-v1" : nativeAliasPilotV7.taskSet);
 if (!Object.hasOwn(modelTaskSets, taskSetName)) {
   throw new Error(`--task-set must be one of: ${Object.keys(modelTaskSets).sort().join(", ")}.`);
 }
 const taskSet = taskSetName as keyof typeof modelTaskSets;
 const modelTasks: readonly ModelTask[] = modelTaskSets[taskSet];
-const repository = resolve(import.meta.dir, "../..");
+const adapterSetName =
+  option("adapter-set") ??
+  (nativeAliasPilot
+    ? nativeAliasPilotV7.adapterSet
+    : nativeAliasProbe
+      ? "native-alias-probe-v1"
+      : "native-vs-unique-v1");
+if (!Object.hasOwn(modelAdapterSets, adapterSetName)) {
+  throw new Error(
+    `--adapter-set must be one of: ${Object.keys(modelAdapterSets).sort().join(", ")}.`,
+  );
+}
+const adapterSet = adapterSetName as AdapterSetId;
+const adapters: readonly AdapterId[] = modelAdapterSets[adapterSet];
+if (nativeAliasPilot) {
+  if (requestedTimeoutMs && timeoutMs !== nativeAliasPilotV7.sessionTimeoutMs) {
+    throw new Error(
+      `--native-alias-pilot requires --timeout-ms=${nativeAliasPilotV7.sessionTimeoutMs}.`,
+    );
+  }
+  if (taskSet !== nativeAliasPilotV7.taskSet) {
+    throw new Error(`--native-alias-pilot requires --task-set=${nativeAliasPilotV7.taskSet}.`);
+  }
+  if (adapterSet !== nativeAliasPilotV7.adapterSet) {
+    throw new Error(
+      `--native-alias-pilot requires --adapter-set=${nativeAliasPilotV7.adapterSet}.`,
+    );
+  }
+  if (repeats !== nativeAliasPilotV7.repeats) {
+    throw new Error(`--native-alias-pilot requires --repeats=${nativeAliasPilotV7.repeats}.`);
+  }
+  if (requestedModel || variant) {
+    throw new Error("--native-alias-pilot uses its frozen model and variant manifest.");
+  }
+  if (agent !== "build") throw new Error("--native-alias-pilot requires --agent=build.");
+  const taskManifestSha256 = sha256(JSON.stringify(modelTasks));
+  const adapterManifestSha256 = sha256(JSON.stringify(adapterSetManifest(adapterSet)));
+  if (taskManifestSha256 !== nativeAliasPilotV7.taskManifestSha256) {
+    throw new Error(
+      "--native-alias-pilot task contents do not match the frozen proposal manifest.",
+    );
+  }
+  if (adapterManifestSha256 !== nativeAliasPilotV7.adapterManifestSha256) {
+    throw new Error(
+      "--native-alias-pilot adapter behavior does not match the frozen proposal manifest.",
+    );
+  }
+}
+if (nativeAliasProbe) {
+  const probeModel = nativeAliasPilotV7.models.find((entry) => entry.model === requestedModel);
+  if (nativeAliasPilot || preflight) {
+    throw new Error("--native-alias-probe cannot be combined with pilot or preflight modes.");
+  }
+  if (
+    !["baseline-v1", "single-constant-probe-v1", "create-file-probe-v1"].includes(taskSet) ||
+    !["native-alias-probe-v1", "native-aliases-v1"].includes(adapterSet) ||
+    !probeModel ||
+    variant !== ("variant" in probeModel ? probeModel.variant : "") ||
+    agent !== "build"
+  ) {
+    throw new Error(
+      "--native-alias-probe requires the frozen baseline or an exact probe task, native-alias-only or paired adapters, and one exact frozen pilot model/variant.",
+    );
+  }
+}
+if (captureProbeHooks && !nativeAliasProbe) {
+  throw new Error("--capture-probe-hooks requires --native-alias-probe.");
+}
+if (
+  execute &&
+  adapters.includes("better-hashline-native-aliases") &&
+  !nativeAliasPilot &&
+  !nativeAliasProbe
+) {
+  throw new Error("Paid native alias execution requires --native-alias-pilot.");
+}
+const scheduledModels = nativeAliasPilot
+  ? nativeAliasPilotV7.models
+  : requestedModel
+    ? [{ model: requestedModel, ...(variant ? { variant } : {}) }]
+    : [];
+const stagedRepository = option("staged-repository");
+const stagedRunnerSha256 = option("staged-runner-sha256");
+const stagedSourceCommit = option("staged-source-commit");
+const stagedSourceDirty = option("staged-source-dirty");
+const stagedApprovalCommit = option("staged-approval-commit");
+const stagedCandidateCommit = option("staged-candidate-commit");
+const stagedExternalApproval = option("staged-external-approval");
+const stagedExternalApprovalSha256 = option("staged-external-approval-sha256");
+if (
+  !stagedRepository ||
+  !/^[a-f0-9]{64}$/u.test(stagedRunnerSha256 ?? "") ||
+  !/^[a-f0-9]{40}$/u.test(stagedSourceCommit ?? "") ||
+  !["true", "false"].includes(stagedSourceDirty ?? "")
+) {
+  throw new Error("Model runner must be launched through the staged runner boundary.");
+}
+const repository = await realpath(stagedRepository);
+const runnerExecutableBytes = new Uint8Array(await readFile(import.meta.path));
+const runnerExecutableSha256 = sha256(runnerExecutableBytes);
+if (runnerExecutableSha256 !== stagedRunnerSha256) {
+  throw new Error("Executing model-runner bytes do not match the staged runner SHA-256.");
+}
+const schedule = scheduledModels
+  .flatMap((scheduledModel) =>
+    Array.from({ length: repeats }, (_, repeatIndex) => repeatIndex + 1).flatMap((repeat) =>
+      modelTasks.flatMap((task, taskIndex) => {
+        const order: AdapterId[] =
+          (taskIndex + repeat) % 2 === 0 ? [...adapters] : [...adapters].reverse();
+        return order.map((adapter) => ({
+          model: scheduledModel.model,
+          variant: "variant" in scheduledModel ? scheduledModel.variant : null,
+          task: task.id,
+          adapter,
+          repeat,
+        }));
+      }),
+    ),
+  )
+  .map((entry, index) => ({ index: index + 1, ...entry }));
+const scheduleManifestSha256 = sha256(JSON.stringify(schedule));
+if (nativeAliasPilot) {
+  if (schedule.length !== nativeAliasPilotV7.sessionLimit) {
+    throw new Error("The frozen native-alias pilot schedule is inconsistent.");
+  }
+  if (scheduleManifestSha256 !== nativeAliasPilotV7.scheduleManifestSha256) {
+    throw new Error("The frozen native-alias pilot schedule does not match its proposal digest.");
+  }
+}
 const output = resolve(
   option("output") ??
     join(
       repository,
       "benchmarks",
       "results",
-      "model",
+      preflight ? "local" : "model",
       new Date().toISOString().replaceAll(":", "-"),
     ),
 );
-const sessions = modelTasks.length * repeats * 2;
+const pilotOutputRoot = resolve(repository, "benchmarks", "results", preflight ? "local" : "model");
+const pilotOutputRelative = relative(pilotOutputRoot, output);
+if (
+  (nativeAliasPilot || nativeAliasProbe) &&
+  (!pilotOutputRelative ||
+    pilotOutputRelative === ".." ||
+    pilotOutputRelative.startsWith("../") ||
+    pilotOutputRelative.startsWith("..\\") ||
+    isAbsolute(pilotOutputRelative) ||
+    /[\\/]/u.test(pilotOutputRelative))
+) {
+  throw new Error(
+    `Native-alias pilot and probe output must be a new direct child of benchmarks/results/${preflight ? "local" : "model"}/.`,
+  );
+}
+const modelMultiplier = nativeAliasPilot ? scheduledModels.length : 1;
+const sessions = modelTasks.length * repeats * adapters.length * modelMultiplier;
+const maximumModelRequests = sessions * MAX_AGENT_STEPS;
 
 if (!execute && !preflight) {
   console.log(
-    `Planned paired model benchmark ${taskSet}: ${modelTasks.length} tasks x 2 adapters x ${repeats} repeats = ${sessions} sessions.`,
+    `Planned paired model benchmark ${taskSet}/${adapterSet}: ${modelTasks.length} tasks x ${adapters.length} adapters x ${repeats} repeats x ${modelMultiplier} model(s) = ${sessions} sessions.`,
   );
   console.log(
-    "No model was called. Pass --execute, --model=provider/model, and BENCHMARK_ACK_COSTS=yes to run it.",
+    `No model was called. Paid execution is bounded to ${MAX_AGENT_STEPS} model requests per session (${maximumModelRequests} total).`,
+  );
+  console.log(
+    nativeAliasPilot
+      ? `Runner executable SHA-256 ${runnerExecutableSha256}; schedule SHA-256 ${scheduleManifestSha256}. ${nativeAliasPilotV7.id} is not approved for paid execution; only dry-run and preflight modes are enabled.`
+      : "Pass --execute, --model, --approved-sessions, --approved-max-requests, --approved-max-cost-usd, exactly one auth source, and BENCHMARK_ACK_COSTS=yes.",
   );
   process.exit(0);
 }
 if (execute && preflight) throw new Error("Use either --execute or --preflight, not both.");
 
-const opencodePackage = JSON.parse(
-  await readFile(join(repository, "node_modules", "opencode-ai", "package.json"), "utf8"),
-) as { bin?: { opencode?: string }; version?: string };
-if (!opencodePackage.bin?.opencode || !opencodePackage.version) {
-  throw new Error("Pinned opencode-ai package does not expose its version and binary.");
+const sourceCommitResult = await capture(["git", "rev-parse", "HEAD"], repository);
+if (!sourceCommitResult.success)
+  throw new Error("Model benchmarks require a committed source revision.");
+const sourceCommit = sourceCommitResult.stdout.trim();
+const sourceStatus = (
+  await run(["git", "status", "--porcelain", "--untracked-files=all"], repository)
+).trim();
+const sourceIndexFlags = (await run(["git", "ls-files", "-v"], repository))
+  .split(/\r?\n/u)
+  .filter((line) => /^[a-zS]/u.test(line));
+const sourceDirty = sourceStatus.length > 0 || sourceIndexFlags.length > 0;
+if (sourceCommit !== stagedSourceCommit || sourceDirty !== (stagedSourceDirty === "true")) {
+  throw new Error("Source identity changed across the staged runner boundary.");
 }
-const opencode = resolve(repository, "node_modules", "opencode-ai", opencodePackage.bin.opencode);
-await access(opencode);
+const sourceStatusSha256 = sha256(JSON.stringify({ sourceStatus, sourceIndexFlags }));
+const taskManifestSha256 = sha256(JSON.stringify(modelTasks));
+const adapterManifestSha256 = sha256(JSON.stringify(adapterSetManifest(adapterSet)));
+const lockfileSha256 = sha256(await readFile(join(repository, "bun.lock")));
+const toolchain = await deriveEffectiveToolIdentities({ cwd: repository });
+if (
+  nativeAliasPilot &&
+  (toolchain.bun.version !== nativeAliasPilotV7.requiredBunVersion ||
+    toolchain.npm.cli.packageVersion !== nativeAliasPilotV7.requiredNpmVersion ||
+    toolchain.opencode.packageVersion !== nativeAliasPilotV7.requiredOpenCodeVersion)
+) {
+  throw new Error("The effective Bun/npm/OpenCode toolchain does not match pilot v7.");
+}
+const opencodeSource = toolchain.opencode.binary.path;
+const opencodePackage = { version: toolchain.opencode.packageVersion };
+const osRelease = release();
+let pilotApproval: ValidatedPilotV7Approval | undefined;
+if (nativeAliasPilot && execute) {
+  if (
+    stagedApprovalCommit !== sourceCommit ||
+    !/^[a-f0-9]{40}$/u.test(stagedCandidateCommit ?? "") ||
+    !stagedExternalApproval ||
+    !/^[a-f0-9]{64}$/u.test(stagedExternalApprovalSha256 ?? "")
+  ) {
+    throw new Error("Paid pilot v7 execution requires the staged external approval boundary.");
+  }
+  const approvalCommit = await validatePilotV7ApprovalCommit({
+    repository,
+    approvalCommit: sourceCommit,
+  });
+  if (approvalCommit.candidateCommit !== stagedCandidateCommit) {
+    throw new Error("Staged pilot candidate commit does not match approval commit C.");
+  }
+  const externalApprovalBytes = await readBoundedRegularFile(
+    stagedExternalApproval,
+    "Staged external approval bundle",
+  );
+  if (sha256(externalApprovalBytes) !== stagedExternalApprovalSha256) {
+    throw new Error("Staged external approval bundle hash changed across the launcher boundary.");
+  }
+  pilotApproval = validatePilotV7ExternalApprovalBundle(externalApprovalBytes, approvalCommit);
+  if (
+    pilotApproval.bundle.hashes.runnerExecutableSha256 !== runnerExecutableSha256 ||
+    pilotApproval.bundle.hashes.scheduleManifestSha256 !== scheduleManifestSha256 ||
+    pilotApproval.bundle.hashes.taskManifestSha256 !== taskManifestSha256 ||
+    pilotApproval.bundle.hashes.adapterManifestSha256 !== adapterManifestSha256 ||
+    pilotApproval.bundle.hashes.rootLockfileSha256 !== lockfileSha256 ||
+    pilotApproval.bundle.hashes.toolchainSha256 !== jsonSha256(toolchain)
+  ) {
+    throw new Error("Pilot v7 executing provenance does not match external approval bundle B.");
+  }
+  const approvedOutput = resolve(repository, pilotApproval.bundle.outputRelativePath);
+  if (output !== approvedOutput) {
+    throw new Error(`Paid pilot v7 output must be exactly ${approvedOutput}.`);
+  }
+}
 
 if (preflight) {
-  await reserveOutput(output);
-  const artifact = await prepareArtifact(repository, output);
+  if (nativeAliasPilot) await reservePilotOutput(output, pilotOutputRoot, repository);
+  else await reserveOutput(output);
+  const privateOpenCode = await stagePrivateExecutable(
+    toolchain.opencode.binary,
+    "OpenCode executable",
+  );
+  let artifact: Awaited<ReturnType<typeof prepareArtifact>> | undefined;
   try {
-    await verifyAdapterIsolation({
-      opencode,
-      packageUrl: pathToFileURL(artifact.packageDirectory).href,
-    });
-    console.log(
-      `Verified isolated native and Better Hashline adapters with ${artifact.artifactFilename} (${artifact.artifactSha256}).`,
+    artifact = await prepareArtifact(
+      repository,
+      output,
+      toolchain.npm.effectiveCommand,
+      sourceDirty ? undefined : sourceCommit,
     );
-    await writeFile(
-      join(output, "preflight.json"),
-      `${JSON.stringify(
-        {
-          schemaVersion: 2,
-          generatedAt: new Date().toISOString(),
-          modelCalls: 0,
-          taskSet,
-          taskCount: modelTasks.length,
-          taskManifestSha256: sha256(JSON.stringify(modelTasks)),
-          sideEffects: [
+    const isolation = await verifyAdapterIsolation({
+      opencode: privateOpenCode.path,
+      packageDirectory: artifact.packageDirectory,
+      packageUrl: pathToFileURL(artifact.packageDirectory).href,
+      adapterSet,
+    });
+    const finalCommit = (await run(["git", "rev-parse", "HEAD"], repository)).trim();
+    const finalStatus = (
+      await run(["git", "status", "--porcelain", "--untracked-files=all"], repository)
+    ).trim();
+    const finalIndexFlags = (await run(["git", "ls-files", "-v"], repository))
+      .split(/\r?\n/u)
+      .filter((line) => /^[a-zS]/u.test(line));
+    if (
+      finalCommit !== sourceCommit ||
+      finalStatus !== sourceStatus ||
+      JSON.stringify(finalIndexFlags) !== JSON.stringify(sourceIndexFlags)
+    ) {
+      throw new Error("Source identity changed while producing preflight evidence.");
+    }
+    const finalToolchain = await deriveEffectiveToolIdentities({ cwd: repository });
+    assertEffectiveToolIdentitiesUnchanged(toolchain, finalToolchain);
+    console.log(
+      `Verified ${adapterSet} isolation and packed routes with ${artifact.artifactFilename} (${artifact.artifactSha256}).`,
+    );
+    const preflightReceipt = {
+      schemaVersion: NATIVE_ALIAS_PREFLIGHT_SCHEMA_VERSION,
+      generatedAt: new Date().toISOString(),
+      modelCalls: 0,
+      pilotId: nativeAliasPilot ? nativeAliasPilotV7.id : "unscoped-model-preflight",
+      sourceCommit,
+      sourceDirty,
+      sourceEligibleForApproval: !sourceDirty,
+      sourceStatusSha256,
+      runnerExecutableSha256,
+      runnerExecutableRelativePath: "artifacts/model-runner.mjs",
+      scheduleManifestSha256,
+      taskSet,
+      adapterSet,
+      adapters,
+      taskCount: modelTasks.length,
+      taskManifestSha256,
+      adapterManifestSha256,
+      schedule,
+      limits: {
+        timeoutMs,
+        maxAgentSteps: MAX_AGENT_STEPS,
+        requestedOutputTokenLimit: nativeAliasPilot
+          ? nativeAliasPilotV7.requestedOutputTokenLimit
+          : null,
+        traceByteLimit: nativeAliasPilot ? nativeAliasPilotV7.traceByteLimit : null,
+        sessionLimit: sessions,
+        requestLimit: maximumModelRequests,
+        totalCostStopThresholdUsd: nativeAliasPilot
+          ? nativeAliasPilotV7.totalReportedCostUsd
+          : null,
+        perModelCostStopThresholdUsd: nativeAliasPilot
+          ? nativeAliasPilotV7.perModelReportedCostUsd
+          : null,
+      },
+      sideEffects: nativeAliasPilot
+        ? NATIVE_ALIAS_PREFLIGHT_SIDE_EFFECTS
+        : [
             "built the local package",
             "created an npm tarball",
-            "installed exact package dependencies with lifecycle scripts disabled",
+            "installed exact package dependencies with lifecycle scripts disabled and copyfile backend",
             "executed model-free OpenCode tool-registration probes",
+            `executed the packed ${verificationSurfaceForAdapterSet(adapterSet)} credential-free verifier`,
           ],
-          artifact: {
-            packageVersion: artifact.packageVersion,
-            filename: artifact.artifactFilename,
-            sha256: artifact.artifactSha256,
-            installedLockfileSha256: artifact.installedLockfileSha256,
-          },
-          opencodeVersion: opencodePackage.version,
-          opencodeExecutableSha256: sha256(await readFile(opencode)),
-          bunVersion: Bun.version,
+      artifact: {
+        packageVersion: artifact.packageVersion,
+        filename: artifact.artifactFilename,
+        relativePath: `artifacts/${artifact.artifactFilename}`,
+        sha256: artifact.artifactSha256,
+        installedLockfileSha256: artifact.installedLockfileSha256,
+        packageTreeSha256: artifact.packageTreeSha256,
+      },
+      rootLockfileSha256: lockfileSha256,
+      toolchain,
+      toolchainSha256: jsonSha256(toolchain),
+      platform: { name: process.platform, arch: process.arch, osRelease },
+      verifierReport: isolation.verifierReport,
+      oracleFixture: isolation.oracleFixture,
+    };
+    if (nativeAliasPilot && !sourceDirty) {
+      assertNativeAliasPreflightReceipt(preflightReceipt, {
+        pilotId: nativeAliasPilotV7.id,
+        sourceCommit,
+        sourceStatusSha256,
+        runnerExecutableSha256,
+        scheduleManifestSha256,
+        taskManifestSha256,
+        adapterManifestSha256,
+        taskSet,
+        adapterSet,
+        adapters,
+        taskCount: modelTasks.length,
+        schedule,
+        limits: {
+          timeoutMs,
+          maxAgentSteps: MAX_AGENT_STEPS,
+          requestedOutputTokenLimit: nativeAliasPilotV7.requestedOutputTokenLimit,
+          traceByteLimit: nativeAliasPilotV7.traceByteLimit,
+          sessionLimit: sessions,
+          requestLimit: maximumModelRequests,
+          totalCostStopThresholdUsd: nativeAliasPilotV7.totalReportedCostUsd,
+          perModelCostStopThresholdUsd: nativeAliasPilotV7.perModelReportedCostUsd,
         },
-        null,
-        2,
-      )}\n`,
-    );
+        artifact: preflightReceipt.artifact,
+        rootLockfileSha256: lockfileSha256,
+        toolchain,
+        platform: preflightReceipt.platform,
+      });
+    }
+    await writeBytesAtomic(join(output, "artifacts", "model-runner.mjs"), runnerExecutableBytes);
+    await writeJsonAtomic(join(output, "preflight.json"), preflightReceipt);
   } finally {
-    await rm(artifact.work, { recursive: true, force: true });
+    if (artifact) await rm(artifact.work, { recursive: true, force: true });
+    await rm(privateOpenCode.root, { recursive: true, force: true });
   }
   process.exit(0);
 }
 
-if (!model) throw new Error("--model=provider/model or BENCHMARK_MODEL is required.");
-requestedModelIdentity(model);
+if (!nativeAliasPilot && !requestedModel) {
+  throw new Error("--model=provider/model or BENCHMARK_MODEL is required.");
+}
+for (const scheduledModel of scheduledModels) requestedModelIdentity(scheduledModel.model);
+const approvedSessions = nativeAliasPilot
+  ? nativeAliasPilotV7.sessionLimit
+  : boundedInteger("approved-sessions", option("approved-sessions"), 1, 10_000);
+const approvedMaxRequests = nativeAliasPilot
+  ? nativeAliasPilotV7.requestLimit
+  : boundedInteger("approved-max-requests", option("approved-max-requests"), 1, 100_000);
+const approvedMaxCostUsd = nativeAliasPilot
+  ? nativeAliasPilotV7.totalReportedCostUsd
+  : positiveNumber("approved-max-cost-usd", option("approved-max-cost-usd"));
+const approvedPreflightPath = option("approved-preflight-receipt");
+if (approvedSessions !== sessions) {
+  throw new Error(`--approved-sessions must equal the immutable schedule of ${sessions}.`);
+}
+if (approvedMaxRequests !== maximumModelRequests) {
+  throw new Error(
+    `--approved-max-requests must equal the hard agent-step ceiling of ${maximumModelRequests}.`,
+  );
+}
+if (nativeAliasPilot) {
+  if (
+    approvedSessions !== nativeAliasPilotV7.sessionLimit ||
+    approvedMaxRequests !== nativeAliasPilotV7.requestLimit ||
+    approvedMaxCostUsd !== nativeAliasPilotV7.totalReportedCostUsd
+  ) {
+    throw new Error(
+      `--native-alias-pilot requires approvals of ${nativeAliasPilotV7.sessionLimit} sessions, ${nativeAliasPilotV7.requestLimit} requests, and USD ${nativeAliasPilotV7.totalReportedCostUsd}.`,
+    );
+  }
+  if (!pilotApproval) throw new Error("Pilot v7 external approval was not established.");
+}
 if (process.env.BENCHMARK_ACK_COSTS !== "yes") {
   throw new Error(
     "Set BENCHMARK_ACK_COSTS=yes to acknowledge that this command incurs model usage and cost.",
   );
 }
-if (authFile) await access(authFile);
 const passthroughEnvironment = parsePassthroughEnvironment(
   option("pass-env") ?? process.env.BENCHMARK_PASS_ENV,
 );
+if (Boolean(authFile) === passthroughEnvironment.length > 0) {
+  throw new Error("Paid execution requires exactly one auth source: --auth-file or --pass-env.");
+}
+const authSourceBytes = authFile
+  ? await readBoundedRegularFile(authFile, "Benchmark authentication", 1024 * 1024)
+  : undefined;
+let endpointAttestationSha256: string | undefined;
+let budgetAttestationSha256: string | undefined;
+let userApprovalSha256: string | undefined;
+if (nativeAliasPilot || nativeAliasProbe) {
+  if (!authFile || passthroughEnvironment.length > 0) {
+    throw new Error(
+      "Native alias model execution requires exactly one isolated --auth-file source.",
+    );
+  }
+  if (!authSourceBytes) throw new Error("The native-alias auth file is unreadable.");
+  parsePilotAuth(authSourceBytes);
+}
+if (nativeAliasPilot) {
+  if (!pilotApproval) throw new Error("Pilot v7 external approval was not established.");
+  if (!authSourceBytes) throw new Error("The frozen native-alias pilot auth file is unreadable.");
+  if (
+    sha256(authSourceBytes) !== pilotApproval.bundle.hashes.authFileSha256 ||
+    pilotAuthIdentitySha256(authSourceBytes) !== pilotApproval.bundle.hashes.authIdentitySha256
+  ) {
+    throw new Error("Pilot authentication does not match external approval bundle B.");
+  }
+  const endpointAttestation = option("endpoint-attestation");
+  const budgetAttestation = option("budget-attestation");
+  const userApproval = option("user-approval-attestation");
+  if (!endpointAttestation || !budgetAttestation || !userApproval) {
+    throw new Error(
+      "Pilot v7 requires endpoint, hard-budget, and exact user-approval attestation files.",
+    );
+  }
+  endpointAttestationSha256 = sha256(
+    await readBoundedRegularFile(endpointAttestation, "Endpoint attestation"),
+  );
+  budgetAttestationSha256 = sha256(
+    await readBoundedRegularFile(budgetAttestation, "Hard-budget attestation"),
+  );
+  userApprovalSha256 = sha256(
+    await readBoundedRegularFile(userApproval, "Exact user-approval attestation"),
+  );
+  if (
+    endpointAttestationSha256 !== pilotApproval.bundle.hashes.endpointAttestationSha256 ||
+    budgetAttestationSha256 !== pilotApproval.bundle.hashes.budgetAttestationSha256 ||
+    userApprovalSha256 !== pilotApproval.bundle.hashes.userApprovalSha256
+  ) {
+    throw new Error("External pilot attestations do not match approval bundle B.");
+  }
+}
 
-const sourceCommitResult = capture(["git", "rev-parse", "HEAD"], repository);
-if (!sourceCommitResult.success)
-  throw new Error("Model benchmarks require a committed source revision.");
-const sourceCommit = sourceCommitResult.stdout.trim();
-const sourceStatus = run(
-  ["git", "status", "--porcelain", "--untracked-files=all"],
-  repository,
-).trim();
-const sourceDirty = sourceStatus.length > 0;
-if (sourceDirty && !hasFlag("allow-dirty")) {
+if (nativeAliasPilot && hasFlag("allow-dirty")) {
+  throw new Error("--native-alias-pilot never permits --allow-dirty.");
+}
+if (sourceDirty && (nativeAliasPilot || !hasFlag("allow-dirty"))) {
   throw new Error(
     "Model benchmarks require a clean worktree; pass --allow-dirty only for harness testing.",
   );
 }
 
-await reserveOutput(output);
-await mkdir(join(output, "raw"), { recursive: true });
+if (schedule.length !== sessions)
+  throw new Error("The immutable benchmark schedule is inconsistent.");
+let authSnapshotSha256 = authSourceBytes ? sha256(authSourceBytes) : undefined;
+let approvedPreflightReceipt: NativeAliasPreflightReceipt | undefined;
+let approvedPreflightReceiptSha256: string | undefined;
+let approvedArtifactBytes: Uint8Array | undefined;
+if (nativeAliasPilot) {
+  if (!pilotApproval || !approvedPreflightPath) {
+    throw new Error("--native-alias-pilot requires its externally approved preflight receipt.");
+  }
+  const receiptPath = resolve(approvedPreflightPath);
+  const receiptBytes = await readBoundedRegularFile(receiptPath, "Approved preflight receipt");
+  approvedPreflightReceiptSha256 = sha256(receiptBytes);
+  if (approvedPreflightReceiptSha256 !== pilotApproval.bundle.hashes.preflightReceiptSha256) {
+    throw new Error("The approved preflight receipt hash does not match.");
+  }
+  const receipt: unknown = JSON.parse(Buffer.from(receiptBytes).toString("utf8"));
+  const receiptArtifact = (receipt as NativeAliasPreflightReceipt | undefined)?.artifact;
+  if (!receiptArtifact) throw new Error("The approved preflight receipt has no artifact.");
+  assertNativeAliasPreflightReceipt(receipt, {
+    pilotId: nativeAliasPilotV7.id,
+    sourceCommit: pilotApproval.candidateCommit,
+    sourceStatusSha256,
+    runnerExecutableSha256,
+    scheduleManifestSha256,
+    taskManifestSha256,
+    adapterManifestSha256,
+    taskSet,
+    adapterSet,
+    adapters,
+    taskCount: modelTasks.length,
+    schedule,
+    limits: {
+      timeoutMs,
+      maxAgentSteps: MAX_AGENT_STEPS,
+      requestedOutputTokenLimit: nativeAliasPilotV7.requestedOutputTokenLimit,
+      traceByteLimit: nativeAliasPilotV7.traceByteLimit,
+      sessionLimit: sessions,
+      requestLimit: maximumModelRequests,
+      totalCostStopThresholdUsd: nativeAliasPilotV7.totalReportedCostUsd,
+      perModelCostStopThresholdUsd: nativeAliasPilotV7.perModelReportedCostUsd,
+    },
+    artifact: receiptArtifact,
+    rootLockfileSha256: lockfileSha256,
+    toolchain,
+    platform: { name: process.platform, arch: process.arch, osRelease },
+  });
+  approvedPreflightReceipt = receipt;
+  const receiptDirectory = dirname(await realpath(receiptPath));
+  const artifactPath = resolve(receiptDirectory, receipt.artifact.relativePath);
+  approvedArtifactBytes = await readBoundedRegularFile(
+    artifactPath,
+    "Approved preflight artifact",
+    32 * 1024 * 1024,
+  );
+  const approvedManifest = deriveNpmTarballManifest(approvedArtifactBytes);
+  if (
+    sha256(approvedArtifactBytes) !== pilotApproval.bundle.hashes.tarballSha256 ||
+    receipt.artifact.sha256 !== pilotApproval.bundle.hashes.tarballSha256 ||
+    packageTreeSha256(approvedManifest) !== pilotApproval.bundle.hashes.packageTreeSha256 ||
+    receipt.artifact.packageTreeSha256 !== pilotApproval.bundle.hashes.packageTreeSha256 ||
+    receipt.artifact.packageVersion !== pilotApproval.bundle.packageVersion
+  ) {
+    throw new Error("Approved preflight artifact does not match external approval bundle B.");
+  }
+}
 
-const artifact = await prepareArtifact(repository, output);
+let reservationReceipt: PilotV7ReservationReceipt | undefined;
+if (nativeAliasPilot) {
+  if (!pilotApproval) throw new Error("Pilot v7 external approval was not established.");
+  const brokerPath = option("reservation-broker");
+  if (!brokerPath) throw new Error("Pilot v7 requires --reservation-broker.");
+  await reservePilotOutput(output, pilotOutputRoot, repository);
+  const worktreeRoots = (await run(["git", "worktree", "list", "--porcelain"], repository))
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
+  reservationReceipt = await consumeValidatedExternalReservation({
+    repository,
+    approval: pilotApproval,
+    brokerPath,
+    repositoryAndWorktreeRoots: worktreeRoots,
+  });
+  await writeJsonAtomic(join(output, "reservation.json"), reservationReceipt);
+} else if (nativeAliasProbe) {
+  await reservePilotOutput(output, pilotOutputRoot, repository);
+} else {
+  await reserveOutput(output);
+}
+const journalPath = join(output, "journal.json");
+const results: Awaited<ReturnType<typeof runSession>>[] = [];
+let artifact: Awaited<ReturnType<typeof prepareArtifact>> | undefined;
+let authSnapshotRoot: string | undefined;
+let executionAuthFile: string | undefined;
+let privateOpenCodeRoot: string | undefined;
+let executionOpenCode = opencodeSource;
+let activeSession: (typeof schedule)[number] | null = null;
+const writeJournal = async (
+  status: "preparing" | "running" | "failed" | "completed",
+  error?: unknown,
+) => {
+  const accounting = journalAccounting(results, activeSession, MAX_AGENT_STEPS);
+  return writeJsonAtomic(journalPath, {
+    schemaVersion: 2,
+    status,
+    updatedAt: new Date().toISOString(),
+    sourceCommit,
+    taskSet,
+    adapterSet,
+    pilot: nativeAliasPilot
+      ? nativeAliasPilotV7.id
+      : nativeAliasProbe
+        ? "native-alias-development-probe/v1"
+        : null,
+    approvals: {
+      approvedSessions,
+      approvedMaxRequests,
+      approvedMaxCostUsd,
+      timeoutMs,
+      maxAgentSteps: MAX_AGENT_STEPS,
+      requestedOutputTokenLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV7.requestedOutputTokenLimit : null,
+      traceByteLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV7.traceByteLimit : null,
+    },
+    provenance: {
+      runnerExecutableSha256,
+      scheduleManifestSha256,
+      taskManifestSha256,
+      adapterManifestSha256,
+      sourceStatusSha256,
+      lockfileSha256,
+      toolchain,
+      toolchainSha256: jsonSha256(toolchain),
+      platform: { name: process.platform, arch: process.arch, osRelease },
+      authSnapshotSha256,
+      endpointAttestationSha256,
+      budgetAttestationSha256,
+      userApprovalSha256,
+      approvedPreflightReceiptSha256,
+      externalApprovalBundleSha256: pilotApproval?.externalBundleSha256,
+      candidateCommit: pilotApproval?.candidateCommit,
+      approvalCommit: pilotApproval?.approvalCommit,
+      reservationReceipt,
+      artifact: artifact
+        ? {
+            packageVersion: artifact.packageVersion,
+            filename: artifact.artifactFilename,
+            sha256: artifact.artifactSha256,
+            installedLockfileSha256: artifact.installedLockfileSha256,
+            packageTreeSha256: artifact.packageTreeSha256,
+          }
+        : null,
+    },
+    schedule,
+    completedSessions: results.length,
+    activeSession,
+    ...accounting,
+    results,
+    terminal: terminalDecision(status),
+    error: journalFailure(error),
+  });
+};
+
 try {
-  const packageUrl = pathToFileURL(artifact.packageDirectory).href;
-  await verifyAdapterIsolation({ opencode, packageUrl });
+  const privateOpenCode = await stagePrivateExecutable(
+    toolchain.opencode.binary,
+    "OpenCode executable",
+  );
+  privateOpenCodeRoot = privateOpenCode.root;
+  executionOpenCode = privateOpenCode.path;
+  await writeJournal("preparing");
+  await mkdir(join(output, "raw"), { recursive: true });
+  authSnapshotRoot = authFile
+    ? await mkdtemp(join(tmpdir(), "better-hashline-pilot-auth-"))
+    : undefined;
+  executionAuthFile = authSnapshotRoot ? join(authSnapshotRoot, "auth.json") : undefined;
+  if (authSourceBytes && executionAuthFile) await writeFile(executionAuthFile, authSourceBytes);
 
-  const results: Awaited<ReturnType<typeof runSession>>[] = [];
-  for (let repeat = 1; repeat <= repeats; repeat += 1) {
-    for (let taskIndex = 0; taskIndex < modelTasks.length; taskIndex += 1) {
-      const task = modelTasks[taskIndex];
-      if (!task) continue;
-      const order: AdapterId[] =
-        (taskIndex + repeat) % 2 === 0
-          ? ["native", "better-hashline"]
-          : ["better-hashline", "native"];
-      for (const adapter of order) {
-        console.log(
-          `[${results.length + 1}/${sessions}] ${task.id} / ${adapter} / repeat ${repeat}`,
-        );
-        results.push(
-          await runSession({
-            adapter,
-            task,
-            repeat,
-            model,
-            ...(variant ? { variant } : {}),
-            agent,
-            opencode,
-            packageUrl,
-            ...(authFile ? { authFile } : {}),
-            passthroughEnvironment,
-            output,
-            timeoutMs,
-          }),
-        );
-      }
+  artifact =
+    nativeAliasPilot && approvedPreflightReceipt && approvedArtifactBytes
+      ? await preparePreflightArtifact(output, approvedPreflightReceipt, approvedArtifactBytes)
+      : await prepareArtifact(repository, output, toolchain.npm.effectiveCommand);
+  const packageUrl = pathToFileURL(artifact.packageDirectory).href;
+  await verifyAdapterIsolation({
+    opencode: executionOpenCode,
+    packageDirectory: artifact.packageDirectory,
+    packageUrl,
+    adapterSet,
+  });
+
+  await writeJournal("running");
+  for (const entry of schedule) {
+    const task = modelTasks.find((candidate) => candidate.id === entry.task);
+    if (!task) throw new Error(`Scheduled task is unavailable: ${entry.task}`);
+    const requestsBeforeSession = results.reduce((sum, row) => sum + row.modelRequests, 0);
+    const costBeforeSession = results.reduce((sum, row) => sum + row.accountedCost, 0);
+    const modelCostBeforeSession = results
+      .filter((row) => row.requestedModel === entry.model)
+      .reduce((sum, row) => sum + row.accountedCost, 0);
+    if (
+      requestsBeforeSession >= approvedMaxRequests ||
+      costBeforeSession >= approvedMaxCostUsd ||
+      (nativeAliasPilot && modelCostBeforeSession >= nativeAliasPilotV7.perModelReportedCostUsd)
+    ) {
+      throw new Error("An approved request or cost ceiling was reached before the next session.");
     }
+    console.log(
+      `[${entry.index}/${sessions}] ${entry.model} / ${task.id} / ${entry.adapter} / repeat ${entry.repeat}`,
+    );
+    activeSession = entry;
+    await writeJournal("running");
+    const sessionAuthFile = executionAuthFile;
+    const result = await runSession({
+      adapter: entry.adapter,
+      task,
+      repeat: entry.repeat,
+      model: entry.model,
+      ...(entry.variant ? { variant: entry.variant } : {}),
+      agent,
+      opencode: executionOpenCode,
+      packageUrl,
+      ...(sessionAuthFile ? { authFile: sessionAuthFile } : {}),
+      ...(sessionAuthFile
+        ? {
+            onAuthState: async (nextAuthBytes: Uint8Array) => {
+              const previousAuthBytes = await readFile(sessionAuthFile);
+              if (nativeAliasPilot || nativeAliasProbe) {
+                assertPilotAuthTransition(previousAuthBytes, nextAuthBytes);
+              }
+              await writeBytesAtomic(sessionAuthFile, nextAuthBytes);
+              authSnapshotSha256 = sha256(nextAuthBytes);
+            },
+          }
+        : {}),
+      passthroughEnvironment,
+      output,
+      timeoutMs,
+      ...(nativeAliasPilot || nativeAliasProbe
+        ? {
+            providerConfig: pilotProviderConfig(entry.model),
+            outputTokenLimit: nativeAliasPilotV7.requestedOutputTokenLimit,
+            traceByteLimit: nativeAliasPilotV7.traceByteLimit,
+            captureProbeHooks,
+          }
+        : {}),
+      packageVersion: artifact.packageVersion,
+      hostVersion: opencodePackage.version,
+      scheduleIndex: entry.index,
+    });
+    results.push(result);
+    const accountedRequests = results.reduce((sum, row) => sum + row.modelRequests, 0);
+    const accountedCost = results.reduce((sum, row) => sum + row.accountedCost, 0);
+    const modelAccountedCost = results
+      .filter((row) => row.requestedModel === entry.model)
+      .reduce((sum, row) => sum + row.accountedCost, 0);
+    if (executionAuthFile && authSnapshotSha256 !== sha256(await readFile(executionAuthFile))) {
+      throw new Error("The immutable pilot authentication snapshot changed during execution.");
+    }
+    if (
+      !result.passed ||
+      result.retryGuardTriggered ||
+      accountedRequests > approvedMaxRequests ||
+      accountedCost > approvedMaxCostUsd ||
+      (nativeAliasPilot && modelAccountedCost > nativeAliasPilotV7.perModelReportedCostUsd)
+    ) {
+      throw new Error(
+        `Pilot stopped after session ${entry.index}: process, identity, protocol, request, or cost integrity failed.`,
+      );
+    }
+    activeSession = null;
+    await writeJournal("running");
   }
 
-  const runnerSources = await Promise.all(
-    ["run.ts", "tasks.ts", "trace.ts"].map(async (path) => [
-      path,
-      await readFile(join(import.meta.dir, path), "utf8"),
-    ]),
+  assertEffectiveToolIdentitiesUnchanged(
+    toolchain,
+    await deriveEffectiveToolIdentities({ cwd: repository }),
   );
   const report = {
-    schemaVersion: 4,
+    schemaVersion: 7,
     generatedAt: new Date().toISOString(),
     provenance: {
       sourceCommit,
-      sourceDirty,
+      ...modelEvidenceSourceStatus(sourceDirty, nativeAliasProbe),
       packageVersion: artifact.packageVersion,
       artifactFilename: artifact.artifactFilename,
       artifactSha256: artifact.artifactSha256,
       installedLockfileSha256: artifact.installedLockfileSha256,
-      lockfileSha256: sha256(await readFile(join(repository, "bun.lock"))),
-      taskManifestSha256: sha256(JSON.stringify(modelTasks)),
-      runnerSourceSha256: sha256(JSON.stringify(runnerSources)),
-      sourceStatusSha256: sha256(sourceStatus),
-      opencodeVersion: opencodePackage.version,
-      opencodeExecutableSha256: sha256(await readFile(opencode)),
-      npmVersion: run(["npm", "--version"], repository).trim(),
-      bunVersion: Bun.version,
-      platform: process.platform,
-      arch: process.arch,
+      packageTreeSha256: artifact.packageTreeSha256,
+      lockfileSha256,
+      taskManifestSha256,
+      adapterManifestSha256,
+      runnerExecutableSha256,
+      scheduleManifestSha256,
+      sourceStatusSha256,
+      toolchain,
+      toolchainSha256: jsonSha256(toolchain),
+      platform: { name: process.platform, arch: process.arch, osRelease },
+      approvedPreflightReceiptSha256,
+      externalApprovalBundleSha256: pilotApproval?.externalBundleSha256,
+      candidateCommit: pilotApproval?.candidateCommit,
+      approvalCommit: pilotApproval?.approvalCommit,
+      reservationReceipt,
     },
     protocol: {
-      requestedModel: model,
-      requestedVariant: variant ?? null,
+      pilot: nativeAliasPilot
+        ? nativeAliasPilotV7.id
+        : nativeAliasProbe
+          ? "native-alias-development-probe/v1"
+          : null,
+      scheduledModels,
       requestedAgent: agent,
       taskSet,
+      adapterSet,
+      adapters,
       repeats,
       paired: true,
       adapterOrder: "alternating",
       timeoutMs,
+      maximumAgentSteps: MAX_AGENT_STEPS,
+      requestedOutputTokenLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV7.requestedOutputTokenLimit : null,
+      traceByteLimit:
+        nativeAliasPilot || nativeAliasProbe ? nativeAliasPilotV7.traceByteLimit : null,
+      approvedSessions,
+      approvedMaxRequests,
+      approvedMaxCostUsd,
       title: "explicit per-session title; automatic title generation disabled",
       subagents: "task permission denied",
-      authMode: authFile
-        ? "isolated auth-file copy"
-        : passthroughEnvironment.length > 0
-          ? "explicit environment allowlist"
-          : "none",
+      authMode: authFile ? "isolated auth-file copy" : "explicit environment allowlist",
       passthroughEnvironment,
       isolation:
         "environment allowlist; fresh HOME, USERPROFILE, APPDATA, LOCALAPPDATA, TEMP, and all XDG roots per session",
       evaluator: "exact bytes, expected absence, and no unexpected files",
       usage:
-        "observed sanitized parent-session export; OpenCode-reported tokens/cost, not a billing statement",
-      publishable: !sourceDirty,
+        "observed sanitized parent-session export; provider retries are process-aborted; output tokens and trace bytes are bounded; reported-cost thresholds stop later sessions but are not hard billing caps",
     },
     results,
   };
-  await writeFile(join(output, "results.json"), `${JSON.stringify(report, null, 2)}\n`);
+  await writeJsonAtomic(join(output, "results.json"), report);
+  await writeJournal("completed");
   console.table(
-    (["native", "better-hashline"] as const).map((adapter) => {
+    adapters.map((adapter) => {
       const rows = results.filter((row) => row.adapter === adapter);
       return {
         adapter,
@@ -817,6 +1932,18 @@ try {
   ) {
     process.exitCode = 2;
   }
+} catch (error) {
+  try {
+    await writeJournal("failed", error);
+  } catch (journalError) {
+    throw new AggregateError(
+      [error, journalError],
+      "Pilot failed and its terminal journal could not be written.",
+    );
+  }
+  throw error;
 } finally {
-  await rm(artifact.work, { recursive: true, force: true });
+  if (artifact) await rm(artifact.work, { recursive: true, force: true });
+  if (authSnapshotRoot) await rm(authSnapshotRoot, { recursive: true, force: true });
+  if (privateOpenCodeRoot) await rm(privateOpenCodeRoot, { recursive: true, force: true });
 }

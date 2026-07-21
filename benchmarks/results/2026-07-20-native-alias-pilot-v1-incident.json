@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "pilot": "native-alias-pilot-v1",
+  "status": "failed",
+  "classification": "benchmark-oracle false negative",
+  "releaseDecision": "no-go",
+  "startedFromCommit": "57376db02bdaa31667df4891ab582f4e089a74da",
+  "failedAt": "2026-07-20T09:00:51.309Z",
+  "schedule": {
+    "approvedSessions": 96,
+    "completedSessions": 1,
+    "unexecutedSessions": 95,
+    "approvedMaxRequests": 1152,
+    "accountedRequests": 4,
+    "approvedMaxCostUsd": 4,
+    "accountedCostUsd": 0
+  },
+  "failedSession": {
+    "index": 1,
+    "model": "openai/gpt-5.6-luna",
+    "variant": "medium",
+    "task": "single-constant",
+    "adapter": "better-hashline-native-aliases",
+    "processSucceeded": true,
+    "transportValid": true,
+    "observedIdentityValid": true,
+    "firstAttemptToolsSucceeded": true,
+    "retryGuardTriggered": false,
+    "exactFiles": true,
+    "activeAlias": "apply_patch",
+    "protocolMarker": "invalid",
+    "traceSha256": "c4805f9c0644a9eb4b7050e892ba07c9800fb278ebebb27f3dd93a4e7dfbf49f",
+    "sanitizedSessionExportSha256": "6c254cf4f87af3993af14ac0d54a0e16765ac9e5dffa121546daf4db941ff400",
+    "sanitizedSessionExportStderr": "not retained"
+  },
+  "rootCause": {
+    "runtimeFailure": false,
+    "modelFailure": false,
+    "harnessFailure": true,
+    "summary": "The plugin used OpenCode's drive-root worktree for renderer paths, while the benchmark oracle incorrectly required paths relative to the non-VCS task fixture.",
+    "disposition": "The failed pilot is immutable and cannot be resumed or retried. A corrected runner requires a new commit, runner hash, pilot ID, preflight, and explicit approval."
+  },
+  "provenance": {
+    "packageVersion": "0.2.1",
+    "artifactFilename": "opencode-better-hashline-0.2.1.tgz",
+    "artifactSha256": "7d64c817df74516f88faaa7ae1ec57cd16f53fc221ce493454fde404a161cd83",
+    "installedLockfileSha256": "81a2a47bbb2b83af084dd0b143096f50f2c58e182ae75b01009ff02cd47b9a30",
+    "sourceLockfileSha256": "704f96f65ec50630826b69847f65b3d895570853813bc9ddf9ae721389ea41a3",
+    "taskManifestSha256": "8a5ed7c8169bacf135c68037ea1717c980dd47c7141f03d723ba6ef578d9cb1a",
+    "adapterManifestSha256": "cdd7ed43f920aeb7d883445095cdf2930372fc76ab9e52ec3ac122784eb8ccb8",
+    "runnerSourceSha256": "a0ed016c354853a96897dd749fc4560679c4b803ed76070a03ae3899d214a7eb",
+    "scheduleManifestSha256": "488392f98a0a130642f1a171c8df315ca1a54014ec750ad898c62dbc61b0a75c",
+    "journalSha256": "4193d4af41dfc16a34acb8e9bfc84f0a86580d28fa680d24abd1ff83adeefd80",
+    "opencodeVersion": "1.18.3",
+    "opencodeExecutableSha256": "e6fb1881a6e25e26177bd4dff0d4148cb8431084b188802f86e3c47558064b05",
+    "npmVersion": "11.18.0",
+    "bunVersion": "1.3.14",
+    "platform": "win32",
+    "arch": "x64",
+    "authSnapshotSha256": null,
+    "authSnapshotNote": "The v1 journal did not retain this hash. Authentication bytes were never published."
+  },
+  "claims": {
+    "modelComparison": false,
+    "releaseEvidence": false,
+    "safeToResume": false
+  }
+}
