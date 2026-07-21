@@ -209,6 +209,7 @@ describe("native alias preflight receipt", () => {
         artifact: { ...receipt.artifact, relativePath: "../replacement.tgz" },
       },
       { ...receipt, schedule: [{ ...schedule[0], adapter: "native" }] },
+      { ...receipt, publishable: true },
     ]) {
       expect(() => assertNativeAliasPreflightReceipt(invalid, expected)).toThrow();
     }

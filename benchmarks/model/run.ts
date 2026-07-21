@@ -1356,14 +1356,13 @@ if (preflight) {
     console.log(
       `Verified ${adapterSet} isolation and packed routes with ${artifact.artifactFilename} (${artifact.artifactSha256}).`,
     );
-    await writeBytesAtomic(join(output, "artifacts", "model-runner.mjs"), runnerExecutableBytes);
-    await writeJsonAtomic(join(output, "preflight.json"), {
+    const preflightReceipt = {
       schemaVersion: NATIVE_ALIAS_PREFLIGHT_SCHEMA_VERSION,
       generatedAt: new Date().toISOString(),
       modelCalls: 0,
       pilotId: nativeAliasPilot ? nativeAliasPilotV5.id : "unscoped-model-preflight",
       sourceCommit,
-      ...modelEvidenceSourceStatus(sourceDirty, nativeAliasProbe),
+      sourceDirty,
       sourceEligibleForApproval: !sourceDirty,
       sourceStatusSha256,
       runnerExecutableSha256,
@@ -1413,7 +1412,39 @@ if (preflight) {
       platform: { name: process.platform, arch: process.arch, osRelease },
       verifierReport: isolation.verifierReport,
       oracleFixture: isolation.oracleFixture,
-    });
+    };
+    if (nativeAliasPilot && !sourceDirty) {
+      assertNativeAliasPreflightReceipt(preflightReceipt, {
+        pilotId: nativeAliasPilotV5.id,
+        sourceCommit,
+        sourceStatusSha256,
+        runnerExecutableSha256,
+        scheduleManifestSha256,
+        taskManifestSha256,
+        adapterManifestSha256,
+        taskSet,
+        adapterSet,
+        adapters,
+        taskCount: modelTasks.length,
+        schedule,
+        limits: {
+          timeoutMs,
+          maxAgentSteps: MAX_AGENT_STEPS,
+          requestedOutputTokenLimit: nativeAliasPilotV5.requestedOutputTokenLimit,
+          traceByteLimit: nativeAliasPilotV5.traceByteLimit,
+          sessionLimit: sessions,
+          requestLimit: maximumModelRequests,
+          totalCostStopThresholdUsd: nativeAliasPilotV5.totalCostLimitUsd,
+          perModelCostStopThresholdUsd: nativeAliasPilotV5.perModelCostLimitUsd,
+        },
+        artifact: preflightReceipt.artifact,
+        rootLockfileSha256: lockfileSha256,
+        toolchain,
+        platform: preflightReceipt.platform,
+      });
+    }
+    await writeBytesAtomic(join(output, "artifacts", "model-runner.mjs"), runnerExecutableBytes);
+    await writeJsonAtomic(join(output, "preflight.json"), preflightReceipt);
   } finally {
     if (artifact) await rm(artifact.work, { recursive: true, force: true });
     await rm(privateOpenCode.root, { recursive: true, force: true });
@@ -1808,7 +1839,7 @@ try {
     generatedAt: new Date().toISOString(),
     provenance: {
       sourceCommit,
-      sourceDirty,
+      ...modelEvidenceSourceStatus(sourceDirty, nativeAliasProbe),
       packageVersion: artifact.packageVersion,
       artifactFilename: artifact.artifactFilename,
       artifactSha256: artifact.artifactSha256,
