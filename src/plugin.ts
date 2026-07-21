@@ -124,6 +124,12 @@ function createEditSchema() {
       .describe(
         "Only affects replace, insert, and replace_file payloads. Set true only to write an intentional N| or @hashline-style source line.",
       ),
+    readback: tool.schema
+      .boolean()
+      .optional()
+      .describe(
+        "Set true when another edit of this file is expected. On success, returns an attested successor snapshot near the first changed hunk.",
+      ),
     operations: tool.schema.array(editOperation).min(1).max(100),
   };
   return {
@@ -137,7 +143,7 @@ const editArgumentShape = editSchema.argumentShape;
 export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 
 export const hashlineEditDescription =
-  'Atomically edit one exact hashline_read snapshot. Pass snapshotId as a top-level string and operations as a JSON array of operation objects; never encode arguments as text or XML. Minimal replace shape: {"filePath":"path","snapshotId":"s_...","operations":[{"op":"replace","startLine":1,"endLine":1,"lines":["replacement"]}]}. Use only fields listed for each op; finalNewline is replace_file-only. replace_file must be sole and use rebase:none. All coordinates use one immutable pre-batch snapshot; transfers read pre-edit source; afterLine is never adjusted for moves/deletes. replace lines:[] deletes; insert forbids []; use replace_file with lines:[],finalNewline:false for an empty file. lines:[""] is one empty logical value and may only alter EOL bytes. unique rebase is exact, unchanged, ambiguity-rejecting, and never fuzzy.';
+  'Atomically edit one exact hashline_read snapshot. Batch every known change to this file in one call. Pass snapshotId as a top-level string and operations as a JSON array of operation objects; never encode arguments as text or XML. Minimal replace shape: {"filePath":"path","snapshotId":"s_...","operations":[{"op":"replace","startLine":1,"endLine":1,"lines":["replacement"]}]}. Use only fields listed for each op; finalNewline is replace_file-only. replace_file must be sole and use rebase:none. All coordinates use one immutable pre-batch snapshot; copy reads pre-edit source even when another operation changes that source; afterLine is never adjusted for moves/deletes. Destructive writes may be adjacent but not overlap. Insert/copy destinations may touch a destructive endpoint but not lie strictly inside it, and two insertion-like operations may not share a destination; merge conflicting payloads instead of relying on array order. replace lines:[] deletes; insert forbids []; use replace_file with lines:[],finalNewline:false for an empty file. lines:[""] is one empty logical value and may only alter EOL bytes. Set readback:true only when a dependent follow-up edit is expected; the result then includes a successor snapshot near the first changed hunk. unique rebase is exact, unchanged, ambiguity-rejecting, and never fuzzy.';
 
 export const nativeAliasEditDescription = `${hashlineEditDescription} Never issue edit or apply_patch calls concurrently or in the same assistant message. For multiple files, call one edit tool, wait for its result, then call the next.`;
 
@@ -172,12 +178,14 @@ const writeArgumentShape = {
 };
 const writeArguments = tool.schema.object(writeArgumentShape).strict();
 
-type PendingRead = {
+type PendingSnapshot = {
+  kind: "read" | "edit";
   snapshotId: string;
   scope: SnapshotScope;
   page: IssuedPage;
   outputDigest: string;
   createdAt: number;
+  fallbackOutput?: string;
 };
 
 type RawEditOperation = {
@@ -212,6 +220,12 @@ function samePathRoot(left: string, right: string): boolean {
 
 function unifiedDiff(path: string, before: string, after: string): string {
   return createTwoFilesPatch(path, path, before, after, "before", "after", { context: 3 });
+}
+
+function firstNewFileHunkLine(diff: string): number {
+  const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/mu.exec(diff);
+  const line = match?.[1] ? Number(match[1]) : 1;
+  return Math.max(1, line);
 }
 
 function invalidArguments(toolName: string): never {
@@ -436,6 +450,14 @@ function withoutPendingMetadata(metadata: unknown): Record<string, unknown> {
   return rest;
 }
 
+function unavailableEditReadback(output: string): string {
+  const firstLine = output.split("\n", 1)[0] ?? "";
+  const success = /^Applied \d+ operations?\.$/u.test(firstLine)
+    ? firstLine
+    : "The edit was applied.";
+  return `${success} Post-edit snapshot unavailable; run hashline_read before the next edit.`;
+}
+
 export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const requestedToolSurface =
     rawOptions?.toolSurface === "native-aliases" ? "native-aliases" : "hashline";
@@ -469,7 +491,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     }
   }
   const snapshots = new SnapshotStore(options);
-  const pendingReads = new Map<string, PendingRead>();
+  const pendingSnapshots = new Map<string, PendingSnapshot>();
   const sessions = new NativeAliasSessionRegistry();
 
   function assertConfigured(): void {
@@ -566,13 +588,13 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     return canonicalWorktree;
   }
 
-  function rememberPending(pendingId: string, pending: PendingRead): void {
+  function rememberPending(pendingId: string, pending: PendingSnapshot): void {
     const expiredBefore = Date.now() - options.snapshotTtlMs;
-    for (const [id, value] of pendingReads) {
-      if (value.createdAt >= expiredBefore && pendingReads.size < options.maxSnapshots) break;
-      pendingReads.delete(id);
+    for (const [id, value] of pendingSnapshots) {
+      if (value.createdAt >= expiredBefore && pendingSnapshots.size < options.maxSnapshots) break;
+      pendingSnapshots.delete(id);
     }
-    pendingReads.set(pendingId, pending);
+    pendingSnapshots.set(pendingId, pending);
   }
 
   const hashlineRead = tool({
@@ -601,6 +623,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       });
       const pendingId = randomUUID();
       rememberPending(pendingId, {
+        kind: "read",
         snapshotId: snapshot.id,
         scope: snapshot.scope,
         page: rendered.page,
@@ -713,7 +736,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           }
         }
         await authorizeEdit(context, resolved, diff);
-        await publishReplacement({
+        const verified = await publishReplacement({
           resolved,
           expected: stable,
           replacement: plan.bytes,
@@ -721,14 +744,45 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           signal: context.abort,
           consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
         });
+        const successOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
+        let output = `${successOutput} Reread before the next edit.`;
+        let resultMetadata = metadata;
+        if (args.readback) {
+          const fallbackOutput = `${successOutput} Post-edit snapshot unavailable; run hashline_read before the next edit.`;
+          try {
+            const document = decodeTextDocument(verified.bytes, options.maxLines);
+            const successor = snapshots.remember(scope, resolved.canonicalPath, document);
+            const prefix = `${successOutput}\n`;
+            const rendered = renderSnapshotPage({
+              snapshot: successor,
+              offset: firstNewFileHunkLine(diff),
+              limit: 1000,
+              maxOutputBytes: options.maxOutputBytes - Buffer.byteLength(prefix, "utf8"),
+            });
+            output = `${prefix}${rendered.output}`;
+            const pendingId = randomUUID();
+            rememberPending(pendingId, {
+              kind: "edit",
+              snapshotId: successor.id,
+              scope: successor.scope,
+              page: rendered.page,
+              outputDigest: sha256(new TextEncoder().encode(output)),
+              createdAt: Date.now(),
+              fallbackOutput,
+            });
+            resultMetadata = { ...metadata, hashlinePending: pendingId };
+          } catch {
+            output = fallbackOutput;
+          }
+        }
         context.metadata({
           title: shownPath,
           metadata: toolName === "hashline_edit" ? { diff } : metadata,
         });
         return {
           title: shownPath,
-          output: `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}. Reread before the next edit.`,
-          metadata,
+          output,
+          metadata: resultMetadata,
         };
       });
     } finally {
@@ -856,44 +910,71 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       });
     },
     async "tool.execute.after"(input, output) {
-      if (input.tool !== "hashline_read") return;
+      const isRead = input.tool === "hashline_read";
+      const isEditReadback =
+        (input.tool === "hashline_edit" || input.tool === "edit" || input.tool === "apply_patch") &&
+        typeof input.args === "object" &&
+        input.args !== null &&
+        (input.args as Record<string, unknown>).readback === true;
+      if (!isRead && !isEditReadback) return;
+      const expectedKind = isRead ? "read" : "edit";
       const pendingId = output.metadata?.hashlinePending;
       if (typeof pendingId !== "string") {
         output.metadata = withoutPendingMetadata(output.metadata);
-        delete output.metadata.snapshotId;
-        output.output =
-          "SNAPSHOT_REQUIRED: OpenCode did not preserve the snapshot marker. Rerun hashline_read.";
+        if (isRead) {
+          delete output.metadata.snapshotId;
+          output.output =
+            "SNAPSHOT_REQUIRED: OpenCode did not preserve the snapshot marker. Rerun hashline_read.";
+        } else {
+          output.output = unavailableEditReadback(output.output);
+        }
         return;
       }
-      const pending = pendingReads.get(pendingId);
-      pendingReads.delete(pendingId);
+      const pending = pendingSnapshots.get(pendingId);
+      pendingSnapshots.delete(pendingId);
       output.metadata = withoutPendingMetadata(output.metadata);
-      if (!pending) {
-        delete output.metadata.snapshotId;
-        output.output = "SNAPSHOT_REQUIRED: Rerun hashline_read before editing.";
+      if (!pending || pending.kind !== expectedKind) {
+        if (isRead) {
+          delete output.metadata.snapshotId;
+          output.output = "SNAPSHOT_REQUIRED: Rerun hashline_read before editing.";
+        } else {
+          output.output = pending?.fallbackOutput ?? unavailableEditReadback(output.output);
+        }
         return;
       }
       if (output.metadata.truncated === true) {
-        output.output =
-          "SNAPSHOT_REQUIRED: OpenCode truncated this result, so no editable lines were issued. Use a smaller limit.";
-        delete output.metadata.snapshotId;
+        if (isRead) {
+          output.output =
+            "SNAPSHOT_REQUIRED: OpenCode truncated this result, so no editable lines were issued. Use a smaller limit.";
+          delete output.metadata.snapshotId;
+        } else {
+          output.output = pending.fallbackOutput ?? unavailableEditReadback(output.output);
+        }
         return;
       }
       if (sha256(new TextEncoder().encode(output.output)) !== pending.outputDigest) {
-        output.output =
-          "SNAPSHOT_REQUIRED: Another hook changed this result, so no editable lines were issued. Rerun hashline_read.";
-        delete output.metadata.snapshotId;
+        if (isRead) {
+          output.output =
+            "SNAPSHOT_REQUIRED: Another hook changed this result, so no editable lines were issued. Rerun hashline_read.";
+          delete output.metadata.snapshotId;
+        } else {
+          output.output = pending.fallbackOutput ?? unavailableEditReadback(output.output);
+        }
         return;
       }
       try {
         const snapshot = snapshots.peek(pending.scope, pending.snapshotId);
         snapshots.issue(snapshot, pending.page);
       } catch (error) {
-        output.output =
-          error instanceof HashlineError
-            ? error.message
-            : "SNAPSHOT_REQUIRED: Rerun hashline_read before editing.";
-        delete output.metadata.snapshotId;
+        if (isRead) {
+          output.output =
+            error instanceof HashlineError
+              ? error.message
+              : "SNAPSHOT_REQUIRED: Rerun hashline_read before editing.";
+          delete output.metadata.snapshotId;
+        } else {
+          output.output = pending.fallbackOutput ?? unavailableEditReadback(output.output);
+        }
       }
     },
     async "experimental.chat.system.transform"(_input, output) {
@@ -918,7 +999,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
     },
     async dispose() {
-      pendingReads.clear();
+      pendingSnapshots.clear();
       snapshots.clear();
       sessions.clear();
     },

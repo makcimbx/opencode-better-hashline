@@ -236,7 +236,7 @@ describe("filesystem publication", () => {
     const resolved = await resolveExistingFile(path, root);
     const expected = await readStableFile(resolved, 1024, true);
     let consumed = false;
-    await publishReplacement({
+    const verified = await publishReplacement({
       resolved,
       expected,
       replacement: encoder.encode("new\n"),
@@ -247,6 +247,7 @@ describe("filesystem publication", () => {
       },
     });
     expect(consumed).toBe(true);
+    expect(new TextDecoder().decode(verified.bytes)).toBe("new\n");
     expect(await readFile(path, "utf8")).toBe("new\n");
     if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o751);
   });

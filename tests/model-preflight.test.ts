@@ -112,11 +112,11 @@ const caseReport = (
     route,
     model: route === "native-apply-patch" ? "scripted/gpt-5-scripted" : "scripted/scripted",
     editTool,
-    schemaSha256: "a7359841f93f0f111d5cb5cab8d747e0cf07cc130b683e97b8b75499a68a63d1",
+    schemaSha256: "53887ee61c4554c8fe52320a8083a5546c148a578ce9d4f383b8b3e5fc51e0c3",
     ...(route === "hashline"
       ? {}
       : {
-          protocolFingerprint: "bb290b1c155ee7738f549f390cca4badba46f9faefd3ceac27d3b443107f55be",
+          protocolFingerprint: "1633511a6dea50f48730a565aaad23db54018b4125c4528de0c1a52e9365b971",
         }),
     finalBytesSha256: "8b1f3c90fab7f353b4a997497392fa025ea08f0b023c2f5f4ab9ec0993494293",
     providerRequests: route === "native-edit" ? 24 : route === "native-apply-patch" ? 21 : 17,

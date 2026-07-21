@@ -347,7 +347,7 @@ describe("range transfers", () => {
     );
     expect(new Set(messages)).toEqual(
       new Set([
-        "OPERATIONS_OVERLAP: A transfer source intersects another operation's write range.",
+        "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
       ]),
     );
   });
@@ -405,7 +405,7 @@ describe("range transfers", () => {
     }
   });
 
-  test("allows adjacent destructive spans but rejects transfer dependencies", () => {
+  test("allows immutable transfer reads and boundary insertions while rejecting write conflicts", () => {
     const text = "a\nb\nc\nd\ne\nf\ng\n";
     expect(
       plan(text, text, [
@@ -424,19 +424,35 @@ describe("range transfers", () => {
       );
     }
 
+    const formerlyDependent: Array<{ operations: EditOperation[]; expected: string }> = [
+      {
+        operations: [
+          { op: "copy_range", startLine: 2, endLine: 4, afterLine: 7 },
+          { op: "replace", startLine: 3, endLine: 3, lines: ["X"] },
+        ],
+        expected: "a\nb\nX\nd\ne\nf\ng\nb\nc\nd\n",
+      },
+      {
+        operations: [
+          { op: "copy_range", startLine: 4, endLine: 4, afterLine: 7 },
+          { op: "move_range", startLine: 5, endLine: 5, afterLine: 2 },
+        ],
+        expected: "a\nb\ne\nc\nd\nf\ng\nd\n",
+      },
+      {
+        operations: [
+          { op: "move_range", startLine: 5, endLine: 5, afterLine: 3 },
+          { op: "insert", afterLine: 3, lines: ["X"] },
+        ],
+        expected: "a\nb\nc\nX\ne\nd\nf\ng\n",
+      },
+    ];
+    for (const { operations, expected } of formerlyDependent) {
+      expect(plan(text, text, operations).text).toBe(expected);
+      expect(plan(text, text, [...operations].reverse()).text).toBe(expected);
+    }
+
     for (const operations of [
-      [
-        { op: "copy_range", startLine: 2, endLine: 4, afterLine: 7 },
-        { op: "replace", startLine: 3, endLine: 3, lines: ["X"] },
-      ],
-      [
-        { op: "copy_range", startLine: 4, endLine: 4, afterLine: 7 },
-        { op: "move_range", startLine: 5, endLine: 5, afterLine: 2 },
-      ],
-      [
-        { op: "move_range", startLine: 5, endLine: 5, afterLine: 3 },
-        { op: "insert", afterLine: 3, lines: ["X"] },
-      ],
       [
         { op: "copy_range", startLine: 1, endLine: 1, afterLine: 6 },
         { op: "copy_range", startLine: 2, endLine: 2, afterLine: 6 },

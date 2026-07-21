@@ -78,6 +78,7 @@ The prefixes are annotations, not file content. A line shown as `N!|... [preview
 {
   "filePath": "src/client.ts",
   "snapshotId": "s_J7yi7wDyv3j9xQ2zP5kL8A",
+  "readback": true,
   "operations": [
     {
       "op": "replace",
@@ -96,6 +97,11 @@ The prefixes are annotations, not file content. A line shown as `N!|... [preview
 
 `lines: []` deletes a replacement range. `lines: [""]` supplies one empty logical-line value; at an unterminated EOF this can add only the final delimiter rather than a phantom line. Payload lines may not contain embedded CR or LF characters.
 
+Batch every known change to one file in the same call. Set `readback: true` only when a dependent
+follow-up edit is expected. A successful result then includes a new attested snapshot near the first
+changed hunk, avoiding a separate read round trip. If OpenCode truncates or changes that continuation,
+the edit remains applied but a normal `hashline_read` is required.
+
 Retained source ranges can also be transferred without echoing their contents:
 
 ```json
@@ -107,7 +113,7 @@ Retained source ranges can also be transferred without echoing their contents:
 }
 ```
 
-All coordinates describe the original snapshot, never an intermediate edit. Copy uses destination-local delimiters like `insert`. Move preserves the positional EOL layout and requires the complete source-to-destination corridor to have been issued. If empty texts and adjacent CR/LF bytes cannot be serialized without changing that logical layout, the move fails closed instead of normalizing delimiters. Mixed and multiple transfer batches are accepted only when all read and write effects are independent.
+All coordinates describe the original snapshot, never an intermediate edit. Copy always reads pre-edit source and uses destination-local delimiters like `insert`, so its source may overlap another operation's write. Move preserves the positional EOL layout and requires the complete source-to-destination corridor to have been issued. If empty texts and adjacent CR/LF bytes cannot be serialized without changing that logical layout, the move fails closed instead of normalizing delimiters. Destructive write spans may be adjacent but not overlap; insertion-like destinations may touch their endpoints but may not lie strictly inside them or share one boundary.
 
 ### 3. Validate and publish
 

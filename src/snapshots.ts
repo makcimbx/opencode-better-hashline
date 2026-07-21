@@ -220,7 +220,9 @@ export class SnapshotStore {
     for (const snapshot of [...this.#snapshots.values()]) {
       if (scopeMatches(snapshot.scope, scope) && snapshot.canonicalPath === canonicalPath) {
         snapshot.invalid = true;
-        if (snapshot.pins === 0) this.#remove(snapshot.id);
+        // Active calls retain the object they pinned, but stale IDs must stop
+        // occupying cache capacity before a verified successor is remembered.
+        this.#remove(snapshot.id);
       }
     }
   }

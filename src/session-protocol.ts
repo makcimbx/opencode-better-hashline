@@ -356,7 +356,14 @@ function assertAliasInput(
   directory?: string,
 ): Record<string, unknown> {
   const input = record(inputValue);
-  const allowed = ["allowHashlinePrefixes", "filePath", "operations", "rebase", "snapshotId"];
+  const allowed = [
+    "allowHashlinePrefixes",
+    "filePath",
+    "operations",
+    "readback",
+    "rebase",
+    "snapshotId",
+  ];
   if (
     !input ||
     !Object.keys(input).every((key) => allowed.includes(key)) ||
@@ -368,7 +375,9 @@ function assertAliasInput(
     input.operations.length < 1 ||
     input.operations.length > 100 ||
     (input.rebase !== undefined && input.rebase !== "none" && input.rebase !== "unique") ||
-    (input.allowHashlinePrefixes !== undefined && typeof input.allowHashlinePrefixes !== "boolean")
+    (input.allowHashlinePrefixes !== undefined &&
+      typeof input.allowHashlinePrefixes !== "boolean") ||
+    (input.readback !== undefined && typeof input.readback !== "boolean")
   ) {
     rejectHistory(`Completed historical ${toolName} input is unreadable.`);
   }
