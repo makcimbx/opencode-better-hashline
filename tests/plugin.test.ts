@@ -1715,9 +1715,10 @@ describe("OpenCode plugin protocol", () => {
       ),
     );
     expect(moved.output).toContain("Moved move.txt to moved.txt.");
+    const canonicalRoot = await realpath(root);
     expect(moved.metadata).toMatchObject({
       operation: "move_file",
-      destinationPath: join(root, "moved.txt"),
+      destinationPath: join(canonicalRoot, "moved.txt"),
     });
     await expect(readFile(movePath)).rejects.toThrow();
     expect(await readFile(join(root, "moved.txt"), "utf8")).toBe("move me\n");
@@ -1728,26 +1729,15 @@ describe("OpenCode plugin protocol", () => {
   test("rejects lifecycle source line breaks before permission or mutation", async () => {
     if (process.platform === "win32") return;
     const value = await hooks();
-    const { hashlineRead, hashlineEdit } = registry(value);
+    const { hashlineRead } = registry(value);
 
     for (const [index, separator] of ["\n", "\r"].entries()) {
       const fileName = `unsafe-${index}${separator}source.txt`;
       const filePath = join(root, fileName);
       await writeFile(filePath, "preserved\n");
-      const readResult = structured(await hashlineRead.execute({ filePath: fileName }, context()));
-      await activateRead(value, readResult);
       const asks: AskRecord[] = [];
 
-      await expect(
-        hashlineEdit.execute(
-          {
-            filePath: fileName,
-            snapshotId: String(readResult.metadata.snapshotId),
-            operations: [{ op: "delete_file" }],
-          },
-          context({ asks }),
-        ),
-      ).rejects.toThrow(
+      await expect(hashlineRead.execute({ filePath: fileName }, context({ asks }))).rejects.toThrow(
         "INVALID_ARGUMENT: filePath contains characters that cannot be represented safely in permission patterns.",
       );
       expect(asks).toEqual([]);
@@ -1876,15 +1866,16 @@ describe("OpenCode plugin protocol", () => {
     expect(result.metadata.createdDirectories).toEqual(["nested", join("nested", "inner")]);
     expect(await readFile(join(root, "nested", "inner", "new.txt"), "utf8")).toBe("created\n");
     expect(asks).toHaveLength(1);
+    const canonicalRoot = await realpath(root);
     expect(asks[0]).toMatchObject({
       permission: "edit",
       patterns: [join("nested", "inner", "new.txt"), "nested", join("nested", "inner")],
       metadata: {
-        createdDirectories: [join(root, "nested"), join(root, "nested", "inner")],
+        createdDirectories: [join(canonicalRoot, "nested"), join(canonicalRoot, "nested", "inner")],
         filepaths: [
-          join(root, "nested", "inner", "new.txt"),
-          join(root, "nested"),
-          join(root, "nested", "inner"),
+          join(canonicalRoot, "nested", "inner", "new.txt"),
+          join(canonicalRoot, "nested"),
+          join(canonicalRoot, "nested", "inner"),
         ],
       },
     });

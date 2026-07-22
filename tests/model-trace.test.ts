@@ -377,7 +377,7 @@ describe("model benchmark trace inspection", () => {
 
       expect(
         inspectJsonlTrace(output, {
-          nativeAlias: { ...identity, allowedPathRoot, worktree: allowedPathRoot },
+          nativeAlias: { ...identity, allowedPathRoot: canonicalRoot, worktree: canonicalRoot },
         }).toolEvents[0],
       ).toMatchObject({
         protocolMarker: "valid",

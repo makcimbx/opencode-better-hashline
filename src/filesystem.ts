@@ -14,7 +14,7 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
 import { fail, HashlineError } from "./errors.js";
 import { exactRelativePath, isInsideCanonicalPath } from "./path-identity.js";
@@ -136,9 +136,17 @@ async function isExternal(context: ToolContext, canonicalPath: string): Promise<
   return !isInsideCanonicalPath(worktree, canonicalPath);
 }
 
-function permissionPath(context: ToolContext, canonicalPath: string): string {
-  const value = exactRelativePath(context.worktree, canonicalPath);
-  return value === "" ? basename(canonicalPath) : (value ?? canonicalPath);
+async function permissionPaths(
+  context: ToolContext,
+  canonicalPaths: readonly string[],
+): Promise<string[]> {
+  const requestedRoot =
+    context.worktree === "/" ? parse(resolve(context.directory)).root : context.worktree;
+  const worktree = await canonicalRoot(requestedRoot);
+  return canonicalPaths.map((canonicalPath) => {
+    const value = exactRelativePath(worktree, canonicalPath);
+    return value === "" ? basename(canonicalPath) : (value ?? canonicalPath);
+  });
 }
 
 function assertRegular(stats: Stats): void {
@@ -572,9 +580,11 @@ async function assertNewParentStable(
 }
 
 export async function authorizeRead(context: ToolContext, resolved: ResolvedFile): Promise<void> {
+  const pattern =
+    (await permissionPaths(context, [resolved.canonicalPath]))[0] ?? resolved.canonicalPath;
   await ask(context, {
     permission: "read",
-    patterns: [permissionPath(context, resolved.canonicalPath)],
+    patterns: [pattern],
     always: ["*"],
     metadata: {},
   });
@@ -595,7 +605,12 @@ export async function authorizeEdits(
   createdDirectories?: readonly string[],
 ): Promise<void> {
   const patterns = [
-    ...new Set(resolved.map((entry) => permissionPath(context, entry.canonicalPath))),
+    ...new Set(
+      await permissionPaths(
+        context,
+        resolved.map((entry) => entry.canonicalPath),
+      ),
+    ),
   ];
   await ask(context, {
     permission: "edit",
