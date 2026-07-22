@@ -48,6 +48,26 @@ async function run(command: string[], cwd: string, env?: Record<string, string |
   return result.stdout;
 }
 
+async function runTimed(
+  label: string,
+  command: string[],
+  cwd: string,
+  env?: Record<string, string | undefined>,
+  forwardStderr = false,
+) {
+  const started = performance.now();
+  try {
+    const result = await capture(command, cwd, env);
+    if (!result.success) {
+      throw new Error(`${command.join(" ")} failed:\n${result.stderr || result.stdout}`);
+    }
+    if (forwardStderr && result.stderr) process.stderr.write(result.stderr);
+    return result.stdout;
+  } finally {
+    console.error(`[package-smoke] ${label}: ${Math.round(performance.now() - started)} ms`);
+  }
+}
+
 const root = resolve(import.meta.dir, "..");
 const keepTarball =
   process.argv.includes("--keep-tarball") || process.env.PACKAGE_SMOKE_KEEP_TARBALL === "1";
@@ -121,22 +141,30 @@ try {
   const opencode = resolve(root, "node_modules", "opencode-ai", opencodePackage.bin.opencode);
   const home = join(sandbox, "home");
   const configHome = join(sandbox, "config");
-  const configDirectory = join(sandbox, "config-empty");
   const dataHome = join(sandbox, "data");
   const cacheHome = join(sandbox, "cache");
   const stateHome = join(sandbox, "state");
+  const npmCache = join(sandbox, "npm-cache");
   const temp = join(sandbox, "temp");
   await Promise.all([
     mkdir(home, { recursive: true }),
     mkdir(configHome, { recursive: true }),
-    mkdir(configDirectory, { recursive: true }),
     mkdir(dataHome, { recursive: true }),
     mkdir(cacheHome, { recursive: true }),
     mkdir(stateHome, { recursive: true }),
+    mkdir(npmCache, { recursive: true }),
     mkdir(temp, { recursive: true }),
     writeFile(join(sandbox, "probe.txt"), "probe\n"),
   ]);
   const packageUrl = pathToFileURL(join(sandbox, "node_modules", "opencode-better-hashline")).href;
+  // OpenCode installs provider dependencies under its config root; warm it once for all serial probes.
+  const harnessEnvironment = {
+    ...process.env,
+    BETTER_HASHLINE_SMOKE_CONFIG_HOME: configHome,
+    BETTER_HASHLINE_SMOKE_TIMINGS: "1",
+    BETTER_HASHLINE_VERIFY_TIMINGS: "1",
+    NPM_CONFIG_CACHE: npmCache,
+  };
   const probeEnvironment = {
     PATH: process.env.PATH,
     PATHEXT: process.env.PATHEXT,
@@ -152,7 +180,7 @@ try {
     XDG_DATA_HOME: dataHome,
     XDG_CACHE_HOME: cacheHome,
     XDG_STATE_HOME: stateHome,
-    OPENCODE_CONFIG_DIR: configDirectory,
+    NPM_CONFIG_CACHE: npmCache,
     OPENCODE_CONFIG_CONTENT: JSON.stringify({ plugin: [packageUrl] }),
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
     OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
@@ -160,7 +188,8 @@ try {
     OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
   };
   const probe = JSON.parse(
-    await run(
+    await runTimed(
+      "packed plugin probe",
       [
         opencode,
         "debug",
@@ -199,7 +228,8 @@ try {
   if (!`${invalidProbe.stdout}\n${invalidProbe.stderr}`.includes("CONFIG_INVALID")) {
     throw new Error("Invalid plugin options did not produce a fail-closed OpenCode diagnostic");
   }
-  await run(
+  await runTimed(
+    "native-alias restart recovery",
     [
       process.execPath,
       join(root, "scripts", "session-smoke.ts"),
@@ -209,6 +239,8 @@ try {
       "--native-alias-recovery",
     ],
     root,
+    harnessEnvironment,
+    true,
   );
   const binDirectory = join(sandbox, "node_modules", ".bin");
   const binCandidates =
@@ -229,9 +261,12 @@ try {
   if (!installedBin) throw new Error("Packed package did not install its CLI bin shim");
   await run([installedBin, "--help"], sandbox, probeEnvironment);
   const verification: unknown = JSON.parse(
-    await run(
+    await runTimed(
+      "installed verifier",
       [installedBin, "verify", "--surface", "all", "--opencode", opencode, "--json"],
       sandbox,
+      harnessEnvironment,
+      true,
     ),
   );
   if (!packageJson.version) throw new Error("Packed package has no version");

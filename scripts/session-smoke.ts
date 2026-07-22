@@ -27,8 +27,7 @@ if (!opencodeArgument || !pluginArgument || !sandboxArgument) {
 }
 const nativeAliasRecovery = modeArgument === "--native-alias-recovery";
 if (modeArgument && !nativeAliasRecovery) throw new Error(`Unknown mode: ${modeArgument}`);
-const OPEN_CODE_TIMEOUT_MS =
-  process.env.CI !== "true" ? 60_000 : process.platform === "win32" ? 300_000 : 180_000;
+const OPEN_CODE_TIMEOUT_MS = process.env.CI === "true" ? 180_000 : 60_000;
 
 const opencode = resolve(opencodeArgument);
 const pluginDirectory = resolve(pluginArgument);
@@ -37,15 +36,17 @@ const hookLog = join(sandbox, "hooks.jsonl");
 const observer = join(sandbox, "observer.ts");
 const fixture = join(sandbox, "probe.txt");
 const home = join(sandbox, "home");
-const configHome = join(sandbox, "config-home");
-const configDirectory = join(sandbox, "config-empty");
+const configHome = resolve(
+  process.env.BETTER_HASHLINE_SMOKE_CONFIG_HOME ?? join(sandbox, "config-home"),
+);
 const dataHome = join(sandbox, "data-home");
 const cacheHome = join(sandbox, "cache-home");
 const stateHome = join(sandbox, "state-home");
+const npmCache = resolve(process.env.NPM_CONFIG_CACHE ?? join(sandbox, "npm-cache"));
 const temporary = join(sandbox, "tmp");
 
 await Promise.all(
-  [sandbox, home, configHome, configDirectory, dataHome, cacheHome, stateHome, temporary].map(
+  [sandbox, home, configHome, dataHome, cacheHome, stateHome, npmCache, temporary].map(
     (directory) => mkdir(directory, { recursive: true }),
   ),
 );
@@ -297,7 +298,7 @@ Object.assign(environment, {
   XDG_DATA_HOME: dataHome,
   XDG_CACHE_HOME: cacheHome,
   XDG_STATE_HOME: stateHome,
-  OPENCODE_CONFIG_DIR: configDirectory,
+  NPM_CONFIG_CACHE: npmCache,
   OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
   OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
   OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
@@ -309,6 +310,8 @@ Object.assign(environment, {
 });
 
 async function runOpenCode(continuation: boolean): Promise<void> {
+  const phase = continuation ? "continuation" : "initial";
+  const started = performance.now();
   const child = Bun.spawn(
     [
       opencode,
@@ -337,8 +340,10 @@ async function runOpenCode(continuation: boolean): Promise<void> {
     child.exited,
   ]);
   clearTimeout(timeout);
+  if (process.env.BETTER_HASHLINE_SMOKE_TIMINGS === "1") {
+    console.error(`[session-smoke] ${phase}: ${Math.round(performance.now() - started)} ms`);
+  }
   if (timedOut) {
-    const phase = continuation ? "continuation" : "initial";
     throw new Error(
       `OpenCode ${phase} session smoke timed out after ${OPEN_CODE_TIMEOUT_MS} ms:\n${stderr || stdout}`,
     );
