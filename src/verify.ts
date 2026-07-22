@@ -127,21 +127,30 @@ async function capture(
   cwd: string,
   environment: Record<string, string>,
 ): Promise<CommandResult> {
-  const result = await captureBoundedProcess({
-    command,
-    cwd,
-    env: environment,
-    timeoutMs: COMMAND_TIMEOUT_MS,
-    stdoutLimit: 16 * 1024 * 1024,
-    stderrLimit: 4 * 1024 * 1024,
-  });
-  if (result.timedOut) {
-    throw new Error(`Command timed out: ${command.join(" ")}`);
+  const started = performance.now();
+  try {
+    const result = await captureBoundedProcess({
+      command,
+      cwd,
+      env: environment,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+      stdoutLimit: 16 * 1024 * 1024,
+      stderrLimit: 4 * 1024 * 1024,
+    });
+    if (result.timedOut) {
+      throw new Error(`Command timed out: ${command.join(" ")}`);
+    }
+    if (result.stdoutOverflow || result.stderrOverflow) {
+      throw new Error(`Command output exceeded the verifier limit: ${command.join(" ")}`);
+    }
+    return result;
+  } finally {
+    if (process.env.BETTER_HASHLINE_VERIFY_TIMINGS === "1") {
+      console.error(
+        `[verify] ${command[1] ?? "process"}: ${Math.round(performance.now() - started)} ms`,
+      );
+    }
   }
-  if (result.stdoutOverflow || result.stderrOverflow) {
-    throw new Error(`Command output exceeded the verifier limit: ${command.join(" ")}`);
-  }
-  return result;
 }
 
 async function run(command: string[], cwd: string, environment: Record<string, string>) {
@@ -479,6 +488,8 @@ async function verifyScenario(
   packageDirectory: string,
   root: string,
   retainedArtifacts: Map<string, string>,
+  configHome: string,
+  npmCache: string,
 ): Promise<VerificationCaseReport> {
   let server: ReturnType<typeof Bun.serve> | undefined;
   try {
@@ -494,8 +505,6 @@ async function verifyScenario(
     const betterPlugin = join(root, "better-hashline-plugin");
     const serverModuleUrl = pathToFileURL(join(packageDirectory, "dist", "server.js")).href;
     const home = join(root, "home");
-    const configHome = join(root, "config-home");
-    const configDirectory = join(root, "config-empty");
     const dataHome = join(root, "data-home");
     const cacheHome = join(root, "cache-home");
     const stateHome = join(root, "state-home");
@@ -505,10 +514,10 @@ async function verifyScenario(
         workspace,
         home,
         configHome,
-        configDirectory,
         dataHome,
         cacheHome,
         stateHome,
+        npmCache,
         temporary,
         betterPlugin,
       ].map((directory) => mkdir(directory, { recursive: true })),
@@ -766,7 +775,7 @@ async function verifyScenario(
       XDG_DATA_HOME: dataHome,
       XDG_CACHE_HOME: cacheHome,
       XDG_STATE_HOME: stateHome,
-      OPENCODE_CONFIG_DIR: configDirectory,
+      NPM_CONFIG_CACHE: npmCache,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
         ...config,
         permission: { ...config.permission, edit: "ask" },
@@ -1216,38 +1225,18 @@ async function verifyScenario(
     const exportFile = join(root, "session.json");
     await writeFile(exportFile, exported.stdout, "utf8");
     const importRoot = join(root, "imported");
-    const importHome = join(importRoot, "home");
-    const importConfigHome = join(importRoot, "config");
-    const importConfigDirectory = join(importRoot, "config-empty");
+    // Keep the imported session database isolated while reusing warmed config dependencies.
     const importDataHome = join(importRoot, "data");
-    const importCacheHome = join(importRoot, "cache");
-    const importStateHome = join(importRoot, "state");
     const importTemporary = join(importRoot, "tmp");
     await Promise.all(
-      [
-        importHome,
-        importConfigHome,
-        importConfigDirectory,
-        importDataHome,
-        importCacheHome,
-        importStateHome,
-        importTemporary,
-      ].map((directory) => mkdir(directory, { recursive: true })),
+      [importDataHome, importTemporary].map((directory) => mkdir(directory, { recursive: true })),
     );
     const importEnvironment = {
       ...environment,
-      HOME: importHome,
-      USERPROFILE: importHome,
-      APPDATA: join(importHome, "AppData", "Roaming"),
-      LOCALAPPDATA: join(importHome, "AppData", "Local"),
       TEMP: importTemporary,
       TMP: importTemporary,
       TMPDIR: importTemporary,
-      XDG_CONFIG_HOME: importConfigHome,
       XDG_DATA_HOME: importDataHome,
-      XDG_CACHE_HOME: importCacheHome,
-      XDG_STATE_HOME: importStateHome,
-      OPENCODE_CONFIG_DIR: importConfigDirectory,
     };
     let imported: CommandResult;
     try {
@@ -1455,9 +1444,24 @@ export async function verifyInstallation(
   const sharedRoot = await mkdtemp(join(tmpdir(), `better-hashline-verify-${surface}-`));
   const retainedArtifacts = new Map<string, string>();
   try {
+    const configHome = resolve(
+      process.env.BETTER_HASHLINE_SMOKE_CONFIG_HOME ?? join(sharedRoot, "config-home"),
+    );
+    const npmCache = resolve(process.env.NPM_CONFIG_CACHE ?? join(sharedRoot, "npm-cache"));
+    await Promise.all(
+      [configHome, npmCache].map((directory) => mkdir(directory, { recursive: true })),
+    );
     for (const scenario of scenariosFor(surface)) {
       cases.push(
-        await verifyScenario(scenario, opencode, packageDirectory, sharedRoot, retainedArtifacts),
+        await verifyScenario(
+          scenario,
+          opencode,
+          packageDirectory,
+          sharedRoot,
+          retainedArtifacts,
+          configHome,
+          npmCache,
+        ),
       );
     }
   } finally {
