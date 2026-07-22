@@ -27,7 +27,8 @@ if (!opencodeArgument || !pluginArgument || !sandboxArgument) {
 }
 const nativeAliasRecovery = modeArgument === "--native-alias-recovery";
 if (modeArgument && !nativeAliasRecovery) throw new Error(`Unknown mode: ${modeArgument}`);
-const OPEN_CODE_TIMEOUT_MS = process.env.CI === "true" ? 180_000 : 60_000;
+const OPEN_CODE_TIMEOUT_MS =
+  process.env.CI !== "true" ? 60_000 : process.platform === "win32" ? 300_000 : 180_000;
 
 const opencode = resolve(opencodeArgument);
 const pluginDirectory = resolve(pluginArgument);
