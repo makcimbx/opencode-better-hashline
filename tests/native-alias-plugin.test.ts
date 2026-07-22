@@ -945,7 +945,7 @@ describe("native alias argument and mutation contract", () => {
     expect(await readFile(join(root, "moved.txt"), "utf8")).toBe("move\n");
   });
 
-  test("rejects move destination renderer line breaks before permission or publication", async () => {
+  test("rejects move destination line breaks before permission or publication", async () => {
     if (process.platform === "win32") return;
     const { value } = await aliasHarness();
     const { applyPatch } = aliasRegistry(value);
@@ -972,7 +972,9 @@ describe("native alias argument and mutation contract", () => {
           },
           toolContext,
         ),
-      ).rejects.toThrow("UNSUPPORTED_FILE: Renderer paths cannot contain CR or LF");
+      ).rejects.toThrow(
+        "INVALID_ARGUMENT: filePath contains characters that cannot be represented safely in permission patterns.",
+      );
       expect(asks).toEqual([]);
       expect(metadata).toEqual([]);
       expect(await readFile(sourcePath, "utf8")).toBe("preserved\n");

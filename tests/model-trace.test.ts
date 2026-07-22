@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse, relative, resolve } from "node:path";
 import { createTwoFilesPatch } from "diff";
@@ -324,13 +324,14 @@ describe("model benchmark trace inspection", () => {
   test("records exact source and destination evidence for a completed move", async () => {
     const allowedPathRoot = await mkdtemp(join(tmpdir(), "better-hashline-trace-move-"));
     try {
+      const canonicalRoot = await realpath(allowedPathRoot);
       const identity = {
         packageVersion: "0.3.0",
         schemaSha256: "a".repeat(64),
         hostVersion: "1.18.3",
       };
-      const source = join(allowedPathRoot, "old.ts");
-      const destination = join(allowedPathRoot, "new.ts");
+      const source = join(canonicalRoot, "old.ts");
+      const destination = join(canonicalRoot, "new.ts");
       await writeFile(destination, "same\n");
       const unifiedDiff = createTwoFilesPatch(
         "old.ts",

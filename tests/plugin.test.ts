@@ -1725,7 +1725,7 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
-  test("rejects lifecycle source renderer line breaks before permission or mutation", async () => {
+  test("rejects lifecycle source line breaks before permission or mutation", async () => {
     if (process.platform === "win32") return;
     const value = await hooks();
     const { hashlineRead, hashlineEdit } = registry(value);
@@ -1747,7 +1747,9 @@ describe("OpenCode plugin protocol", () => {
           },
           context({ asks }),
         ),
-      ).rejects.toThrow("UNSUPPORTED_FILE: Renderer paths cannot contain CR or LF");
+      ).rejects.toThrow(
+        "INVALID_ARGUMENT: filePath contains characters that cannot be represented safely in permission patterns.",
+      );
       expect(asks).toEqual([]);
       expect(await readFile(filePath, "utf8")).toBe("preserved\n");
     }

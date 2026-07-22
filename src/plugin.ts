@@ -288,6 +288,10 @@ function hostWorktreePath(worktree: string, directory: string): string {
   return resolve(worktree);
 }
 
+async function canonicalDisplayRoot(worktree: string, directory: string): Promise<string> {
+  return realpath(hostWorktreePath(worktree, directory));
+}
+
 function samePathRoot(left: string, right: string): boolean {
   return sameFilesystemRoot(left, right);
 }
@@ -842,7 +846,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         outputDigest: sha256(new TextEncoder().encode(rendered.output)),
         createdAt: Date.now(),
       });
-      const shownPath = displayPath(context.worktree, resolved.canonicalPath);
+      const shownPath = displayPath(
+        await canonicalDisplayRoot(context.worktree, context.directory),
+        resolved.canonicalPath,
+      );
       context.metadata({
         title: shownPath,
         metadata: { snapshotId: snapshot.id, nextOffset: rendered.nextOffset },
@@ -907,10 +914,12 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         metadata,
       };
     }
+    const displayRoot =
+      aliasBinding?.canonicalWorktree ??
+      (await canonicalDisplayRoot(context.worktree, context.directory));
     if (batch.kind !== "text") {
       const resolved = await resolveMutableFile(args.filePath, context.directory);
-      const worktree = aliasBinding?.canonicalWorktree ?? context.worktree;
-      const shownPath = displayPath(worktree, resolved.canonicalPath);
+      const shownPath = displayPath(displayRoot, resolved.canonicalPath);
       assertRendererPaths([resolved.canonicalPath, shownPath]);
       const aliasPath = shownPath.replaceAll("\\", "/");
       if (
@@ -925,7 +934,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           ? await resolveNewFile(batch.destinationPath, context.directory)
           : undefined;
       const destinationShown = destination
-        ? displayPath(worktree, destination.canonicalPath)
+        ? displayPath(displayRoot, destination.canonicalPath)
         : undefined;
       if (destination && destinationShown) {
         assertRendererPaths([destination.canonicalPath, destinationShown]);
@@ -1089,10 +1098,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
 
     const operations = batch.operations;
     const resolved = await resolveExistingFile(args.filePath, context.directory);
-    const shownPath = displayPath(
-      aliasBinding?.canonicalWorktree ?? context.worktree,
-      resolved.canonicalPath,
-    );
+    const shownPath = displayPath(displayRoot, resolved.canonicalPath);
     const aliasPath = shownPath.replaceAll("\\", "/");
     if (
       toolName !== "hashline_edit" &&
@@ -1263,9 +1269,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           })),
         ];
         for (const entry of plannedEntries) await authorizeExternal(context, entry);
-        const shownPath = displayPath(context.worktree, plan.canonicalPath);
+        const displayRoot = await canonicalDisplayRoot(context.worktree, context.directory);
+        const shownPath = displayPath(displayRoot, plan.canonicalPath);
         const shownDirectories = plan.missingDirectories.map((entry) =>
-          displayPath(context.worktree, entry.canonicalPath),
+          displayPath(displayRoot, entry.canonicalPath),
         );
         const diff = unifiedDiff(shownPath, "", args.content);
 
@@ -1307,7 +1314,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
       const resolved = await resolveNewFile(args.filePath, context.directory);
       await authorizeExternal(context, resolved);
-      const shownPath = displayPath(context.worktree, resolved.canonicalPath);
+      const shownPath = displayPath(
+        await canonicalDisplayRoot(context.worktree, context.directory),
+        resolved.canonicalPath,
+      );
       const diff = unifiedDiff(shownPath, "", args.content);
 
       return await withPathLock(

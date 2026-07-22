@@ -1358,17 +1358,18 @@ describe("new-file parent publication", () => {
       requestedAnchor,
       process.platform === "win32" ? "junction" : "dir",
     );
+    const physicalAnchor = await realpath(canonicalAnchor);
     const plan = await resolveNewFileParentPlan("requested-anchor/created/target", root);
     const directory = plan.missingDirectories[0];
     if (!directory) throw new Error("Expected a planned directory.");
 
     expect(plan.anchor).toMatchObject({
       requestedPath: requestedAnchor,
-      canonicalPath: canonicalAnchor,
+      canonicalPath: physicalAnchor,
       requestedType: "symbolic-link",
     });
     expect(directory.requestedPath).toBe(join(requestedAnchor, "created"));
-    expect(directory.canonicalPath).toBe(join(canonicalAnchor, "created"));
+    expect(directory.canonicalPath).toBe(join(physicalAnchor, "created"));
     await publishNewFileWithParents({
       plan,
       bytes: encoder.encode("content"),
@@ -1468,7 +1469,7 @@ describe("new-file parent publication", () => {
         const realRealpath = stringPathFs.realpath;
         const mock = spyOn(stringPathFs, "realpath").mockImplementation(async (path) => {
           const resolved = await realRealpath(path);
-          if (String(path) === directory.canonicalPath) throw syscallError("EIO");
+          if (pathsAlias(resolved, directory.canonicalPath)) throw syscallError("EIO");
           return resolved;
         });
         restore = () => mock.mockRestore();
@@ -1487,11 +1488,12 @@ describe("new-file parent publication", () => {
       } else if (boundary === "parent-revalidation") {
         const realRealpath = stringPathFs.realpath;
         const mock = spyOn(stringPathFs, "realpath").mockImplementation(async (path) => {
-          if (String(path) === directory.canonicalPath) {
+          const resolved = await realRealpath(path);
+          if (pathsAlias(resolved, directory.canonicalPath)) {
             const names = await readdir(directory.canonicalPath);
             if (names.some((name) => name.includes(".hashline-"))) throw syscallError("EIO");
           }
-          return realRealpath(path);
+          return resolved;
         });
         restore = () => mock.mockRestore();
       } else if (boundary === "link") {
@@ -1503,7 +1505,9 @@ describe("new-file parent publication", () => {
         const realLstat = stringPathFs.lstat;
         const mock = spyOn(stringPathFs, "lstat").mockImplementation(async (path) => {
           const stats = await realLstat(path);
-          if (String(path) === plan.canonicalPath) throw syscallError("EIO");
+          if (pathsAlias(await fsPromises.realpath(path), plan.canonicalPath)) {
+            throw syscallError("EIO");
+          }
           return stats;
         });
         restore = () => mock.mockRestore();
@@ -1521,7 +1525,9 @@ describe("new-file parent publication", () => {
       } else if (boundary === "readback") {
         const realOpen = fsPromises.open;
         const mock = spyOn(fsPromises, "open").mockImplementation(async (path, flags, mode) => {
-          if (String(path) === plan.canonicalPath) throw syscallError("EIO");
+          if (flags === "r" && pathsAlias(await fsPromises.realpath(path), plan.canonicalPath)) {
+            throw syscallError("EIO");
+          }
           return realOpen(path, flags, mode);
         });
         restore = () => mock.mockRestore();
@@ -1531,7 +1537,7 @@ describe("new-file parent publication", () => {
         let parentChecksAfterCommit = 0;
         const mock = spyOn(stringPathFs, "realpath").mockImplementation(async (path) => {
           const resolved = await realRealpath(path);
-          if (String(path) === directory.canonicalPath) {
+          if (pathsAlias(resolved, directory.canonicalPath)) {
             try {
               await realLstat(plan.canonicalPath);
               parentChecksAfterCommit += 1;
