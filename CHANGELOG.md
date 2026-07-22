@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.5.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.4.0...v0.5.0) (2026-07-22)
+
+### Added
+
 - Add a project-local OpenCode configuration that loads the working-tree plugin in enforced `native-aliases` mode for dogfooding.
 - Add `INSERTION_BOUNDARY_CONFLICT` so duplicate insert/copy destinations are distinguishable from spatial overlap.
 - Add `@hashline-edit` lifecycle receipts that distinguish consumed snapshots with attached, absent, or unavailable successors.
