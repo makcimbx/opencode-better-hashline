@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.6.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.5.0...v0.6.0) (2026-07-22)
+
+### Added
+
 - Add text-only `readbackOffset` and `readbackLimit` controls for one contiguous post-edit successor page, with one-based/default-first-hunk addressing, a `1..1000`/default-1000 limit, and delivered-page-only issuance without an ID-only successor.
 - Add explicit `hashline_write.createParents` support for at most 64 missing directories through one deepest-ancestor plan, complete directory/target authorization and locking, exclusive root-to-leaf creation, staged no-clobber file publication, and no-rollback `PARTIAL_PUBLICATION` after a directory exists or creation becomes ambiguous.
 - Add schema-v7 deterministic methodology and an immutable write-once result for the expanded 29-case corpus, edit/write schemas, readback call, and parent-creation call.
