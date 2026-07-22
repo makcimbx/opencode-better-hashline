@@ -227,14 +227,13 @@ and shares contain paths and diffs. Sanitized exports remove tool paths, diffs, 
 OpenCode 1.18.3 retains a safe root-relative session locator; review it before disclosure. The removed
 marker makes alias continuation fail closed. ACP can classify the alias as an edit but cannot reconstruct the
 native structured diff from Better Hashline metadata. The unique `hashline` surface remains the
-production default and recommendation; the completed paid pilot supports only an opt-in experimental
-native-alias release under the [preview plan](docs/native-alias-preview-plan.md).
+production default and recommendation.
 
-Native-alias pilots v1, v3, v4, v5, and v6 stopped fail-closed on terminal benchmark incidents and cannot
-resume or retry. Their privacy-safe incident records are tracked under `benchmarks/results/`. Pilot v7
-completed all 48 Luna/Sol sessions across the unique and native-alias surfaces with complete accounting,
-zero retries/failures/timeouts, and USD 0 reported cost. The privacy-safe summary is tracked under
-`benchmarks/results/`; the maintainer approved native aliases for an opt-in experimental release.
+The retained [privacy-safe pilot v7 summary](benchmarks/results/2026-07-21-native-alias-pilot-v7.json)
+records 48/48 passing Luna/Sol sessions across the unique and native-alias surfaces, complete
+accounting, zero retries/failures/timeouts, and USD 0 reported cost. It is technical transport
+evidence, not a model-superiority claim. The maintainer approved only an opt-in experimental
+release; all pilot IDs through v7 are closed and may not be resumed or retried.
 
 ## Why No Per-Line Hash?
 
@@ -307,7 +306,6 @@ Full boundaries and trust assumptions are in [docs/threat-model.md](docs/threat-
 - [Threat model](docs/threat-model.md)
 - [Research and prior art](docs/research.md)
 - [Benchmarks](docs/benchmarks.md)
-- [Experimental native-alias preview plan](docs/native-alias-preview-plan.md)
 - [Release process](docs/releasing.md)
 - [Contributing](CONTRIBUTING.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)

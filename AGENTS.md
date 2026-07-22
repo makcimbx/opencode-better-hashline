@@ -29,7 +29,7 @@
 - Filesystem and plugin tests cover authorization, races, host hooks, and fail-closed behavior; update them when those paths change.
 - `bun run bench` is deterministic but result paths are write-once. Never `--force` published evidence; add a new dated result.
 - `bun run bench:model` is a no-cost dry run. `--preflight` performs installs/writes but no model call. Never use `--execute` without explicit user approval, a model/auth source, and `BENCHMARK_ACK_COSTS=yes`.
-- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted; pilots v3, v4, v5, and v6 consumed their reservations and failed closed, while pilot v7 consumed its reservation and completed 48/48 sessions. None may resume or retry. A new pilot identity is created only after a paid launch consumed its durable reservation, never for pre-reservation failures or ordinary development findings. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
+- The frozen native-alias pilot v7 completed 48/48 sessions. Every pilot ID through v7 is closed and may never resume or retry. A new pilot identity is created only after a paid launch consumes its durable reservation, never for pre-reservation failures or ordinary development findings. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
 
 ## Fast Benchmark Development
 
@@ -38,7 +38,7 @@
 - Candidate A is forbidden until the full rehearsal passes. Then run one consolidated independent audit, remediate its findings, and run the final verifier/CI/pack matrix once on the unchanged tree.
 - Build external bundle B and anchor-only commit C only after candidate A and its clean eligible preflight are final. Do not rebuild approval evidence while implementation or schedule bytes are changing.
 - Parallelize independent checks and per-model rehearsals. Communicate only material blockers, terminal outcomes, and evidence changes.
-- Ignored local preflights, raw pilot outputs, and development-probe results are temporary. After diagnosis and a sanitized terminal incident, delete them before candidate A. Track only publishable deterministic results and privacy-safe terminal incidents.
+- Ignored local preflights, raw pilot outputs, and development-probe results are temporary. Delete them before candidate A after diagnosis; retain only publishable deterministic evidence and the privacy-safe terminal result needed for the current release decision.
 
 ## Workflow
 

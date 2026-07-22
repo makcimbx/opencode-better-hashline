@@ -210,7 +210,6 @@ export function assertNativeAliasPreflightReceipt(
     canonicalJson(receipt.oracleFixture) !==
     canonicalJson({
       schemaVersion: 1,
-      declaredSourceTraceSha256: "c4805f9c0644a9eb4b7050e892ba07c9800fb278ebebb27f3dd93a4e7dfbf49f",
       legacyDecision: "invalid",
       correctedDecision: "valid",
       correctedReason: "valid",

@@ -2,12 +2,11 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { buildNativeAliasMetadata } from "../../src/presentation.js";
-import topology from "./fixtures/native-alias-pilot-v1-topology.json" with { type: "json" };
+import topology from "./fixtures/native-alias-worktree-topology.json" with { type: "json" };
 import { inspectJsonlTrace, inspectNativeAliasTrace } from "./trace.js";
 
 export type OracleFixtureReport = {
   schemaVersion: 1;
-  declaredSourceTraceSha256: string;
   legacyDecision: "invalid";
   correctedDecision: "valid";
   correctedReason: "valid";
@@ -128,7 +127,6 @@ export async function verifyNativeAliasOracleFixture(identity: {
     }
     return {
       schemaVersion: 1,
-      declaredSourceTraceSha256: topology.declaredSourceTraceSha256,
       legacyDecision: "invalid",
       correctedDecision: "valid",
       correctedReason: "valid",

@@ -181,47 +181,20 @@ The harness:
 
 The harness reports requested and observed identities separately. Reported usage covers the validated parent session and is not asserted to equal a provider invoice. Before publishing model claims, inspect all traces, redact secrets, report malformed calls/retries/tokens/cost with their stated scope, run enough paired tasks for the intended claim, and preregister the primary metric. The default 48-session pilot is useful for harness debugging, not a universal superiority claim.
 
-Native-alias pilot v3 froze 12 baseline tasks x 2 surfaces x four models: 96 sessions and at most 1,152
-requests. It executed one Luna session, stopped fail-closed after five observed requests, consumed its
-reservation, and may never resume or retry. Reported cost was USD 0, but accounting remained incomplete
-with an unknown cost upper bound; no file mutation or model-comparison result exists. See the
-[sanitized incident](../benchmarks/results/2026-07-21-native-alias-pilot-v3-incident.json).
+The retained native-alias model result is pilot v7. Its frozen schedule used the 12 baseline tasks,
+the unique and native-alias surfaces, and Luna/Sol medium. All 48 sessions passed in 181 observed
+requests with complete accounting, zero retries/failures/timeouts, and USD 0 reported cost. The
+[privacy-safe summary](../benchmarks/results/2026-07-21-native-alias-pilot-v7.json) is technical
+transport evidence, not a model-superiority claim. The maintainer approved only an opt-in
+experimental release; `hashline` remains the default.
 
-Native-alias pilot v1 stopped after its first session because the benchmark oracle conflated the
-task fixture with OpenCode's worktree. The edit itself, model identity, transport, and exact files
-passed, but protocol-marker classification failed closed. The run is not release evidence and cannot
-be resumed or retried. See the
-[sanitized incident record](../benchmarks/results/2026-07-20-native-alias-pilot-v1-incident.json).
-A future corrected pilot requires a new immutable runner identity and explicit approval.
-The corrected v3 oracle physically confines files to the disposable fixture and separately uses the one
-strictly attested export worktree for renderer paths. It exactly correlates trace and unsanitized export
-terminal records, validates complete history, and assigns every expected file mutation to the required
-executor. The unsanitized export remains memory-only; persisted evidence is sanitized. Model-free
-preflight records the same oracle's normalized v1-topology fixture and a packed one-request retry-abort probe. The fixture declares the private incident trace hash but is topology evidence, not a cryptographic replay of untracked raw bytes.
-Pilot v2 was never executed and is retired. Pilot v4 executed two sessions and stopped fail-closed after
-the baseline session produced exact bytes but its trace lacked fixture-root path authority, causing a
-mutation-ledger false negative. Its reservation is consumed, it may never resume or retry, and no model
-comparison result exists. See the
-[v4 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v4-incident.json). Pilot v5 then passed
-16 sessions and stopped fail-closed on session 17 because the create-file fixture omitted the parent
-directory required by strict create-only `hashline_write`. Its reservation is consumed, it may never
-resume or retry, and no unsafe mutation occurred. See the
-[v5 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v5-incident.json). Pilot v6 then passed
-22 sessions and stopped fail-closed after its benchmark ledger cleared a still-valid
-snapshot for another file. Its reservation is consumed, it may never resume or retry, and exact expected
-bytes were preserved. See the
-[v6 incident](../benchmarks/results/2026-07-21-native-alias-pilot-v6-incident.json). Pilot v7 then used a
-new identity, exact A/B/C approval chain, and new external reservation to complete all 48 sessions.
+Model-free preflight still exercises the fail-closed oracle against normalized worktree/fixture
+topology, forged and outside-fixture paths, and a one-request retry abort. Trace and export terminal
+records must match exactly, complete history must validate, and the per-file mutation ledger must
+bind each expected change to the required executor. Unsanitized exports remain memory-only.
 
-The completed v7 schedule used the same 12 tasks and paired surfaces with Luna and Sol medium. All 48
-sessions passed in 181 observed requests with complete accounting, zero retries/failures/timeouts, and USD
-0 reported cost. Nano was excluded after an
-intermittent malformed-argument development failure; Ultra and alternative NVIDIA candidates were
-excluded after provider-capacity, model-format, reasoning-length, or no-tool instability. Development
-probes are non-publishable evidence. The
-[privacy-safe v7 summary](../benchmarks/results/2026-07-21-native-alias-pilot-v7.json) is technical evidence,
-not a model-superiority claim. The maintainer approved only an opt-in experimental release; `hashline`
-remains the default.
+Earlier pilot IDs v1-v6 are retired or consumed and remain permanently closed. Their superseded
+incident records remain available in Git history rather than the current benchmark result set.
 
 ## Result Vocabulary
 

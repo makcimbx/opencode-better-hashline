@@ -11,6 +11,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Remove the completed native-alias preview plan and superseded pre-v7 incident records while retaining the final pilot evidence and closed-ID safety rules.
+
 ### Fixed
 
 ## [0.5.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.4.0...v0.5.0) (2026-07-22)

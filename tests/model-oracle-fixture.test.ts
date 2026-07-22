@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { verifyNativeAliasOracleFixture } from "../benchmarks/model/oracle-fixture.js";
 
-describe("native alias pilot v1 topology", () => {
-  test("reproduces the normalized topology decision without replaying the private trace", async () => {
+describe("native alias worktree topology", () => {
+  test("separates fixture paths from renderer worktree authority", async () => {
     expect(
       await verifyNativeAliasOracleFixture({
         packageVersion: "0.2.1",
@@ -11,7 +11,6 @@ describe("native alias pilot v1 topology", () => {
       }),
     ).toEqual({
       schemaVersion: 1,
-      declaredSourceTraceSha256: "c4805f9c0644a9eb4b7050e892ba07c9800fb278ebebb27f3dd93a4e7dfbf49f",
       legacyDecision: "invalid",
       correctedDecision: "valid",
       correctedReason: "valid",
