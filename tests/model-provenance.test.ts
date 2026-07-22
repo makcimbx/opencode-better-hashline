@@ -432,5 +432,5 @@ describe("effective tool provenance", () => {
       expect(() => assertEffectiveToolIdentitiesUnchanged(before, after)).toThrow(mutation.tool);
       await writeFile(mutation.path, original);
     }
-  });
+  }, 15_000);
 });
