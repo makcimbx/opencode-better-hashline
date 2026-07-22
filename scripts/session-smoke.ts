@@ -27,6 +27,7 @@ if (!opencodeArgument || !pluginArgument || !sandboxArgument) {
 }
 const nativeAliasRecovery = modeArgument === "--native-alias-recovery";
 if (modeArgument && !nativeAliasRecovery) throw new Error(`Unknown mode: ${modeArgument}`);
+const OPEN_CODE_TIMEOUT_MS = process.env.CI === "true" ? 180_000 : 60_000;
 
 const opencode = resolve(opencodeArgument);
 const pluginDirectory = resolve(pluginArgument);
@@ -328,14 +329,19 @@ async function runOpenCode(continuation: boolean): Promise<void> {
   const timeout = setTimeout(() => {
     timedOut = true;
     child.kill();
-  }, 60_000);
+  }, OPEN_CODE_TIMEOUT_MS);
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ]);
   clearTimeout(timeout);
-  if (timedOut) throw new Error("OpenCode session smoke timed out");
+  if (timedOut) {
+    const phase = continuation ? "continuation" : "initial";
+    throw new Error(
+      `OpenCode ${phase} session smoke timed out after ${OPEN_CODE_TIMEOUT_MS} ms:\n${stderr || stdout}`,
+    );
+  }
   if (exitCode !== 0) {
     throw new Error(`OpenCode session smoke exited with ${exitCode}:\n${stderr || stdout}`);
   }
