@@ -9,6 +9,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Add a project-local OpenCode configuration that loads the working-tree plugin in enforced `native-aliases` mode for dogfooding.
+
 ### Changed
 
 ### Fixed
