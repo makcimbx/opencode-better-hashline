@@ -5,14 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.5.0...v0.6.0) (2026-07-22)
-
+## [Unreleased]
 
 ### Added
 
-* add snapshot-bound file workflows ([#32](https://github.com/makcimbx/opencode-better-hashline/issues/32)) ([9fddb96](https://github.com/makcimbx/opencode-better-hashline/commit/9fddb9638e05a4a228b718a04e03ee626504aaf6))
+### Changed
 
-## [Unreleased]
+### Fixed
+
+## [0.6.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.5.0...v0.6.0) (2026-07-22)
 
 ### Added
 
