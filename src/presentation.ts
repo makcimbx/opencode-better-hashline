@@ -1,16 +1,20 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
-export const NATIVE_ALIAS_PROTOCOL = "native-aliases/v1";
+export const NATIVE_ALIAS_PROTOCOL = "native-aliases/v2";
 export const NATIVE_ALIAS_TOOL_SURFACE = "native-aliases";
 export const NATIVE_ALIAS_METADATA_MAX_BYTES = 1_048_576;
 
 export type NativeAliasSurface = "edit" | "apply_patch";
+export type NativeAliasOperation = "update" | "delete_file" | "move_file";
 
 export type NativeAliasMetadataInput = {
   surface: NativeAliasSurface;
+  operation?: NativeAliasOperation;
   canonicalPath: string;
   relativePath: string;
+  destinationCanonicalPath?: string;
+  destinationRelativePath?: string;
   unifiedDiff: string;
   additions: number;
   deletions: number;
@@ -25,7 +29,9 @@ type BetterHashlineMarker = {
   schemaSha256: string;
   hostVersion: string;
   surface: NativeAliasSurface;
+  operation: NativeAliasOperation;
   canonicalPathSha256: string;
+  destinationPathSha256?: string;
 };
 
 export type NativeEditMetadata = {
@@ -44,10 +50,11 @@ export type NativeApplyPatchMetadata = {
   files: Array<{
     filePath: string;
     relativePath: string;
-    type: "update";
+    type: "update" | "delete" | "move";
     patch: string;
     additions: number;
     deletions: number;
+    movePath?: string;
   }>;
   diagnostics: Record<string, never>;
   betterHashline: BetterHashlineMarker;
@@ -67,6 +74,10 @@ function sha256Text(value: string): string {
 
 export function canonicalPathSha256(canonicalPath: string): string {
   return sha256Text(canonicalPath);
+}
+
+export function isRendererPathSafe(path: string): boolean {
+  return !/[\r\n]/u.test(path);
 }
 
 export function countUnifiedDiffChanges(diff: string): {
@@ -134,13 +145,18 @@ export function nativeAliasProtocolFingerprint(input: {
 }
 
 function marker(input: NativeAliasMetadataInput): BetterHashlineMarker {
+  const operation = input.operation ?? "update";
   return {
     protocol: NATIVE_ALIAS_PROTOCOL,
     packageVersion: input.packageVersion,
     schemaSha256: input.schemaSha256,
     hostVersion: input.hostVersion,
     surface: input.surface,
+    operation,
     canonicalPathSha256: canonicalPathSha256(input.canonicalPath),
+    ...(operation === "move_file" && input.destinationCanonicalPath
+      ? { destinationPathSha256: canonicalPathSha256(input.destinationCanonicalPath) }
+      : {}),
   };
 }
 
@@ -162,17 +178,24 @@ export function buildNativeAliasMetadata(
     };
   }
 
+  const operation = input.operation ?? "update";
+  const destinationPath = input.destinationCanonicalPath;
+  const file = {
+    filePath: input.canonicalPath,
+    relativePath: (input.destinationRelativePath ?? input.relativePath).replaceAll("\\", "/"),
+    type:
+      operation === "delete_file"
+        ? ("delete" as const)
+        : operation === "move_file"
+          ? ("move" as const)
+          : ("update" as const),
+    patch: input.unifiedDiff,
+    additions: input.additions,
+    deletions: input.deletions,
+    ...(operation === "move_file" && destinationPath ? { movePath: destinationPath } : {}),
+  };
   return {
-    files: [
-      {
-        filePath: input.canonicalPath,
-        relativePath: input.relativePath.replaceAll("\\", "/"),
-        type: "update",
-        patch: input.unifiedDiff,
-        additions: input.additions,
-        deletions: input.deletions,
-      },
-    ],
+    files: [file],
     diagnostics: {},
     betterHashline,
   };

@@ -6,10 +6,19 @@ import {
   detectOpenCodeVersion,
   HOST_HEALTH_MAX_BYTES,
   HOST_HEALTH_TIMEOUT_MS,
+  OpenCodeSessionHistoryError,
   readOpenCodeSessionHistory,
+  SESSION_HISTORY_ATTEMPT_TIMEOUT_MS,
+  SESSION_HISTORY_MAX_ATTEMPTS,
+  SESSION_HISTORY_RETRY_BACKOFF_MS,
+  SESSION_HISTORY_TIMEOUT_MS,
   SESSION_HISTORY_TRANSPORT_MAX_BYTES,
 } from "../src/native-alias.js";
-import { buildNativeAliasMetadata, type NativeAliasSurface } from "../src/presentation.js";
+import {
+  buildNativeAliasMetadata,
+  type NativeAliasOperation,
+  type NativeAliasSurface,
+} from "../src/presentation.js";
 import {
   assertNativeAliasHistory,
   buildNativeAliasDisplayPrefixRejectionMetadata,
@@ -26,6 +35,11 @@ import {
 const worktree = resolve("test-worktree");
 const canonicalPath = resolve(worktree, "src/a.ts");
 const unifiedDiff = "--- src/a.ts\tbefore\n+++ src/a.ts\tafter\n@@ -1 +1 @@\n-old\n+new\n";
+const destinationCanonicalPath = resolve(worktree, "src/b.ts");
+const deleteUnifiedDiff =
+  "Index: src/a.ts\n===================================================================\n--- src/a.ts\tbefore\n+++ src/a.ts\tafter\n@@ -1,1 +0,0 @@\n-old\n";
+const moveUnifiedDiff =
+  "===================================================================\n--- src/a.ts\tbefore\n+++ src/b.ts\tafter\n";
 const identity: NativeAliasProtocolIdentity = {
   packageVersion: "0.2.1",
   schemaSha256: "a".repeat(64),
@@ -48,6 +62,18 @@ function healthClient(
       },
     },
   };
+}
+
+async function capturedHistoryError(
+  promise: Promise<unknown>,
+): Promise<OpenCodeSessionHistoryError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof OpenCodeSessionHistoryError) return error;
+    throw error;
+  }
+  throw new Error("Expected OpenCode session history to fail");
 }
 
 function validMetadata(tool: NativeAliasSurface) {
@@ -78,6 +104,98 @@ function completedPart(
       metadata: metadata ?? {},
     },
   };
+}
+
+type LifecycleOperation = Exclude<NativeAliasOperation, "update">;
+
+function lifecycleMetadata(tool: NativeAliasSurface, operation: LifecycleOperation) {
+  const move = operation === "move_file";
+  return buildNativeAliasMetadata({
+    surface: tool,
+    operation,
+    canonicalPath,
+    relativePath: "src/a.ts",
+    ...(move ? { destinationCanonicalPath, destinationRelativePath: "src/b.ts" } : {}),
+    unifiedDiff: move ? moveUnifiedDiff : deleteUnifiedDiff,
+    additions: 0,
+    deletions: move ? 0 : 1,
+    ...identity,
+  });
+}
+
+function lifecycleInput(operation: LifecycleOperation) {
+  return {
+    filePath: "src/a.ts",
+    snapshotId: "s_0000000000000000000000",
+    rebase: "none",
+    readback: false,
+    operations: [
+      operation === "move_file"
+        ? { op: "move_file", destinationPath: "src/b.ts" }
+        : { op: "delete_file" },
+    ],
+  };
+}
+
+function completedLifecyclePart(
+  tool: NativeAliasSurface,
+  operation: LifecycleOperation,
+  metadata: Record<string, unknown> = lifecycleMetadata(tool, operation),
+  input: unknown = lifecycleInput(operation),
+) {
+  const part = completedPart(tool, metadata);
+  (part.state as Record<string, unknown>).input = input;
+  return part;
+}
+
+function clonedLifecycleMetadata(tool: NativeAliasSurface, operation: LifecycleOperation) {
+  return structuredClone(lifecycleMetadata(tool, operation)) as Record<string, unknown>;
+}
+
+function filesystemLifecyclePart(input: {
+  operation: LifecycleOperation;
+  protocolIdentity: NativeAliasProtocolIdentity;
+  sourceCanonicalPath: string;
+  sourceRelativePath: string;
+  destinationCanonicalPath: string;
+  destinationRelativePath: string;
+  inputSourcePath?: string;
+  inputDestinationPath?: string;
+}) {
+  const move = input.operation === "move_file";
+  const unifiedDiff = move
+    ? `===================================================================\n--- ${input.sourceRelativePath}\tbefore\n+++ ${input.destinationRelativePath}\tafter\n`
+    : `Index: ${input.sourceRelativePath}\n===================================================================\n--- ${input.sourceRelativePath}\tbefore\n+++ ${input.sourceRelativePath}\tafter\n@@ -1,1 +0,0 @@\n-old\n`;
+  const metadata = buildNativeAliasMetadata({
+    surface: "edit",
+    operation: input.operation,
+    canonicalPath: input.sourceCanonicalPath,
+    relativePath: input.sourceRelativePath,
+    ...(move
+      ? {
+          destinationCanonicalPath: input.destinationCanonicalPath,
+          destinationRelativePath: input.destinationRelativePath,
+        }
+      : {}),
+    unifiedDiff,
+    additions: 0,
+    deletions: move ? 0 : 1,
+    ...input.protocolIdentity,
+  });
+  return completedLifecyclePart("edit", input.operation, metadata, {
+    filePath: input.inputSourcePath ?? input.sourceRelativePath,
+    snapshotId: "s_0000000000000000000000",
+    rebase: "none",
+    readback: false,
+    operations: [
+      move
+        ? {
+            op: "move_file",
+            destinationPath: input.inputDestinationPath ?? input.destinationRelativePath,
+          }
+        : { op: "delete_file" },
+    ],
+  });
 }
 
 describe("native alias host detection", () => {
@@ -163,6 +281,149 @@ describe("native alias host detection", () => {
       ),
     ).rejects.toThrow("too large");
   });
+
+  test("retries transient network, timeout, and selected HTTP failures before recovery", async () => {
+    const failures = [
+      () => {
+        throw new Error("Bearer private-network-detail");
+      },
+      () => {
+        throw new DOMException("private timeout detail", "TimeoutError");
+      },
+      () => new Response("private HTTP body", { status: 503 }),
+    ] as const;
+
+    for (const failure of failures) {
+      let calls = 0;
+      const history = await readOpenCodeSessionHistory(
+        healthClient(async () => {
+          calls += 1;
+          return calls === 1 ? failure() : Response.json([{ parts: [] }]);
+        }),
+        "session",
+        worktree,
+        SESSION_HISTORY_LIMIT + 1,
+      );
+      expect(history).toEqual([{ parts: [] }]);
+      expect(calls).toBe(2);
+    }
+  });
+
+  test("does not retry non-transient HTTP or deterministic response failures", async () => {
+    const cases: Array<
+      [category: OpenCodeSessionHistoryError["category"], response: () => Promise<Response>]
+    > = [
+      ["http-status", async () => new Response("private HTTP body", { status: 400 })],
+      [
+        "response-too-large",
+        async () =>
+          new Response("private oversized body", {
+            headers: { "content-length": String(SESSION_HISTORY_TRANSPORT_MAX_BYTES + 1) },
+          }),
+      ],
+      ["invalid-json", async () => new Response("{private-invalid-json")],
+      ["invalid-shape", async () => Response.json({ privatePath: "C:/private/history" })],
+    ];
+
+    for (const [category, response] of cases) {
+      let calls = 0;
+      const error = await capturedHistoryError(
+        readOpenCodeSessionHistory(
+          healthClient(async () => {
+            calls += 1;
+            return response();
+          }),
+          "session",
+          worktree,
+          SESSION_HISTORY_LIMIT + 1,
+        ),
+      );
+      expect(error.category).toBe(category);
+      expect(error.attempts).toBe(1);
+      expect(error.exhaustion).toBeUndefined();
+      expect(error.message).not.toContain("private");
+      expect(calls).toBe(1);
+    }
+  });
+
+  test("distinguishes unavailable and unexpected transports without raw details", async () => {
+    const unavailable = await capturedHistoryError(
+      readOpenCodeSessionHistory({}, "session", worktree, SESSION_HISTORY_LIMIT + 1),
+    );
+    expect(unavailable.category).toBe("transport-unavailable");
+    expect(unavailable.retryable).toBeFalse();
+
+    const unexpected = await capturedHistoryError(
+      readOpenCodeSessionHistory(
+        {
+          _client: {
+            getConfig() {
+              throw new Error("Bearer private-transport-detail at C:/private/path");
+            },
+          },
+        },
+        "session",
+        worktree,
+        SESSION_HISTORY_LIMIT + 1,
+      ),
+    );
+    expect(unexpected.category).toBe("transport-unexpected");
+    expect(unexpected.retryable).toBeFalse();
+    expect(unexpected.message).not.toContain("private");
+  });
+
+  test("bounds retry exhaustion by attempts and one total deadline", async () => {
+    let statusCalls = 0;
+    const exhausted = await capturedHistoryError(
+      readOpenCodeSessionHistory(
+        healthClient(async () => {
+          statusCalls += 1;
+          return new Response("private unavailable body", { status: 503 });
+        }),
+        "session",
+        worktree,
+        SESSION_HISTORY_LIMIT + 1,
+      ),
+    );
+    expect(exhausted).toMatchObject({
+      category: "http-status",
+      retryable: true,
+      status: 503,
+      statusClass: "5xx",
+      attempts: SESSION_HISTORY_MAX_ATTEMPTS,
+      exhaustion: "attempts",
+      timeoutMs: SESSION_HISTORY_TIMEOUT_MS,
+    });
+    expect(exhausted.message).not.toContain("private");
+    expect(statusCalls).toBe(SESSION_HISTORY_MAX_ATTEMPTS);
+
+    let timeoutCalls = 0;
+    const started = performance.now();
+    const deadline = await capturedHistoryError(
+      readOpenCodeSessionHistory(
+        healthClient(async () => {
+          timeoutCalls += 1;
+          await Bun.sleep(200);
+          return Response.json([]);
+        }),
+        "session",
+        worktree,
+        SESSION_HISTORY_LIMIT + 1,
+        40,
+      ),
+    );
+    expect(deadline).toMatchObject({
+      category: "timeout",
+      retryable: true,
+      attempts: 1,
+      exhaustion: "deadline",
+      timeoutMs: 40,
+    });
+    expect(timeoutCalls).toBe(1);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(SESSION_HISTORY_ATTEMPT_TIMEOUT_MS).toBeLessThan(SESSION_HISTORY_TIMEOUT_MS);
+    expect(SESSION_HISTORY_RETRY_BACKOFF_MS).toHaveLength(SESSION_HISTORY_MAX_ATTEMPTS - 1);
+  });
 });
 
 describe("native alias session protocol", () => {
@@ -183,6 +444,253 @@ describe("native alias session protocol", () => {
         { currentCall: { id: "current", tool: "edit" } },
       ),
     ).not.toThrow();
+  });
+
+  test("accepts delete and move histories for both renderer metadata shapes", () => {
+    const cases: Array<[NativeAliasSurface, LifecycleOperation]> = [
+      ["edit", "delete_file"],
+      ["apply_patch", "delete_file"],
+      ["edit", "move_file"],
+      ["apply_patch", "move_file"],
+    ];
+
+    for (const [tool, operation] of cases) {
+      expect(() =>
+        assertNativeAliasHistory([{ parts: [completedLifecyclePart(tool, operation)] }], identity),
+      ).not.toThrow();
+    }
+  });
+
+  test("rejects lifecycle history with renderer path line breaks", () => {
+    for (const separator of ["\n", "\r"]) {
+      const unsafeRelativePath = `src/unsafe${separator}path.ts`;
+      const unsafeCanonicalPath = resolve(worktree, unsafeRelativePath);
+      const sourceMetadata = buildNativeAliasMetadata({
+        surface: "edit",
+        operation: "delete_file",
+        canonicalPath: unsafeCanonicalPath,
+        relativePath: unsafeRelativePath,
+        unifiedDiff: deleteUnifiedDiff.replaceAll("src/a.ts", unsafeRelativePath),
+        additions: 0,
+        deletions: 1,
+        ...identity,
+      });
+      const destinationMetadata = buildNativeAliasMetadata({
+        surface: "apply_patch",
+        operation: "move_file",
+        canonicalPath,
+        relativePath: "src/a.ts",
+        destinationCanonicalPath: unsafeCanonicalPath,
+        destinationRelativePath: unsafeRelativePath,
+        unifiedDiff: moveUnifiedDiff.replaceAll("src/b.ts", unsafeRelativePath),
+        additions: 0,
+        deletions: 0,
+        ...identity,
+      });
+
+      expect(() =>
+        assertNativeAliasHistory(
+          [{ parts: [completedLifecyclePart("edit", "delete_file", sourceMetadata)] }],
+          identity,
+        ),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+      expect(() =>
+        assertNativeAliasHistory(
+          [{ parts: [completedLifecyclePart("apply_patch", "move_file", destinationMetadata)] }],
+          identity,
+        ),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    }
+  });
+
+  test("accepts a header-only empty-file delete history", () => {
+    const emptyDeleteDiff =
+      "Index: src/a.ts\n===================================================================\n--- src/a.ts\tbefore\n+++ src/a.ts\tafter\n";
+    for (const tool of ["edit", "apply_patch"] as const) {
+      const metadata = buildNativeAliasMetadata({
+        surface: tool,
+        operation: "delete_file",
+        canonicalPath,
+        relativePath: "src/a.ts",
+        unifiedDiff: emptyDeleteDiff,
+        additions: 0,
+        deletions: 0,
+        ...identity,
+      });
+      expect(() =>
+        assertNativeAliasHistory(
+          [{ parts: [completedLifecyclePart(tool, "delete_file", metadata)] }],
+          identity,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  test("rejects malformed lifecycle renderer metadata and marker evidence", () => {
+    const wrongDeleteType = clonedLifecycleMetadata("apply_patch", "delete_file");
+    const wrongDeleteFiles = wrongDeleteType.files;
+    if (!Array.isArray(wrongDeleteFiles) || !wrongDeleteFiles[0]) {
+      throw new Error("Expected delete apply_patch metadata");
+    }
+    (wrongDeleteFiles[0] as Record<string, unknown>).type = "update";
+
+    const sourceOrientedMove = clonedLifecycleMetadata("apply_patch", "move_file");
+    const sourceOrientedFiles = sourceOrientedMove.files;
+    if (!Array.isArray(sourceOrientedFiles) || !sourceOrientedFiles[0]) {
+      throw new Error("Expected move apply_patch metadata");
+    }
+    (sourceOrientedFiles[0] as Record<string, unknown>).relativePath = "src/a.ts";
+
+    const missingMovePath = clonedLifecycleMetadata("apply_patch", "move_file");
+    const missingMoveFiles = missingMovePath.files;
+    if (!Array.isArray(missingMoveFiles) || !missingMoveFiles[0]) {
+      throw new Error("Expected move apply_patch metadata");
+    }
+    delete (missingMoveFiles[0] as Record<string, unknown>).movePath;
+
+    const editDestinationMismatch = buildNativeAliasMetadata({
+      surface: "edit",
+      operation: "move_file",
+      canonicalPath,
+      relativePath: "src/a.ts",
+      destinationCanonicalPath,
+      destinationRelativePath: "src/b.ts",
+      unifiedDiff:
+        "===================================================================\n--- src/a.ts\tbefore\n+++ src/c.ts\tafter\n",
+      additions: 0,
+      deletions: 0,
+      ...identity,
+    });
+
+    const updateShapedDelete = buildNativeAliasMetadata({
+      surface: "edit",
+      operation: "delete_file",
+      canonicalPath,
+      relativePath: "src/a.ts",
+      unifiedDiff,
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+
+    const extraDeleteDigest = clonedLifecycleMetadata("edit", "delete_file");
+    const extraDeleteMarker = extraDeleteDigest.betterHashline as Record<string, unknown>;
+    extraDeleteMarker.destinationPathSha256 = "b".repeat(64);
+
+    const missingMoveDigest = clonedLifecycleMetadata("edit", "move_file");
+    const missingMoveMarker = missingMoveDigest.betterHashline as Record<string, unknown>;
+    delete missingMoveMarker.destinationPathSha256;
+
+    const wrongMoveDigest = clonedLifecycleMetadata("edit", "move_file");
+    const wrongMoveMarker = wrongMoveDigest.betterHashline as Record<string, unknown>;
+    wrongMoveMarker.destinationPathSha256 = "b".repeat(64);
+
+    const invalidOperation = clonedLifecycleMetadata("edit", "delete_file");
+    const invalidOperationMarker = invalidOperation.betterHashline as Record<string, unknown>;
+    invalidOperationMarker.operation = "delete";
+
+    const cases: Array<[NativeAliasSurface, LifecycleOperation, Record<string, unknown>]> = [
+      ["apply_patch", "delete_file", wrongDeleteType],
+      ["apply_patch", "move_file", sourceOrientedMove],
+      ["apply_patch", "move_file", missingMovePath],
+      ["edit", "move_file", editDestinationMismatch],
+      ["edit", "delete_file", updateShapedDelete],
+      ["edit", "delete_file", extraDeleteDigest],
+      ["edit", "move_file", missingMoveDigest],
+      ["edit", "move_file", wrongMoveDigest],
+      ["edit", "delete_file", invalidOperation],
+    ];
+    for (const [tool, operation, metadata] of cases) {
+      expect(() =>
+        assertNativeAliasHistory(
+          [{ parts: [completedLifecyclePart(tool, operation, metadata)] }],
+          identity,
+          { directory: worktree },
+        ),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    }
+  });
+
+  test("rejects malformed lifecycle provider inputs", () => {
+    const cases: Array<[LifecycleOperation, unknown]> = [
+      [
+        "delete_file",
+        { ...lifecycleInput("delete_file"), operations: [{ op: "delete_file", lines: [] }] },
+      ],
+      [
+        "delete_file",
+        {
+          ...lifecycleInput("delete_file"),
+          operations: [{ op: "delete_file" }, { op: "insert", afterLine: 0, lines: ["x"] }],
+        },
+      ],
+      [
+        "delete_file",
+        {
+          ...lifecycleInput("delete_file"),
+          operations: [{ op: "delete_file", destinationPath: "src/b.ts" }],
+        },
+      ],
+      ["move_file", { ...lifecycleInput("move_file"), operations: [{ op: "move_file" }] }],
+      [
+        "move_file",
+        {
+          ...lifecycleInput("move_file"),
+          operations: [{ op: "move_file", destinationPath: "src/b.ts", finalNewline: false }],
+        },
+      ],
+      ["delete_file", { ...lifecycleInput("delete_file"), rebase: "unique" }],
+      ["move_file", { ...lifecycleInput("move_file"), readback: true }],
+      ["delete_file", { ...lifecycleInput("delete_file"), readbackOffset: 1 }],
+      ["move_file", { ...lifecycleInput("move_file"), readback: true, readbackLimit: 1 }],
+      [
+        "move_file",
+        {
+          ...lifecycleInput("move_file"),
+          operations: [{ op: "move_file", destinationPath: "src/c.ts" }],
+        },
+      ],
+    ];
+
+    for (const [operation, input] of cases) {
+      expect(() =>
+        assertNativeAliasHistory(
+          [{ parts: [completedLifecyclePart("edit", operation, undefined, input)] }],
+          identity,
+          { directory: worktree },
+        ),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    }
+
+    expect(() =>
+      assertNativeAliasHistory(
+        [
+          {
+            parts: [
+              completedLifecyclePart("edit", "delete_file", undefined, lifecycleInput("move_file")),
+            ],
+          },
+        ],
+        identity,
+        { directory: worktree },
+      ),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("rejects native-aliases/v1 history markers", () => {
+    const current = validMetadata("edit").betterHashline;
+    const metadata = metadataWithMarker("edit", {
+      protocol: "native-aliases/v1",
+      packageVersion: current.packageVersion,
+      schemaSha256: current.schemaSha256,
+      hostVersion: current.hostVersion,
+      surface: current.surface,
+      canonicalPathSha256: current.canonicalPathSha256,
+    });
+
+    expect(() =>
+      assertNativeAliasHistory([{ parts: [completedPart("edit", metadata)] }], identity),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
   test("rejects historical native write calls", () => {
@@ -562,6 +1070,108 @@ describe("native alias session protocol", () => {
     }
   });
 
+  test("rejects retargeted direct parents for absent lifecycle paths", async () => {
+    for (const [operation, retarget] of [
+      ["delete_file", "source"],
+      ["move_file", "source"],
+      ["move_file", "destination"],
+    ] as const) {
+      const fixture = await mkdtemp(join(tmpdir(), "better-hashline-history-retarget-"));
+      try {
+        const sourceDirectory = join(fixture, "source");
+        const destinationDirectory = join(fixture, "destination");
+        const otherDirectory = join(fixture, "other");
+        await mkdir(sourceDirectory);
+        await mkdir(destinationDirectory);
+        await mkdir(otherDirectory);
+        const sourcePath = join(sourceDirectory, "file.txt");
+        await writeFile(sourcePath, "old\n");
+        const localIdentity = { ...identity, worktree: await realpath(fixture) };
+        const sourceCanonicalPath = await realpath(sourcePath);
+        const destinationCanonicalPath = join(await realpath(destinationDirectory), "moved.txt");
+        const part = filesystemLifecyclePart({
+          operation,
+          protocolIdentity: localIdentity,
+          sourceCanonicalPath,
+          sourceRelativePath: "source/file.txt",
+          destinationCanonicalPath,
+          destinationRelativePath: "destination/moved.txt",
+        });
+        await unlink(sourcePath);
+
+        expect(() =>
+          assertNativeAliasHistory([{ parts: [part] }], localIdentity, { directory: fixture }),
+        ).not.toThrow();
+
+        const retargetedDirectory = retarget === "source" ? sourceDirectory : destinationDirectory;
+        await rm(retargetedDirectory, { recursive: true, force: true });
+        await symlink(
+          otherDirectory,
+          retargetedDirectory,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+
+        expect(() =>
+          assertNativeAliasHistory([{ parts: [part] }], localIdentity, { directory: fixture }),
+        ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+      } finally {
+        await rm(fixture, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("uses filesystem case rules for absent lifecycle path names", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "better-hashline-history-case-"));
+    try {
+      const sourceDirectory = join(fixture, "source");
+      const destinationDirectory = join(fixture, "destination");
+      await mkdir(sourceDirectory);
+      await mkdir(destinationDirectory);
+      const sourcePath = join(sourceDirectory, "SourceFile.txt");
+      await writeFile(sourcePath, "old\n");
+      const localIdentity = { ...identity, worktree: await realpath(fixture) };
+      const sourceCanonicalPath = await realpath(sourcePath);
+      const destinationCanonicalPath = join(await realpath(destinationDirectory), "MovedFile.txt");
+      await unlink(sourcePath);
+      const common = {
+        protocolIdentity: localIdentity,
+        sourceCanonicalPath,
+        sourceRelativePath: "source/SourceFile.txt",
+        destinationCanonicalPath,
+        destinationRelativePath: "destination/MovedFile.txt",
+      };
+      const parts = [
+        filesystemLifecyclePart({
+          ...common,
+          operation: "delete_file",
+          inputSourcePath: "source/sourcefile.TXT",
+        }),
+        filesystemLifecyclePart({
+          ...common,
+          operation: "move_file",
+          inputSourcePath: "source/sourcefile.TXT",
+        }),
+        filesystemLifecyclePart({
+          ...common,
+          operation: "move_file",
+          inputDestinationPath: "destination/movedfile.TXT",
+        }),
+      ];
+
+      for (const part of parts) {
+        const assertion = () =>
+          assertNativeAliasHistory([{ parts: [part] }], localIdentity, { directory: fixture });
+        if (process.platform === "win32") {
+          expect(assertion).not.toThrow();
+        } else {
+          expect(assertion).toThrow("SESSION_PROTOCOL_MISMATCH:");
+        }
+      }
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
   test("rejects sanitized, malformed, conflicting, ambiguous, and unbounded history", () => {
     const marker = validMetadata("edit").betterHashline;
     const badCounts = validMetadata("edit");
@@ -675,6 +1285,12 @@ describe("native alias session protocol", () => {
         "SESSION_PROTOCOL_MISMATCH:",
       );
     }
+    expect(() =>
+      assertNativeAliasHistory(
+        Array.from({ length: SESSION_HISTORY_LIMIT + 1 }, () => ({ parts: [] })),
+        identity,
+      ),
+    ).toThrow("Start a genuinely new session; do not resume the same task ID.");
     expect(() =>
       assertNativeAliasHistory(
         Array.from({ length: SESSION_HISTORY_LIMIT }, () => ({ parts: [] })),

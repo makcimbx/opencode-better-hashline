@@ -102,7 +102,7 @@ Column-zero positive decimal annotations such as `17|`, `17!|`, `@hashline`, `@m
 
 Batch every known change to one file in the same call. Every successful edit keeps the first line `Applied N operations.` and follows it with `@hashline-edit previous=consumed successor=<state>`. `successor=none` or `unavailable` includes `next=hashline_read`; `successor=attached` is immediately followed by the new snapshot page.
 
-Set `readback: true` for structural verification or a dependent follow-up edit. A successful result then includes a new attested snapshot with unified-diff context near the first changed hunk, avoiding a separate read round trip. If OpenCode truncates or changes that continuation, the edit remains applied, the lifecycle receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
+Set `readback: true` for structural verification or a dependent follow-up edit. A successful result includes one contiguous successor page, starting at the first post-edit hunk and showing at most 1,000 lines by default. Text edits may set `readbackOffset` to a one-based post-edit start and `readbackLimit` to `1..1000`; both fields require `readback:true`. Only an attached page attested as delivered by the after-hook issues refs. There is no ID-only successor: if OpenCode truncates or changes the continuation, the edit remains applied, the receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
 
 Retained source ranges can also be transferred without echoing their contents:
 
@@ -115,11 +115,22 @@ Retained source ranges can also be transferred without echoing their contents:
 }
 ```
 
-All coordinates describe the original snapshot, never an intermediate edit. Copy always reads pre-edit source and uses destination-local delimiters like `insert`, so its source may overlap another operation's write. Move preserves the positional EOL layout and requires the complete source-to-destination corridor to have been issued. If empty texts and adjacent CR/LF bytes cannot be serialized without changing that logical layout, the move fails closed instead of normalizing delimiters. Destructive write spans may be adjacent but not overlap; insertion-like destinations may touch their endpoints but may not lie strictly inside them or share one boundary.
+All coordinates describe the original snapshot, never an intermediate edit. Copy always reads pre-edit source and uses destination-local delimiters like `insert`, so its source may overlap another operation's write. Move preserves the positional EOL layout and requires the complete source-to-destination corridor to have been issued. One `move_range` may compose with pairwise-disjoint `replace` operations wholly inside its intervening corridor and outside its source; the replacement payloads are applied to immutable pre-batch corridor content before the move permutation. If empty texts and adjacent CR/LF bytes cannot be serialized without changing that logical layout, the move fails closed instead of normalizing delimiters. Every other destructive conflict stays conservative. Insertion-like destinations may touch destructive endpoints but may not lie strictly inside them or share one boundary.
+
+Whole-file deletion and rename/move use the same issued snapshot without echoing file contents:
+
+```json
+{ "operations": [{ "op": "delete_file" }] }
+{ "operations": [{ "op": "move_file", "destinationPath": "src/renamed.ts" }] }
+```
+
+A lifecycle operation must be the sole operation, uses `rebase: "none"`, requires complete BOF-to-EOF issued coverage, and rejects `readback: true`. The source must be a direct regular single-link file. `move_file` requires an absent destination under an existing stable parent on the same filesystem; it never overwrites or creates directories. After a move, read the destination before editing it. Move publication uses an exclusive hard link followed by source unlink, so an unlink failure can leave both exact names and returns `PARTIAL_PUBLICATION` instead of risking an automatic rollback.
+
+`hashline_write` remains create-only. Omitted or false `createParents` keeps the strict existing-parent behavior. Explicit `createParents:true` freezes at most 64 missing directories from the deepest existing ancestor, authorizes and locks every directory plus the target, creates each directory exclusively from root to leaf, and then uses the existing staged no-clobber file publication. Once a directory exists, or a failed `mkdir` leaves its outcome ambiguous, any later failure returns `PARTIAL_PUBLICATION`, retains created state, and performs no rollback; inspect the tree before retrying. This option does not apply to `move_file`.
 
 ### 3. Validate and publish
 
-The plugin resolves the canonical path, checks snapshot scope and issued ranges, rereads the file, plans every operation in memory, rejects overlap, asks OpenCode to approve the exact unified diff, rereads again, stages a same-directory temporary file, consumes the snapshot, and attempts one rename.
+The plugin resolves and authorizes every canonical source and destination path, checks snapshot scope and issued provenance, acquires deterministic path locks, rereads the file, and plans the exact mutation before approval. Text edits stage a same-directory temporary file and attempt one rename. Lifecycle deletion unlinks only after a final direct-entry check; move publishes without overwrite and verifies the exact destination before unlinking the source. No operation is replanned after approval.
 
 <p align="center">
   <img src="docs/assets/protocol.svg" alt="Better Hashline protocol lifecycle" width="100%" />
@@ -130,6 +141,8 @@ The plugin resolves the canonical path, checks snapshot scope and issued ranges,
 `rebase: "none"` is the default. Any byte change since `hashline_read` returns `TARGET_CHANGED` and requires a reread.
 
 `rebase: "unique"` is explicit recovery for cooperative concurrent changes. It relocates only when exact non-normalized evidence identifies the selected base occurrence and every successful bounded context agrees. Insertion requires the original adjacent boundary to remain intact; copied BOF/EOF evidence is ambiguous. Transfer sources and destinations relocate independently through one bounded mapper, then must retain their complete original topology. It never chooses a nearest match, strips prefixes, repairs indentation, or inserts conflict markers.
+
+When exact unique range relocation fails and the selected coordinates still contain the same line texts with changed LF, CRLF, lone-CR, or final-delimiter bytes, the existing `TARGET_CHANGED` error adds a delimiter-specific reread explanation. This is diagnostic only: delimiters are not normalized, the range is not accepted, and no fuzzy fallback is attempted.
 
 Unique rebase proves textual relocation only. It does not prove semantic independence or edit-history causality.
 
@@ -201,8 +214,16 @@ session:
 The mode still exposes unique `hashline_read` and create-only `hashline_write`; it never aliases
 native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Transport, schema, or
 session incompatibility fails closed without falling back to a builtin or to `hashline_edit`.
+The protocol marker name remains `native-aliases/v2`, but the expanded schemas change the canonical
+schema SHA-256 and protocol fingerprint. Existing sessions with the previous v2 fingerprint fail
+closed; restart the plugin and begin a new session rather than attempting continuation.
+Session-history fetches retry only bounded transient timeout, network, and selected HTTP failures,
+with at most four attempts under one 2-second total deadline. Exhaustion reports a safe category and
+can be retried in the same session after restoring the host; diagnostics never include request or
+response secrets. Oversized persisted history cannot be repaired by restarting or resuming the same
+task ID and requires a genuinely new session.
 
-Before exact process-local session binding, native-alias edits must be serialized because the preview cannot safely attest multiple unfinished native-looking calls. After system guidance explicitly reports `native-alias-session=bound`, independent single-file calls for different paths may run concurrently; calls for the same path remain serialized and every file has an independent approval/publication outcome. A restart or protocol mismatch removes that permission. This restriction is specific to the experimental alias surface; the default `hashline` surface does not need native session attestation.
+Before exact process-local session binding, native-alias edits must be serialized because the preview cannot safely attest multiple unfinished native-looking calls. After system guidance explicitly reports `native-alias-session=bound`, calls whose source and destination path sets are disjoint may run concurrently; overlapping paths remain serialized and every call has an independent approval/publication outcome. A restart, protocol mismatch, or partial move publication removes that permission. This restriction is specific to the experimental alias surface; the default `hashline` surface does not need native session attestation.
 
 Run the credential-free clean-room verifier after installation and after every plugin-order or
 configuration change:
@@ -211,10 +232,10 @@ configuration change:
 bunx opencode-better-hashline verify --surface all
 ```
 
-The verifier checks both model routes, schemas, malformed-call confinement, hooks, exact bytes,
-resumed, forked, and imported edits, sanitized export behavior, stock terminal rendering, pinned
-GPT-4/GPT-OSS/GPT-5 routing, wildcard/path edit permissions, protocol fingerprints, and rollback to
-unique IDs in an isolated configuration. It is a package self-test, not
+The verifier checks both model routes, schemas, malformed-call confinement, hooks, exact text edits,
+strict file deletion and no-overwrite moves, resumed, forked, and imported edits, sanitized export
+behavior, stock terminal rendering, pinned GPT-4/GPT-OSS/GPT-5 routing, wildcard/path edit permissions,
+protocol fingerprints, and rollback to unique IDs in an isolated configuration. It is a package self-test, not
 an audit of your merged
 OpenCode configuration. It cannot prove continuous executor ownership: a later plugin or MCP tool can
 replace an alias, and a later after-hook can mutate persisted output. Keep Better Hashline last among
@@ -227,14 +248,14 @@ and shares contain paths and diffs. Sanitized exports remove tool paths, diffs, 
 OpenCode 1.18.3 retains a safe root-relative session locator; review it before disclosure. The removed
 marker makes alias continuation fail closed. ACP can classify the alias as an edit but cannot reconstruct the
 native structured diff from Better Hashline metadata. The unique `hashline` surface remains the
-production default and recommendation; the completed paid pilot supports only an opt-in experimental
-native-alias release under the [preview plan](docs/native-alias-preview-plan.md).
+production default and recommendation.
 
-Native-alias pilots v1, v3, v4, v5, and v6 stopped fail-closed on terminal benchmark incidents and cannot
-resume or retry. Their privacy-safe incident records are tracked under `benchmarks/results/`. Pilot v7
-completed all 48 Luna/Sol sessions across the unique and native-alias surfaces with complete accounting,
-zero retries/failures/timeouts, and USD 0 reported cost. The privacy-safe summary is tracked under
-`benchmarks/results/`; the maintainer approved native aliases for an opt-in experimental release.
+The retained [privacy-safe pilot v7 summary](benchmarks/results/2026-07-21-native-alias-pilot-v7.json)
+records 48/48 passing Luna/Sol sessions across the unique and native-alias surfaces, complete
+accounting, zero retries/failures/timeouts, and USD 0 reported cost. It is technical transport
+evidence for the earlier text-operation surface, not lifecycle-operation evidence or a
+model-superiority claim. The maintainer approved only an opt-in experimental release; all pilot IDs
+through v7 are closed and may not be resumed or retried.
 
 ## Why No Per-Line Hash?
 
@@ -249,10 +270,12 @@ Better Hashline therefore separates model-facing addressing from server-side aut
 
 ## Evidence
 
-The latest checked-in transfer corpus has 28 exact, stale, collision, ambiguity, boundary,
-overlap, encoding, and transfer scenarios. The earlier 15-case and 21-case results remain immutable
-historical evidence. Comparison arms are deliberately small protocol simulations, not complete
-implementations of third-party tools. On the latest recorded Windows x64 run:
+The latest retained model-free JSON is the immutable
+[schema-v7 edit-protocol UX record](benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json).
+Its 29-case corpus covers exact, stale, collision, ambiguity, boundary, overlap, encoding, transfer,
+and composed-move behavior. The schema-v6 lifecycle, schema-v5, 15-case, and 21-case records remain
+immutable historical evidence. Comparison arms are deliberately small protocol simulations, not
+complete implementations of third-party tools. The retained schema-v7 output is:
 
 | Adapter | Unsafe accepts | False rejects |
 | --- | ---: | ---: |
@@ -263,7 +286,7 @@ implementations of third-party tools. On the latest recorded Windows x64 run:
 | 8-bit endpoint hashes | 6 | 4 |
 | 16-bit endpoint hashes | 5 | 4 |
 
-This corpus tests in-memory protocol mechanics only; it does not exercise OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; no model-comparison result is claimed yet. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
+The full four-outcome counts are strict `6/18/5/0`, unique `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, 8-bit endpoints `7/12/4/6`, and 16-bit endpoints `7/13/4/5` (`exact_apply/safe_reject/false_reject/unsafe_accept`). This corpus tests in-memory protocol mechanics only; it does not exercise OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; the retained schema-v7 record is not a paid/model-quality claim. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
 
 ```sh
 bun run bench
@@ -292,7 +315,7 @@ The custom read tool intentionally does not imitate OpenCode's native media atta
 - There is an unavoidable check-to-rename window against hostile external writers; this is not kernel CAS.
 - A one-file batch is validation-atomic, but there is no multi-file transaction.
 - Rename atomicity, directory durability, ACLs, xattrs, hardlinks, network filesystems, and Windows open-handle behavior vary by platform.
-- Create-only `hashline_write` requires same-directory hard-link support for no-replace publication. A detected race after the link can leave the new file committed, but returns failure and never deletes a possibly newer writer's path.
+- Create-only `hashline_write` requires same-directory hard-link support for no-replace publication. With `createParents:true`, created directories or even the final file may remain after `PARTIAL_PUBLICATION`; no rollback is attempted. A detected race after the file link can leave the new file committed, but returns failure and never deletes a possibly newer writer's path.
 - Executable mode and ownership are preserved where supported; all metadata preservation is not promised.
 - `enforce` blocks OpenCode's native mutator tool IDs, but it does not sandbox shell commands or other plugins.
 - Native aliases cannot attest final registry ownership or prevent later hooks from mutating renderer metadata.
@@ -307,7 +330,6 @@ Full boundaries and trust assumptions are in [docs/threat-model.md](docs/threat-
 - [Threat model](docs/threat-model.md)
 - [Research and prior art](docs/research.md)
 - [Benchmarks](docs/benchmarks.md)
-- [Experimental native-alias preview plan](docs/native-alias-preview-plan.md)
 - [Release process](docs/releasing.md)
 - [Contributing](CONTRIBUTING.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)

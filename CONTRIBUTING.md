@@ -21,22 +21,50 @@ provider credentials. Live-model benchmarks are opt-in and never gate a pull req
 
 ## Protocol Changes
 
-Tool names, schemas, line rendering, hash inputs, normalization, validation, and mismatch behavior
-are public protocol surface. A pull request changing any of them must include:
+Tool names, flat schemas, operation-specific field combinations, line rendering, hash inputs,
+normalization, validation, mismatch behavior, permission metadata, and publication results are
+public protocol surface. File lifecycle changes also include direct path identity, complete issued
+coverage, source/destination authorization, lock sets, native renderer metadata, and partial-state
+semantics. Readback windows, operation-pair conflict diagnostics, and parent-chain creation plans are
+also public protocol surface. A pull request changing any of them must include:
 
 - a concrete failure or measured opportunity;
 - deterministic safety and compatibility tests;
-- an updated protocol specification and documentation;
-- before/after wire-size measurements;
-- migration notes when existing transcripts or configuration are affected.
+- an updated protocol specification, architecture/threat-model notes, and changelog entry;
+- before/after wire-size measurements for schema or model-visible output changes;
+- migration notes when existing transcripts, native-alias fingerprints, generated clients, or configuration are affected.
 
-Do not replace fail-closed behavior with fuzzy matching merely to improve a success-rate benchmark.
+Lifecycle tests must cover exact strict bytes, complete BOF-to-EOF source issuance, direct regular
+single-link sources, occupied destinations including symlinks, stable existing parents,
+same-filesystem moves, dual-path permissions, deterministic overlapping locks, post-approval races
+without replanning, and `PARTIAL_PUBLICATION` without unsafe rollback. Native-alias tests must also
+cover operation/source/destination metadata correlation, old-version history rejection, affected
+snapshot invalidation, and poisoned-session recovery.
+
+Parent-creating write tests must additionally cover the 64-directory bound, a fixed deepest-ancestor
+plan, authorization and deterministic locks for every directory plus the target, exclusive
+non-recursive root-to-leaf `mkdir`, the existing staged no-clobber file publication, no state before
+the first directory exists or creation becomes ambiguous, retained state and `PARTIAL_PUBLICATION`
+afterward, and no rollback.
+Omitted or false `createParents` must remain strict, and `move_file` must never create parents.
+Readback tests must cover one-based post-edit offsets, the 1..1000 limit, defaults, text-only
+validation, one contiguous delivered page, and rejection of undelivered or ID-only successor
+authority. Conflict tests must preserve stable codes and deterministic zero-based operation-pair
+suffixes.
+
+Do not replace fail-closed behavior with fuzzy matching, silent fallback, overwrite, unplanned or
+recursive parent creation, or destructive rollback merely to improve a success-rate benchmark.
 
 ## Benchmarks
 
-Benchmark pull requests must pin fixtures, seeds, OpenCode and plugin revisions, runtime versions,
-and model snapshots where applicable. Preserve raw results and report failures, retries, and
-unintended changes rather than success-conditioned averages.
+Benchmark pull requests must pin fixtures, task and adapter identities, seeds, OpenCode and plugin
+revisions, runtime versions, and model snapshots where applicable. Preserve raw results and report
+failures, retries, partial publications, and unintended changes rather than success-conditioned
+averages. Never rewrite retained evidence to cover a new schema, operation, task set, or adapter; add
+a new identity and result. Dry runs and model-free verifier evidence are not paid model evidence.
+Development runner output is not retained evidence until it is written once at a new final result
+path. Preserve the schema-v6 and schema-v7 results plus pilot-v7 scope unchanged; future runner or
+protocol revisions require a new result identity.
 
 ## Commits
 

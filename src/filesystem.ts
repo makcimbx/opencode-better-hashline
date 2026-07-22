@@ -2,10 +2,21 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { constants } from "node:fs";
-import { access, link, lstat, open, realpath, rename, rm, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  access,
+  link,
+  lstat,
+  mkdir,
+  open,
+  realpath,
+  rename,
+  rm,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { fail } from "./errors.js";
+import { fail, HashlineError } from "./errors.js";
 import { exactRelativePath, isInsideCanonicalPath } from "./path-identity.js";
 import { bytesEqual } from "./text.js";
 
@@ -20,6 +31,42 @@ export type ResolvedNewFile = ResolvedFile & {
   canonicalParent: string;
   parentStats: Stats;
 };
+
+export type ResolvedMutableFile = ResolvedNewFile;
+
+export const MAX_NEW_FILE_MISSING_DIRECTORIES = 64;
+
+export type PinnedPathIdentity = Readonly<{
+  dev: number;
+  ino: number;
+}>;
+
+export type NewFileDirectoryAnchor = Readonly<{
+  requestedPath: string;
+  canonicalPath: string;
+  requestedType: "directory" | "symbolic-link";
+  requestedIdentity: PinnedPathIdentity;
+  canonicalIdentity: PinnedPathIdentity;
+}>;
+
+export type PlannedNewFileDirectory = Readonly<{
+  requestedPath: string;
+  canonicalPath: string;
+  requestedParent: string;
+  canonicalParent: string;
+}>;
+
+export type NewFileParentPlan = Readonly<{
+  requestedPath: string;
+  requestedAbsolute: string;
+  requestedParent: string;
+  canonicalParent: string;
+  canonicalPath: string;
+  anchor: NewFileDirectoryAnchor;
+  missingDirectories: readonly PlannedNewFileDirectory[];
+  mutationPaths: readonly string[];
+  lockPaths: readonly string[];
+}>;
 
 export type StableFile = {
   bytes: Uint8Array;
@@ -38,7 +85,25 @@ function assertSafePath(path: string, source: "requested" | "canonical"): void {
   const hasControl = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(path);
   const hasPosixBackslash = process.platform !== "win32" && path.includes("\\");
   const hasWindowsWildcard = process.platform === "win32" && /[*?]/u.test(path);
-  if (path.length === 0 || hasControl || hasPosixBackslash || hasWindowsWildcard) {
+  let windowsRemainder = path;
+  if (process.platform === "win32") {
+    if (/^[A-Za-z]:[\\/]/u.test(windowsRemainder)) {
+      windowsRemainder = windowsRemainder.slice(2);
+    } else if (
+      windowsRemainder.startsWith("\\\\?\\") &&
+      /^[A-Za-z]:[\\/]/u.test(windowsRemainder.slice(4))
+    ) {
+      windowsRemainder = windowsRemainder.slice(6);
+    }
+  }
+  const hasWindowsStreamSeparator = process.platform === "win32" && windowsRemainder.includes(":");
+  if (
+    path.length === 0 ||
+    hasControl ||
+    hasPosixBackslash ||
+    hasWindowsWildcard ||
+    hasWindowsStreamSeparator
+  ) {
     fail(
       source === "requested" ? "INVALID_ARGUMENT" : "UNSUPPORTED_FILE",
       `${source === "requested" ? "filePath" : "The canonical path"} contains characters that cannot be represented safely in permission patterns.`,
@@ -56,10 +121,12 @@ function samePath(left: string, right: string): boolean {
 }
 
 async function canonicalRoot(root: string): Promise<string> {
+  const resolved = resolve(root);
+  if (resolved === parse(resolved).root) return resolved;
   try {
-    return await realpath(root);
+    return await realpath(resolved);
   } catch {
-    return resolve(root);
+    return resolved;
   }
 }
 
@@ -71,9 +138,17 @@ async function isExternal(context: ToolContext, canonicalPath: string): Promise<
   return !isInsideCanonicalPath(worktree, canonicalPath);
 }
 
-function permissionPath(context: ToolContext, canonicalPath: string): string {
-  const value = exactRelativePath(context.worktree, canonicalPath);
-  return value === "" ? basename(canonicalPath) : (value ?? canonicalPath);
+async function permissionPaths(
+  context: ToolContext,
+  canonicalPaths: readonly string[],
+): Promise<string[]> {
+  const requestedRoot =
+    context.worktree === "/" ? parse(resolve(context.directory)).root : context.worktree;
+  const worktree = await canonicalRoot(requestedRoot);
+  return canonicalPaths.map((canonicalPath) => {
+    const value = exactRelativePath(worktree, canonicalPath);
+    return value === "" ? basename(canonicalPath) : (value ?? canonicalPath);
+  });
 }
 
 function assertRegular(stats: Stats): void {
@@ -82,6 +157,14 @@ function assertRegular(stats: Stats): void {
 
 function sameIdentity(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function pinIdentity(stats: Stats): PinnedPathIdentity {
+  return Object.freeze({ dev: stats.dev, ino: stats.ino });
+}
+
+function matchesPinnedIdentity(stats: Stats, identity: PinnedPathIdentity): boolean {
+  return stats.dev === identity.dev && stats.ino === identity.ino;
 }
 
 function sameMetadata(left: Stats, right: Stats): boolean {
@@ -98,7 +181,11 @@ function sameMetadata(left: Stats, right: Stats): boolean {
 }
 
 function lockKey(canonicalPath: string): string {
-  return canonicalPath;
+  return process.platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath;
+}
+
+export function pathsAlias(left: string, right: string): boolean {
+  return lockKey(left) === lockKey(right);
 }
 
 async function syncDirectory(directory: string): Promise<void> {
@@ -166,6 +253,293 @@ export async function resolveNewFile(
   };
 }
 
+type LocatedNewFileAnchor = {
+  requestedPath: string;
+  canonicalPath: string;
+  requestedType: "directory" | "symbolic-link";
+  requestedStats: Stats;
+  canonicalStats: Stats;
+  missingNames: string[];
+};
+
+async function locateNewFileAnchor(requestedParent: string): Promise<LocatedNewFileAnchor> {
+  const missingNames: string[] = [];
+  let current = requestedParent;
+
+  while (true) {
+    let requestedStats: Stats;
+    try {
+      requestedStats = await lstat(current);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "ENOENT") {
+        if (missingNames.length === MAX_NEW_FILE_MISSING_DIRECTORIES) {
+          fail(
+            "INVALID_ARGUMENT",
+            `Creating more than ${MAX_NEW_FILE_MISSING_DIRECTORIES} parent directories is not supported.`,
+          );
+        }
+        const parent = dirname(current);
+        if (parent === current) {
+          fail("PATH_NOT_FOUND", "No existing parent directory could be resolved.");
+        }
+        missingNames.unshift(basename(current));
+        current = parent;
+        continue;
+      }
+      if (code === "ENOTDIR" || code === "ELOOP") {
+        fail("UNSUPPORTED_FILE", "A path in the target parent chain is not a directory.");
+      }
+      fail("UNSUPPORTED_FILE", "The target parent chain could not be inspected safely.");
+    }
+
+    const requestedType = requestedStats.isSymbolicLink()
+      ? "symbolic-link"
+      : requestedStats.isDirectory()
+        ? "directory"
+        : undefined;
+    if (!requestedType) {
+      fail("UNSUPPORTED_FILE", "A path in the target parent chain is not a directory.");
+    }
+
+    let canonicalPath: string;
+    try {
+      canonicalPath = await realpath(current);
+    } catch (error) {
+      if (
+        requestedType === "symbolic-link" &&
+        ["ENOENT", "ELOOP"].includes(errorCode(error) ?? "")
+      ) {
+        fail("UNSUPPORTED_FILE", "A path in the target parent chain is a dangling symbolic link.");
+      }
+      fail("UNSUPPORTED_FILE", "The existing target ancestor could not be resolved safely.");
+    }
+    assertSafePath(canonicalPath, "canonical");
+
+    let requestedAfter: Stats;
+    let requestedCanonical: string;
+    let canonicalDirect: Stats;
+    let canonicalAfter: Stats;
+    let canonicalSelf: string;
+    try {
+      [requestedAfter, requestedCanonical, canonicalDirect, canonicalAfter, canonicalSelf] =
+        await Promise.all([
+          lstat(current),
+          realpath(current),
+          lstat(canonicalPath),
+          stat(canonicalPath),
+          realpath(canonicalPath),
+        ]);
+    } catch {
+      fail("PATH_MISMATCH", "The existing target ancestor changed while it was being resolved.");
+    }
+
+    const requestedTypeAfter = requestedAfter.isSymbolicLink()
+      ? "symbolic-link"
+      : requestedAfter.isDirectory()
+        ? "directory"
+        : undefined;
+    if (!canonicalDirect.isDirectory() || !canonicalAfter.isDirectory()) {
+      fail("UNSUPPORTED_FILE", "The deepest existing target ancestor is not a directory.");
+    }
+    if (
+      requestedTypeAfter !== requestedType ||
+      !sameIdentity(requestedStats, requestedAfter) ||
+      !samePath(requestedCanonical, canonicalPath) ||
+      !samePath(canonicalSelf, canonicalPath) ||
+      !sameIdentity(canonicalDirect, canonicalAfter) ||
+      (requestedType === "directory" && !sameIdentity(requestedAfter, canonicalAfter))
+    ) {
+      fail("PATH_MISMATCH", "The existing target ancestor changed while it was being resolved.");
+    }
+
+    return {
+      requestedPath: current,
+      canonicalPath,
+      requestedType,
+      requestedStats: requestedAfter,
+      canonicalStats: canonicalAfter,
+      missingNames,
+    };
+  }
+}
+
+async function verifyNewFilePlanAnchor(plan: NewFileParentPlan): Promise<Stats> {
+  let requestedStats: Stats;
+  let requestedCanonical: string;
+  let canonicalDirect: Stats;
+  let canonicalStats: Stats;
+  let canonicalSelf: string;
+  try {
+    [requestedStats, requestedCanonical, canonicalDirect, canonicalStats, canonicalSelf] =
+      await Promise.all([
+        lstat(plan.anchor.requestedPath),
+        realpath(plan.anchor.requestedPath),
+        lstat(plan.anchor.canonicalPath),
+        stat(plan.anchor.canonicalPath),
+        realpath(plan.anchor.canonicalPath),
+      ]);
+  } catch {
+    fail("PATH_MISMATCH", "The existing target ancestor could not be revalidated.");
+  }
+
+  const requestedType = requestedStats.isSymbolicLink()
+    ? "symbolic-link"
+    : requestedStats.isDirectory()
+      ? "directory"
+      : undefined;
+  if (
+    requestedType !== plan.anchor.requestedType ||
+    !matchesPinnedIdentity(requestedStats, plan.anchor.requestedIdentity) ||
+    !samePath(requestedCanonical, plan.anchor.canonicalPath) ||
+    !canonicalDirect.isDirectory() ||
+    !canonicalStats.isDirectory() ||
+    !samePath(canonicalSelf, plan.anchor.canonicalPath) ||
+    !sameIdentity(canonicalDirect, canonicalStats) ||
+    !matchesPinnedIdentity(canonicalStats, plan.anchor.canonicalIdentity) ||
+    (requestedType === "directory" && !sameIdentity(requestedStats, canonicalStats))
+  ) {
+    fail("PATH_MISMATCH", "The existing target ancestor was retargeted or replaced.");
+  }
+  return canonicalStats;
+}
+
+async function assertPlannedPathsAbsent(paths: readonly string[], target: boolean): Promise<void> {
+  for (const path of new Set(paths)) {
+    try {
+      await lstat(path);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") continue;
+      if (errorCode(error) === "ENOTDIR") {
+        fail("RACE_BEFORE_WRITE", "The planned parent chain is no longer absent.");
+      }
+      fail("UNSUPPORTED_FILE", "A planned path absence could not be verified safely.");
+    }
+    if (target) fail("TARGET_EXISTS", "The target already exists.");
+    fail("RACE_BEFORE_WRITE", "A planned parent directory path already exists.");
+  }
+}
+
+async function revalidateNewFileParentPlanInternal(plan: NewFileParentPlan): Promise<Stats> {
+  await verifyNewFilePlanAnchor(plan);
+  for (const directory of plan.missingDirectories) {
+    await assertPlannedPathsAbsent([directory.requestedPath, directory.canonicalPath], false);
+  }
+  await assertPlannedPathsAbsent([plan.requestedAbsolute, plan.canonicalPath], true);
+  return verifyNewFilePlanAnchor(plan);
+}
+
+export async function resolveNewFileParentPlan(
+  filePath: string,
+  directory: string,
+): Promise<NewFileParentPlan> {
+  const requestedAbsolute = absoluteFrom(filePath, directory);
+  assertSafePath(requestedAbsolute, "requested");
+  const requestedParent = dirname(requestedAbsolute);
+  const located = await locateNewFileAnchor(requestedParent);
+  const anchor: NewFileDirectoryAnchor = Object.freeze({
+    requestedPath: located.requestedPath,
+    canonicalPath: located.canonicalPath,
+    requestedType: located.requestedType,
+    requestedIdentity: pinIdentity(located.requestedStats),
+    canonicalIdentity: pinIdentity(located.canonicalStats),
+  });
+
+  let plannedRequestedParent = anchor.requestedPath;
+  let plannedCanonicalParent = anchor.canonicalPath;
+  const missingDirectories = Object.freeze(
+    located.missingNames.map((name): PlannedNewFileDirectory => {
+      const requestedPath = join(plannedRequestedParent, name);
+      const canonicalPath = join(plannedCanonicalParent, name);
+      assertSafePath(requestedPath, "requested");
+      assertSafePath(canonicalPath, "canonical");
+      const planned = Object.freeze({
+        requestedPath,
+        canonicalPath,
+        requestedParent: plannedRequestedParent,
+        canonicalParent: plannedCanonicalParent,
+      });
+      plannedRequestedParent = requestedPath;
+      plannedCanonicalParent = canonicalPath;
+      return planned;
+    }),
+  );
+  const canonicalPath = join(plannedCanonicalParent, basename(requestedAbsolute));
+  assertSafePath(canonicalPath, "canonical");
+  const mutationPaths = Object.freeze([
+    ...missingDirectories.map((entry) => entry.canonicalPath),
+    canonicalPath,
+  ]);
+  const plan: NewFileParentPlan = Object.freeze({
+    requestedPath: filePath,
+    requestedAbsolute,
+    requestedParent,
+    canonicalParent: plannedCanonicalParent,
+    canonicalPath,
+    anchor,
+    missingDirectories,
+    mutationPaths,
+    lockPaths: mutationPaths,
+  });
+  await revalidateNewFileParentPlanInternal(plan);
+  return plan;
+}
+
+export async function revalidateNewFileParentPlan(plan: NewFileParentPlan): Promise<void> {
+  await revalidateNewFileParentPlanInternal(plan);
+}
+
+export async function resolveMutableFile(
+  filePath: string,
+  directory: string,
+): Promise<ResolvedMutableFile> {
+  const requestedAbsolute = absoluteFrom(filePath, directory);
+  let terminalStats: Stats;
+  try {
+    terminalStats = await lstat(requestedAbsolute);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") fail("PATH_NOT_FOUND", `File not found: ${filePath}`);
+    throw error;
+  }
+  if (terminalStats.isSymbolicLink()) {
+    fail("UNSUPPORTED_FILE", "Deleting or moving terminal symbolic links is not supported.");
+  }
+  assertRegular(terminalStats);
+
+  const requestedParent = dirname(requestedAbsolute);
+  const [canonicalPath, canonicalParent] = await Promise.all([
+    realpath(requestedAbsolute),
+    realpath(requestedParent),
+  ]);
+  assertSafePath(canonicalPath, "canonical");
+  assertSafePath(canonicalParent, "canonical");
+  if (!pathsAlias(dirname(canonicalPath), canonicalParent)) {
+    fail("PATH_MISMATCH", "The source parent does not resolve to the file parent.");
+  }
+  const [parentStats, terminalAfter, canonicalStats] = await Promise.all([
+    stat(canonicalParent),
+    lstat(requestedAbsolute),
+    stat(canonicalPath),
+  ]);
+  if (!parentStats.isDirectory()) fail("UNSUPPORTED_FILE", "The source parent is not a directory.");
+  if (
+    terminalAfter.isSymbolicLink() ||
+    !terminalAfter.isFile() ||
+    !sameIdentity(terminalStats, terminalAfter) ||
+    !sameIdentity(terminalAfter, canonicalStats)
+  ) {
+    fail("PATH_MISMATCH", "The source path changed while it was being resolved.");
+  }
+  return {
+    requestedPath: filePath,
+    requestedAbsolute,
+    requestedParent,
+    canonicalParent,
+    parentStats,
+    canonicalPath,
+  };
+}
+
 export async function authorizeExternal(
   context: ToolContext,
   resolved: ResolvedFile,
@@ -208,9 +582,11 @@ async function assertNewParentStable(
 }
 
 export async function authorizeRead(context: ToolContext, resolved: ResolvedFile): Promise<void> {
+  const pattern =
+    (await permissionPaths(context, [resolved.canonicalPath]))[0] ?? resolved.canonicalPath;
   await ask(context, {
     permission: "read",
-    patterns: [permissionPath(context, resolved.canonicalPath)],
+    patterns: [pattern],
     always: ["*"],
     metadata: {},
   });
@@ -221,11 +597,33 @@ export async function authorizeEdit(
   resolved: ResolvedFile,
   diff: string,
 ): Promise<void> {
+  await authorizeEdits(context, [resolved], diff);
+}
+
+export async function authorizeEdits(
+  context: ToolContext,
+  resolved: readonly ResolvedFile[],
+  diff: string,
+  createdDirectories?: readonly string[],
+): Promise<void> {
+  const patterns = [
+    ...new Set(
+      await permissionPaths(
+        context,
+        resolved.map((entry) => entry.canonicalPath),
+      ),
+    ),
+  ];
   await ask(context, {
     permission: "edit",
-    patterns: [permissionPath(context, resolved.canonicalPath)],
+    patterns,
     always: ["*"],
-    metadata: { filepath: resolved.canonicalPath, diff },
+    metadata: {
+      filepath: resolved[0]?.canonicalPath,
+      filepaths: resolved.map((entry) => entry.canonicalPath),
+      diff,
+      ...(createdDirectories ? { createdDirectories: [...createdDirectories] } : {}),
+    },
   });
 }
 
@@ -252,6 +650,30 @@ export async function assertAliasStable(resolved: ResolvedFile): Promise<void> {
   assertSafePath(current, "canonical");
   if (!samePath(current, resolved.canonicalPath)) {
     fail("PATH_MISMATCH", "The requested path was retargeted during the operation.");
+  }
+}
+
+async function assertMutableStable(
+  resolved: ResolvedMutableFile,
+  error: "PATH_MISMATCH" | "RACE_AFTER_WRITE",
+): Promise<void> {
+  await assertAliasStable(resolved);
+  let terminalStats: Stats;
+  let canonicalStats: Stats;
+  try {
+    [terminalStats, canonicalStats] = await Promise.all([
+      lstat(resolved.requestedAbsolute),
+      stat(resolved.canonicalPath),
+    ]);
+  } catch {
+    fail(error, "The source path could not be verified.");
+  }
+  if (
+    terminalStats.isSymbolicLink() ||
+    !terminalStats.isFile() ||
+    !sameIdentity(terminalStats, canonicalStats)
+  ) {
+    fail(error, "The source path was retargeted.");
   }
 }
 
@@ -300,24 +722,74 @@ export async function readStableFile(
   }
 }
 
+async function waitForPathLock(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await previous;
+    return;
+  }
+  throwIfAborted(signal);
+  await new Promise<void>((resolveWait, rejectWait) => {
+    const abort = () => rejectWait(signal.reason ?? new Error("The operation was aborted."));
+    signal.addEventListener("abort", abort, { once: true });
+    void previous.then(
+      () => {
+        signal.removeEventListener("abort", abort);
+        resolveWait();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        rejectWait(error);
+      },
+    );
+  });
+}
+
 export async function withPathLock<T>(
   canonicalPath: string,
   operation: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const key = lockKey(canonicalPath);
-  const previous = pathLocks.get(key) ?? Promise.resolve();
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolveGate) => {
-    release = resolveGate;
-  });
-  const tail = previous.then(() => gate);
-  pathLocks.set(key, tail);
-  await previous;
+  return withPathLocks([canonicalPath], operation, signal);
+}
+
+export async function withPathLocks<T>(
+  canonicalPaths: readonly string[],
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const keys = [...new Set(canonicalPaths.map(lockKey))].sort();
+  const reservations: Array<{ key: string; release: () => void; tail: Promise<void> }> = [];
   try {
+    for (const key of keys) {
+      const previous = pathLocks.get(key) ?? Promise.resolve();
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolveGate) => {
+        release = resolveGate;
+      });
+      const tail = previous.then(() => gate);
+      pathLocks.set(key, tail);
+      try {
+        await waitForPathLock(previous, signal);
+      } catch (error) {
+        release();
+        void tail.then(() => {
+          if (pathLocks.get(key) === tail) pathLocks.delete(key);
+        });
+        throw error;
+      }
+      reservations.push({ key, release, tail });
+    }
+    if (signal) throwIfAborted(signal);
     return await operation();
   } finally {
-    release();
-    if (pathLocks.get(key) === tail) pathLocks.delete(key);
+    for (const reservation of reservations.toReversed()) {
+      reservation.release();
+      void reservation.tail.then(() => {
+        if (pathLocks.get(reservation.key) === reservation.tail) {
+          pathLocks.delete(reservation.key);
+        }
+      });
+    }
   }
 }
 
@@ -498,6 +970,298 @@ export async function publishNewFile(input: {
   } finally {
     await handle?.close().catch(() => {});
     await rm(temporaryPath, { force: true }).catch(() => {});
+  }
+}
+
+async function verifyPlannedNewFileDirectory(
+  directory: PlannedNewFileDirectory,
+  expectedParent: Stats,
+  expectedDirectory?: Stats,
+): Promise<Stats> {
+  const [
+    requestedCanonical,
+    canonicalSelf,
+    requestedStats,
+    canonicalDirect,
+    canonicalStats,
+    requestedParentCanonical,
+    canonicalParentSelf,
+    parentDirect,
+    parentStats,
+  ] = await Promise.all([
+    realpath(directory.requestedPath),
+    realpath(directory.canonicalPath),
+    lstat(directory.requestedPath),
+    lstat(directory.canonicalPath),
+    stat(directory.canonicalPath),
+    realpath(directory.requestedParent),
+    realpath(directory.canonicalParent),
+    lstat(directory.canonicalParent),
+    stat(directory.canonicalParent),
+  ]);
+  if (
+    !samePath(requestedCanonical, directory.canonicalPath) ||
+    !samePath(canonicalSelf, directory.canonicalPath) ||
+    !requestedStats.isDirectory() ||
+    !canonicalDirect.isDirectory() ||
+    !canonicalStats.isDirectory() ||
+    !sameIdentity(requestedStats, canonicalStats) ||
+    !sameIdentity(canonicalDirect, canonicalStats) ||
+    (expectedDirectory !== undefined && !sameIdentity(canonicalStats, expectedDirectory)) ||
+    !samePath(requestedParentCanonical, directory.canonicalParent) ||
+    !samePath(canonicalParentSelf, directory.canonicalParent) ||
+    !parentDirect.isDirectory() ||
+    !parentStats.isDirectory() ||
+    !sameIdentity(parentDirect, parentStats) ||
+    !sameIdentity(parentStats, expectedParent)
+  ) {
+    fail("PATH_MISMATCH", "A created parent directory or its immediate parent changed identity.");
+  }
+  return canonicalStats;
+}
+
+async function verifyCreatedNewFileDirectories(
+  plan: NewFileParentPlan,
+  createdStats: readonly Stats[],
+): Promise<Stats> {
+  let parentStats = await verifyNewFilePlanAnchor(plan);
+  for (const [index, expected] of createdStats.entries()) {
+    const directory = plan.missingDirectories[index];
+    if (!directory) {
+      fail("PATH_MISMATCH", "The created parent chain exceeded the fixed plan.");
+    }
+    parentStats = await verifyPlannedNewFileDirectory(directory, parentStats, expected);
+  }
+  return parentStats;
+}
+
+function failBeforeParentCreation(error: unknown): never {
+  const code = errorCode(error);
+  if (code === "EEXIST") {
+    fail("RACE_BEFORE_WRITE", "A planned parent directory appeared before exclusive creation.");
+  }
+  if (["ENOENT", "ENOTDIR", "ELOOP"].includes(code ?? "")) {
+    fail("PATH_MISMATCH", "The planned parent chain changed before directory creation.");
+  }
+  fail("UNSUPPORTED_FILE", "A planned parent directory could not be created exclusively.");
+}
+
+function failPartialParentCreation(): never {
+  fail(
+    "PARTIAL_PUBLICATION",
+    "Parent creation started but could not complete safely. Inspect the requested tree and target before retrying in a new session; created directories are intentionally retained.",
+  );
+}
+
+export async function publishNewFileWithParents(input: {
+  plan: NewFileParentPlan;
+  bytes: Uint8Array;
+  signal: AbortSignal;
+}): Promise<void> {
+  const { plan, signal } = input;
+  const bytes = input.bytes.slice();
+  const createdStats: Stats[] = [];
+  let createdAnyDirectory = false;
+
+  try {
+    throwIfAborted(signal);
+    let parentStats = await revalidateNewFileParentPlanInternal(plan);
+
+    for (const directory of plan.missingDirectories) {
+      parentStats = await verifyCreatedNewFileDirectories(plan, createdStats);
+      await assertPlannedPathsAbsent([directory.requestedPath, directory.canonicalPath], false);
+      throwIfAborted(signal);
+      try {
+        await mkdir(directory.canonicalPath, { recursive: false, mode: 0o777 });
+      } catch (error) {
+        try {
+          await assertPlannedPathsAbsent([directory.requestedPath, directory.canonicalPath], false);
+        } catch {
+          createdAnyDirectory = true;
+          throw error;
+        }
+        failBeforeParentCreation(error);
+      }
+      createdAnyDirectory = true;
+      parentStats = await verifyPlannedNewFileDirectory(directory, parentStats);
+      createdStats.push(parentStats);
+    }
+
+    if (createdStats.length > 0) {
+      parentStats = await verifyCreatedNewFileDirectories(plan, createdStats);
+      await assertPlannedPathsAbsent([plan.requestedAbsolute, plan.canonicalPath], true);
+      throwIfAborted(signal);
+    }
+
+    const resolved: ResolvedNewFile = {
+      requestedPath: plan.requestedPath,
+      requestedAbsolute: plan.requestedAbsolute,
+      requestedParent: plan.requestedParent,
+      canonicalParent: plan.canonicalParent,
+      parentStats,
+      canonicalPath: plan.canonicalPath,
+    };
+    await publishNewFile({ resolved, bytes, signal });
+
+    if (createdStats.length > 0) {
+      throwIfAborted(signal);
+      await verifyCreatedNewFileDirectories(plan, createdStats);
+    }
+  } catch (error) {
+    if (!createdAnyDirectory) throw error;
+    failPartialParentCreation();
+  }
+}
+
+export async function publishDeletedFile(input: {
+  resolved: ResolvedMutableFile;
+  expected: StableFile;
+  maxBytes: number;
+  signal: AbortSignal;
+  consume: () => void;
+}): Promise<void> {
+  const { resolved, expected, maxBytes, signal, consume } = input;
+  throwIfAborted(signal);
+  await assertNewParentStable(resolved, "PATH_MISMATCH");
+  await assertMutableStable(resolved, "PATH_MISMATCH");
+  const current = await readStableFile(resolved, maxBytes, true, signal);
+  if (!sameMetadata(expected.stats, current.stats) || !bytesEqual(expected.bytes, current.bytes)) {
+    fail("RACE_BEFORE_WRITE", "The file changed while delete permission was pending.");
+  }
+  await assertNewParentStable(resolved, "PATH_MISMATCH");
+  await assertMutableStable(resolved, "PATH_MISMATCH");
+  throwIfAborted(signal);
+  consume();
+  try {
+    await unlink(resolved.canonicalPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      fail("RACE_BEFORE_WRITE", "The file disappeared during delete publication.");
+    }
+    if (
+      ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBUSY"].includes(
+        errorCode(error) ?? "",
+      )
+    ) {
+      fail("UNSUPPORTED_FILE", "The filesystem could not delete the file.");
+    }
+    throw error;
+  }
+  await syncDirectory(resolved.canonicalParent);
+  try {
+    await lstat(resolved.canonicalPath);
+    fail("RACE_AFTER_WRITE", "The deleted path exists after publication.");
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+  await assertNewParentStable(resolved, "RACE_AFTER_WRITE");
+}
+
+export async function publishMovedFile(input: {
+  source: ResolvedMutableFile;
+  destination: ResolvedNewFile;
+  expected: StableFile;
+  maxBytes: number;
+  signal: AbortSignal;
+  consume: () => void;
+}): Promise<StableFile> {
+  const { source, destination, expected, maxBytes, signal, consume } = input;
+  if (pathsAlias(source.canonicalPath, destination.canonicalPath)) {
+    fail("INVALID_ARGUMENT", "The move destination must differ from the source path.");
+  }
+  if (expected.stats.dev !== destination.parentStats.dev) {
+    fail("UNSUPPORTED_FILE", "Moving files across filesystems is not supported.");
+  }
+  throwIfAborted(signal);
+  await Promise.all([
+    assertNewParentStable(source, "PATH_MISMATCH"),
+    assertNewParentStable(destination, "PATH_MISMATCH"),
+  ]);
+  await assertMutableStable(source, "PATH_MISMATCH");
+  const current = await readStableFile(source, maxBytes, true, signal);
+  if (!sameMetadata(expected.stats, current.stats) || !bytesEqual(expected.bytes, current.bytes)) {
+    fail("RACE_BEFORE_WRITE", "The file changed while move permission was pending.");
+  }
+  await assertTargetAbsent(destination);
+  await Promise.all([
+    assertNewParentStable(source, "PATH_MISMATCH"),
+    assertNewParentStable(destination, "PATH_MISMATCH"),
+  ]);
+  await assertMutableStable(source, "PATH_MISMATCH");
+  throwIfAborted(signal);
+  consume();
+
+  let linked = false;
+  try {
+    try {
+      await link(source.canonicalPath, destination.canonicalPath);
+      linked = true;
+    } catch (error) {
+      if (errorCode(error) === "EEXIST")
+        fail("TARGET_EXISTS", "The move destination already exists.");
+      if (
+        ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EXDEV", "EMLINK"].includes(
+          errorCode(error) ?? "",
+        )
+      ) {
+        fail("UNSUPPORTED_FILE", "The filesystem cannot publish a no-replace file move.");
+      }
+      throw error;
+    }
+
+    const [linkedSource, linkedDestination] = await Promise.all([
+      readStableFile(source, maxBytes, false),
+      lstat(destination.canonicalPath),
+    ]);
+    if (
+      !sameIdentity(expected.stats, linkedSource.stats) ||
+      !sameIdentity(expected.stats, linkedDestination) ||
+      linkedSource.stats.nlink !== 2 ||
+      linkedDestination.nlink !== 2 ||
+      !bytesEqual(expected.bytes, linkedSource.bytes)
+    ) {
+      fail("PARTIAL_PUBLICATION", "The linked move state changed before source removal.");
+    }
+    await assertMutableStable(source, "RACE_AFTER_WRITE");
+
+    try {
+      await unlink(source.canonicalPath);
+    } catch {
+      fail(
+        "PARTIAL_PUBLICATION",
+        "The destination was linked, but the source could not be removed. Inspect both paths before retrying in a new session.",
+      );
+    }
+    const directories = [...new Set([source.canonicalParent, destination.canonicalParent])];
+    await Promise.all(directories.map(syncDirectory));
+
+    try {
+      await lstat(source.canonicalPath);
+      fail("PARTIAL_PUBLICATION", "The source still exists after move publication.");
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+    const verified = await readStableFile(destination, maxBytes, false);
+    if (
+      !sameIdentity(expected.stats, verified.stats) ||
+      verified.stats.nlink !== 1 ||
+      !bytesEqual(expected.bytes, verified.bytes)
+    ) {
+      fail("PARTIAL_PUBLICATION", "The destination changed after move publication.");
+    }
+    await Promise.all([
+      assertNewParentStable(source, "RACE_AFTER_WRITE"),
+      assertNewParentStable(destination, "RACE_AFTER_WRITE"),
+    ]);
+    return verified;
+  } catch (error) {
+    if (!linked || (error instanceof HashlineError && error.code === "PARTIAL_PUBLICATION")) {
+      throw error;
+    }
+    fail(
+      "PARTIAL_PUBLICATION",
+      "Move publication started but could not be verified. Inspect both paths before retrying in a new session.",
+    );
   }
 }
 

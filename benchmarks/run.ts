@@ -2,9 +2,15 @@ import { createHash } from "node:crypto";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { z } from "zod";
-import { hashlineEditArgumentsSchema, hashlineEditDescription } from "../src/plugin.js";
+import {
+  hashlineEditArgumentsSchema,
+  hashlineEditDescription,
+  hashlineWriteArgumentsSchema,
+} from "../src/plugin.js";
 import {
   runDeterministicSuite,
+  runEditProtocolUxCallWireSuite,
+  runFileLifecycleCallWireSuite,
   runMicroSuite,
   runMoveCorridorWireSuite,
   runRenderingWireSuite,
@@ -68,6 +74,31 @@ function providerSchemaWireSize(): {
   };
 }
 
+function writeSchemaWireSize(): {
+  scenario: string;
+  legacyBytes: number;
+  currentBytes: number;
+  deltaBytes: number;
+  deltaPercent: number;
+} {
+  const currentParameters = z.toJSONSchema(hashlineWriteArgumentsSchema);
+  const legacyParameters = structuredClone(currentParameters) as JsonSchemaNode;
+  if (!legacyParameters.properties?.createParents) {
+    throw new Error("Unexpected hashline_write provider schema shape.");
+  }
+  delete legacyParameters.properties.createParents;
+  const encoder = new TextEncoder();
+  const legacyBytes = encoder.encode(JSON.stringify(legacyParameters)).byteLength;
+  const currentBytes = encoder.encode(JSON.stringify(currentParameters)).byteLength;
+  return {
+    scenario: "hashline_write JSON Schema",
+    legacyBytes,
+    currentBytes,
+    deltaBytes: currentBytes - legacyBytes,
+    deltaPercent: Number((((currentBytes - legacyBytes) / legacyBytes) * 100).toFixed(2)),
+  };
+}
+
 const repository = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(await readFile(resolve(repository, "package.json"), "utf8")) as {
   version: string;
@@ -80,8 +111,11 @@ const implementationSources = await Promise.all(
     "benchmarks/suite.ts",
     "src/edits.ts",
     "src/errors.ts",
+    "src/filesystem.ts",
     "src/plugin.ts",
+    "src/presentation.ts",
     "src/rebase.ts",
+    "src/session-protocol.ts",
     "src/render.ts",
     "src/snapshots.ts",
     "src/text.ts",
@@ -92,6 +126,9 @@ const deterministic = runDeterministicSuite();
 const staticSize = runStaticSizeSuite();
 const renderingWireSize = runRenderingWireSuite();
 const operationSchemaWireSize = providerSchemaWireSize();
+const writeOperationSchemaWireSize = writeSchemaWireSize();
+const fileLifecycleCallWireSize = runFileLifecycleCallWireSuite();
+const editProtocolUxCallWireSize = runEditProtocolUxCallWireSuite();
 const transferCallWireSize = runTransferCallWireSuite();
 const moveCorridorWireSize = runMoveCorridorWireSuite();
 const micro = runMicroSuite();
@@ -109,7 +146,7 @@ if (
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 5,
+  schemaVersion: 7,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -134,7 +171,13 @@ const result = {
     renderingWireSize:
       "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",
     operationSchemaWireSize:
-      "Exact compact UTF-8 JSON bytes for the hashline_edit description and provider schema before and after transfer operations.",
+      "Exact compact UTF-8 JSON bytes for the hashline_edit description and provider schema before and after transfer and lifecycle operations.",
+    writeOperationSchemaWireSize:
+      "Exact compact UTF-8 JSON bytes for the hashline_write provider schema before and after opt-in parent creation.",
+    fileLifecycleCallWireSize:
+      "Exact compact UTF-8 JSON bytes for valid Better Hashline lifecycle calls and equivalent native apply_patch calls; no semantic or safety advantage is inferred from size.",
+    editProtocolUxCallWireSize:
+      "Exact compact UTF-8 JSON bytes for default versus explicit readback-window calls and strict versus opt-in parent-creation calls.",
     transferCallWireSize:
       "Exact compact UTF-8 JSON bytes for copy/move calls versus equivalent model-supplied insert/replace payloads.",
     moveCorridorWireSize:
@@ -146,6 +189,9 @@ const result = {
   staticSize,
   renderingWireSize,
   operationSchemaWireSize,
+  writeOperationSchemaWireSize,
+  fileLifecycleCallWireSize,
+  editProtocolUxCallWireSize,
   transferCallWireSize,
   moveCorridorWireSize,
   micro,
@@ -159,6 +205,12 @@ console.log("\nLong-line rendering wire-size change\n");
 console.table([renderingWireSize]);
 console.log("\nOperation-schema wire-size change\n");
 console.table([operationSchemaWireSize]);
+console.log("\nWrite-schema wire-size change\n");
+console.table([writeOperationSchemaWireSize]);
+console.log("\nFile-lifecycle call wire size\n");
+console.table(fileLifecycleCallWireSize);
+console.log("\nEdit-protocol UX call wire size\n");
+console.table(editProtocolUxCallWireSize);
 console.log("\nTransfer call wire-size change\n");
 console.table(transferCallWireSize);
 console.log("\nMove-corridor read wire size\n");

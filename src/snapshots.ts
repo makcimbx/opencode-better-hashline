@@ -216,11 +216,11 @@ export class SnapshotStore {
     }
   }
 
-  assertComplete(snapshot: Snapshot): void {
+  assertComplete(snapshot: Snapshot, operation = "replace_file"): void {
     if (!snapshot.complete) {
       fail(
         "RANGE_NOT_FULLY_ISSUED",
-        "replace_file requires complete BOF-to-EOF issued coverage. Read additional pages for the same unchanged file; partial=true describes only the current page, and an N! preview line cannot establish full coverage.",
+        `${operation} needs a complete snapshot. Read the file from offset=1 through @eof with the same snapshotId, then retry.`,
       );
     }
   }

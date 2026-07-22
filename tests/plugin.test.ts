@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hooks, ToolContext } from "@opencode-ai/plugin";
@@ -8,6 +8,7 @@ import {
   betterHashlinePlugin,
   hashlineEditArgumentsSchema,
   hashlineEditDescription,
+  hashlineWriteArgumentsSchema,
 } from "../src/plugin.js";
 
 type StructuredResult = {
@@ -24,12 +25,20 @@ type AskRecord = {
 };
 
 type EditOperationInput = {
-  op: "replace" | "insert" | "replace_file" | "copy_range" | "move_range";
+  op:
+    | "replace"
+    | "insert"
+    | "replace_file"
+    | "copy_range"
+    | "move_range"
+    | "delete_file"
+    | "move_file";
   startLine?: number;
   endLine?: number;
   afterLine?: number;
   lines?: string[];
   finalNewline?: boolean;
+  destinationPath?: string;
 };
 
 let root = "";
@@ -250,6 +259,109 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
+  test("issues only an explicit contiguous post-edit readback window", async () => {
+    const file = join(root, "window.txt");
+    const lines = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`);
+    await writeFile(file, `${lines.join("\n")}\n`);
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "window.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const args = {
+      filePath: "window.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+      readback: true,
+      readbackOffset: 8,
+      readbackLimit: 5,
+      operations: [{ op: "replace" as const, startLine: 10, endLine: 10, lines: ["changed"] }],
+    };
+    const editResult = structured(await hashlineEdit.execute(args, toolContext));
+    const successorId = String(
+      /@hashline snapshot=(s_[A-Za-z0-9_-]{22})/u.exec(editResult.output)?.[1],
+    );
+    expect(editResult.output).toContain("lines=20 partial=true");
+    expect(editResult.output).toContain("8|line-8");
+    expect(editResult.output).toContain("10|changed");
+    expect(editResult.output).toContain("12|line-12");
+    expect(editResult.output).not.toContain("7|line-7");
+    expect(editResult.output).not.toContain("13|line-13");
+
+    await value["tool.execute.after"]?.(
+      { tool: "hashline_edit", sessionID: "session", callID: "window-readback", args },
+      editResult,
+    );
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "window.txt",
+          snapshotId: successorId,
+          operations: [{ op: "replace", startLine: 13, endLine: 13, lines: ["outside"] }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
+    await hashlineEdit.execute(
+      {
+        filePath: "window.txt",
+        snapshotId: successorId,
+        operations: [{ op: "replace", startLine: 8, endLine: 8, lines: ["inside"] }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toContain("inside\nline-9\nchanged\n");
+    await value.dispose?.();
+  });
+
+  test("attests beyond-EOF readback without issuing file lines", async () => {
+    const file = join(root, "beyond-eof.txt");
+    await writeFile(file, "one\ntwo\nthree\n");
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "beyond-eof.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const args = {
+      filePath: "beyond-eof.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+      readback: true,
+      readbackOffset: 99,
+      readbackLimit: 2,
+      operations: [{ op: "replace" as const, startLine: 2, endLine: 2, lines: ["TWO"] }],
+    };
+    const editResult = structured(await hashlineEdit.execute(args, toolContext));
+    const successorId = String(
+      /@hashline snapshot=(s_[A-Za-z0-9_-]{22})/u.exec(editResult.output)?.[1],
+    );
+    expect(editResult.output).toContain("lines=3 partial=true\n@eof");
+    expect(editResult.output).not.toMatch(/\n\d+[|!]/u);
+    expect(editResult.metadata.hashlinePending).toBeString();
+
+    await value["tool.execute.after"]?.(
+      { tool: "hashline_edit", sessionID: "session", callID: "beyond-eof-readback", args },
+      editResult,
+    );
+    expect(editResult.metadata.hashlinePending).toBeUndefined();
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "beyond-eof.txt",
+          snapshotId: successorId,
+          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
+    expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(1);
+    expect(await readFile(file, "utf8")).toBe("one\nTWO\nthree\n");
+    await value.dispose?.();
+  });
+
   test("marks bounded readback partial before whole-file replacement", async () => {
     const file = join(root, "file.txt");
     const lines = Array.from({ length: 12 }, (_, index) => `line-${index + 1}`);
@@ -290,7 +402,7 @@ describe("OpenCode plugin protocol", () => {
         toolContext,
       ),
     ).rejects.toThrow(
-      "RANGE_NOT_FULLY_ISSUED: replace_file requires complete BOF-to-EOF issued coverage.",
+      "RANGE_NOT_FULLY_ISSUED: replace_file needs a complete snapshot. Read the file from offset=1 through @eof with the same snapshotId, then retry.",
     );
     await value.dispose?.();
   });
@@ -381,6 +493,37 @@ describe("OpenCode plugin protocol", () => {
     );
     expect(result.metadata.rebased).toBe(true);
     expect(await readFile(file, "utf8")).toBe("prefix\none\nTWO\nthree\n");
+  });
+
+  test("diagnoses EOL-only unique relocation failure before edit permission", async () => {
+    const file = join(root, "eol-only.txt");
+    await writeFile(file, "one\ntwo\nthree\n");
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "eol-only.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    await writeFile(file, "one\r\ntwo\r\nthree\r\n");
+
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "eol-only.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          rebase: "unique",
+          operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["TWO"] }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      "TARGET_CHANGED: Lines 2-2 are no longer unchanged. Exact line delimiters changed; reread the file before retrying.",
+    );
+    expect(asks.map(({ permission }) => permission)).toEqual(["read"]);
+    expect(await readFile(file, "utf8")).toBe("one\r\ntwo\r\nthree\r\n");
+    await value.dispose?.();
   });
 
   test("rejects an edit whose composed result exceeds maxLines", async () => {
@@ -814,6 +957,116 @@ describe("OpenCode plugin protocol", () => {
     expect(await readFile(file, "utf8")).toBe("old\n");
   });
 
+  test("validates strict lifecycle operation shapes before publication", async () => {
+    const file = join(root, "file.txt");
+    await writeFile(file, "one\ntwo\n");
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const common = {
+      filePath: "file.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+      rebase: "none" as const,
+    };
+    const invalid: Array<{ args: Record<string, unknown>; message: string }> = [
+      {
+        args: { ...common, operations: [{ op: "delete_file", destinationPath: "other.txt" }] },
+        message: "delete_file does not accept destinationPath.",
+      },
+      {
+        args: { ...common, operations: [{ op: "move_file" }] },
+        message: "move_file requires destinationPath.",
+      },
+      {
+        args: {
+          ...common,
+          operations: [{ op: "move_file", destinationPath: "other.txt", lines: [] }],
+        },
+        message: "move_file does not accept line coordinates, lines, or finalNewline.",
+      },
+      {
+        args: {
+          ...common,
+          operations: [
+            { op: "delete_file" },
+            { op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] },
+          ],
+        },
+        message: "File lifecycle operations must be the only operation.",
+      },
+      {
+        args: { ...common, rebase: "unique", operations: [{ op: "delete_file" }] },
+        message: "delete_file does not support unique rebase.",
+      },
+      {
+        args: {
+          ...common,
+          readback: true,
+          readbackOffset: 1,
+          readbackLimit: 1,
+          operations: [{ op: "move_file", destinationPath: "other.txt" }],
+        },
+        message: "move_file does not support readback.",
+      },
+      {
+        args: {
+          ...common,
+          readbackOffset: 1,
+          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
+        },
+        message: "readbackOffset and readbackLimit require readback:true.",
+      },
+      {
+        args: {
+          ...common,
+          operations: [
+            {
+              op: "replace",
+              startLine: 1,
+              endLine: 1,
+              lines: ["ONE"],
+              destinationPath: "other.txt",
+            },
+          ],
+        },
+        message: "destinationPath is only accepted by move_file.",
+      },
+    ];
+
+    const askCount = asks.length;
+    for (const entry of invalid) {
+      await expect(hashlineEdit.execute(entry.args as never, toolContext)).rejects.toThrow(
+        `INVALID_ARGUMENT: ${entry.message}`,
+      );
+    }
+    expect(asks).toHaveLength(askCount);
+    expect(await readFile(file, "utf8")).toBe("one\ntwo\n");
+
+    await writeFile(join(root, "partial.txt"), "one\ntwo\n");
+    const partial = structured(
+      await hashlineRead.execute({ filePath: "partial.txt", limit: 1 }, toolContext),
+    );
+    await activateRead(value, partial);
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "partial.txt",
+          snapshotId: String(partial.metadata.snapshotId),
+          operations: [{ op: "delete_file" }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      "RANGE_NOT_FULLY_ISSUED: delete_file needs a complete snapshot. Read the file from offset=1 through @eof with the same snapshotId, then retry.",
+    );
+    await value.dispose?.();
+  });
+
   test("accepts every documented minimal operation shape without explicit rebase", async () => {
     const cases: Array<{
       initial: string;
@@ -975,6 +1228,8 @@ describe("OpenCode plugin protocol", () => {
       properties?: {
         allowHashlinePrefixes?: SchemaProperty;
         readback?: SchemaProperty;
+        readbackLimit?: SchemaProperty;
+        readbackOffset?: SchemaProperty;
         rebase?: SchemaProperty;
         operations?: {
           items?: {
@@ -997,13 +1252,15 @@ describe("OpenCode plugin protocol", () => {
       "replace_file",
       "copy_range",
       "move_range",
+      "delete_file",
+      "move_file",
     ]);
     expect(operation?.required).toEqual(["op"]);
     expect(operation?.description).toBe(
-      "Fields not listed for the selected op are invalid; replace_file must be sole.",
+      "Fields not listed for the selected op are invalid; replace_file and file lifecycle operations must be sole. One move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor must be issued and unchanged.",
     );
     expect(operation?.properties?.op?.description).toBe(
-      "Required: replace(startLine,endLine,lines); insert(afterLine,lines); replace_file(lines); copy_range/move_range(startLine,endLine,afterLine). Optional only: replace_file(finalNewline). All other fields are forbidden.",
+      "Required: replace(startLine,endLine,lines); insert(afterLine,lines); replace_file(lines); copy_range/move_range(startLine,endLine,afterLine); delete_file; move_file(destinationPath). Optional only: replace_file(finalNewline). All other fields are forbidden.",
     );
     expect(operation?.properties?.startLine?.description).toContain(
       "Only for replace, copy_range, and move_range",
@@ -1026,17 +1283,26 @@ describe("OpenCode plugin protocol", () => {
     expect(operation?.properties?.finalNewline?.description).toContain(
       "an empty file requires false",
     );
-    expect(schema.properties?.rebase?.description).toContain("replace_file forbids unique");
+    expect(schema.properties?.rebase?.description).toContain(
+      "replace_file, delete_file, and move_file forbid unique",
+    );
     expect(schema.properties?.rebase?.description).toContain("still-retained snapshot");
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("Column-0 prefixes");
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("initial call");
     expect(schema.properties?.readback?.description).toContain("structural verification");
     expect(schema.properties?.readback?.description).toContain("attested successor");
     expect(schema.properties?.readback?.description).toContain("potentially partial");
+    expect(schema.properties?.readbackOffset?.description).toContain("post-edit file");
+    expect(schema.properties?.readbackOffset?.description).toContain("first hunk");
+    expect(schema.properties?.readbackLimit?.description).toContain("contiguous successor page");
+    expect(schema.properties?.readbackLimit?.description).toContain("defaults to 1000");
     expect(hashlineEditDescription).toContain("immutable pre-batch snapshot");
     expect(hashlineEditDescription).toContain("copy reads pre-edit source");
     expect(hashlineEditDescription).toContain("may touch a destructive endpoint");
-    expect(hashlineEditDescription).toContain("readback:true returns a successor");
+    expect(hashlineEditDescription).toContain("readback:true returns one contiguous");
+    expect(hashlineEditDescription).toContain(
+      "readbackOffset selects its one-based post-edit start",
+    );
     expect(hashlineEditDescription).toContain("partial=true");
     expect(hashlineEditDescription).toContain("cannot revive a consumed or unknown snapshot");
     expect(hashlineEditDescription).toContain("afterLine is never adjusted");
@@ -1142,6 +1408,42 @@ describe("OpenCode plugin protocol", () => {
     );
     expect(asks.map(({ permission }) => permission)).toEqual(["read", "edit"]);
     expect(String(asks.at(-1)?.metadata?.diff)).toContain("+1|literal");
+  });
+
+  test("composes a move with a disjoint replacement inside its corridor", async () => {
+    const file = join(root, "move-replace.txt");
+    const initial = Array.from({ length: 13 }, (_, index) => `L${index + 1}`);
+    await writeFile(file, `${initial.join("\n")}\n`);
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "move-replace.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+
+    const result = structured(
+      await hashlineEdit.execute(
+        {
+          filePath: "move-replace.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [
+            { op: "move_range", startLine: 2, endLine: 3, afterLine: 13 },
+            { op: "replace", startLine: 5, endLine: 5, lines: ["R5"] },
+          ],
+        },
+        toolContext,
+      ),
+    );
+
+    expect(result.output).toContain("Applied 2 operations");
+    expect(await readFile(file, "utf8")).toBe(
+      ["L1", "L4", "R5", "L6", "L7", "L8", "L9", "L10", "L11", "L12", "L13", "L2", "L3", ""].join(
+        "\n",
+      ),
+    );
+    expect(asks.map(({ permission }) => permission)).toEqual(["read", "edit"]);
   });
 
   test("publishes mixed-EOL transfers without changing the BOM or positional delimiters", async () => {
@@ -1362,6 +1664,123 @@ describe("OpenCode plugin protocol", () => {
     expect(await readFile(file, "utf8")).toBe("raced\n");
   });
 
+  test("deletes and moves exact files without overwriting", async () => {
+    const deletePath = join(root, "delete.txt");
+    const movePath = join(root, "move.txt");
+    const occupiedPath = join(root, "occupied.txt");
+    await writeFile(deletePath, "delete me\n");
+    await writeFile(movePath, "move me\n");
+    await writeFile(occupiedPath, "keep me\n");
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+
+    const deleteRead = structured(
+      await hashlineRead.execute({ filePath: "delete.txt" }, toolContext),
+    );
+    await activateRead(value, deleteRead);
+    const deleted = structured(
+      await hashlineEdit.execute(
+        {
+          filePath: "delete.txt",
+          snapshotId: String(deleteRead.metadata.snapshotId),
+          operations: [{ op: "delete_file" }],
+        },
+        toolContext,
+      ),
+    );
+    expect(deleted.output).toContain("Deleted delete.txt.");
+    expect(deleted.metadata).toMatchObject({ operation: "delete_file" });
+    await expect(readFile(deletePath)).rejects.toThrow();
+
+    const moveRead = structured(await hashlineRead.execute({ filePath: "move.txt" }, toolContext));
+    await activateRead(value, moveRead);
+    const moveRequest = {
+      filePath: "move.txt",
+      snapshotId: String(moveRead.metadata.snapshotId),
+      operations: [{ op: "move_file" as const, destinationPath: "occupied.txt" }],
+    };
+    await expect(hashlineEdit.execute(moveRequest, toolContext)).rejects.toThrow("TARGET_EXISTS:");
+    expect(await readFile(movePath, "utf8")).toBe("move me\n");
+    expect(await readFile(occupiedPath, "utf8")).toBe("keep me\n");
+
+    const moved = structured(
+      await hashlineEdit.execute(
+        {
+          ...moveRequest,
+          operations: [{ op: "move_file", destinationPath: "moved.txt" }],
+        },
+        toolContext,
+      ),
+    );
+    expect(moved.output).toContain("Moved move.txt to moved.txt.");
+    const canonicalRoot = await realpath(root);
+    expect(moved.metadata).toMatchObject({
+      operation: "move_file",
+      destinationPath: join(canonicalRoot, "moved.txt"),
+    });
+    await expect(readFile(movePath)).rejects.toThrow();
+    expect(await readFile(join(root, "moved.txt"), "utf8")).toBe("move me\n");
+    expect(asks.at(-1)?.patterns).toEqual(["move.txt", "moved.txt"]);
+    await value.dispose?.();
+  });
+
+  test("rejects lifecycle source line breaks before permission or mutation", async () => {
+    if (process.platform === "win32") return;
+    const value = await hooks();
+    const { hashlineRead } = registry(value);
+
+    for (const [index, separator] of ["\n", "\r"].entries()) {
+      const fileName = `unsafe-${index}${separator}source.txt`;
+      const filePath = join(root, fileName);
+      await writeFile(filePath, "preserved\n");
+      const asks: AskRecord[] = [];
+
+      await expect(hashlineRead.execute({ filePath: fileName }, context({ asks }))).rejects.toThrow(
+        "INVALID_ARGUMENT: filePath contains characters that cannot be represented safely in permission patterns.",
+      );
+      expect(asks).toEqual([]);
+      expect(await readFile(filePath, "utf8")).toBe("preserved\n");
+    }
+
+    await value.dispose?.();
+  });
+
+  test("never replans a move when the destination appears after approval", async () => {
+    const sourcePath = join(root, "source.txt");
+    const destinationPath = join(root, "destination.txt");
+    await writeFile(sourcePath, "source\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "source.txt" }, context()),
+    );
+    await activateRead(value, readResult);
+    const asks: AskRecord[] = [];
+    const racing = context({
+      asks,
+      async onAsk(request) {
+        if (request.permission === "edit") await writeFile(destinationPath, "raced\n");
+      },
+    });
+
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "source.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [{ op: "move_file", destinationPath: "destination.txt" }],
+        },
+        racing,
+      ),
+    ).rejects.toThrow("TARGET_EXISTS:");
+    expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(1);
+    expect(await readFile(sourcePath, "utf8")).toBe("source\n");
+    expect(await readFile(destinationPath, "utf8")).toBe("raced\n");
+    await value.dispose?.();
+  });
+
   test("creates new files exclusively through hashline_write", async () => {
     const asks: AskRecord[] = [];
     const value = await hooks({ maxFileBytes: 1024, maxCacheBytes: 3072 });
@@ -1384,8 +1803,225 @@ describe("OpenCode plugin protocol", () => {
       await expect(
         hashlineWrite.execute({ filePath: "bad?.txt", content: "invalid" }, toolContext),
       ).rejects.toThrow("INVALID_ARGUMENT:");
+      await expect(
+        hashlineWrite.execute({ filePath: "bad.txt:stream", content: "invalid" }, toolContext),
+      ).rejects.toThrow("INVALID_ARGUMENT:");
+      await expect(
+        hashlineWrite.execute(
+          {
+            filePath: "missing/bad.txt:stream",
+            content: "invalid",
+            createParents: true,
+          },
+          toolContext,
+        ),
+      ).rejects.toThrow("INVALID_ARGUMENT:");
       expect(asks).toHaveLength(askCount);
+      expect(await readdir(root)).toEqual(["new.txt"]);
     }
+  });
+
+  test("creates missing parents only through an explicit fixed plan", async () => {
+    expect(
+      hashlineWriteArgumentsSchema.safeParse({
+        filePath: "nested/inner/new.txt",
+        content: "created\n",
+        createParents: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      hashlineWriteArgumentsSchema.safeParse({
+        filePath: "nested/inner/new.txt",
+        content: "created\n",
+        createParents: "yes",
+      }).success,
+    ).toBe(false);
+
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineWrite } = registry(value);
+    const toolContext = context({ asks });
+    await expect(
+      hashlineWrite.execute({ filePath: "strict/inner.txt", content: "strict\n" }, toolContext),
+    ).rejects.toThrow("PATH_NOT_FOUND:");
+    await expect(
+      hashlineWrite.execute(
+        { filePath: "strict/inner.txt", content: "strict\n", createParents: false },
+        toolContext,
+      ),
+    ).rejects.toThrow("PATH_NOT_FOUND:");
+    expect(asks).toHaveLength(0);
+
+    const result = structured(
+      await hashlineWrite.execute(
+        {
+          filePath: "nested/inner/new.txt",
+          content: "created\n",
+          createParents: true,
+        },
+        toolContext,
+      ),
+    );
+    expect(result.output).toContain("Created 2 parent directories and the file");
+    expect(result.metadata.createdDirectories).toEqual(["nested", join("nested", "inner")]);
+    expect(await readFile(join(root, "nested", "inner", "new.txt"), "utf8")).toBe("created\n");
+    expect(asks).toHaveLength(1);
+    const canonicalRoot = await realpath(root);
+    expect(asks[0]).toMatchObject({
+      permission: "edit",
+      patterns: [join("nested", "inner", "new.txt"), "nested", join("nested", "inner")],
+      metadata: {
+        createdDirectories: [join(canonicalRoot, "nested"), join(canonicalRoot, "nested", "inner")],
+        filepaths: [
+          join(canonicalRoot, "nested", "inner", "new.txt"),
+          join(canonicalRoot, "nested"),
+          join(canonicalRoot, "nested", "inner"),
+        ],
+      },
+    });
+    await value.dispose?.();
+  });
+
+  test("authorizes an external parent plan before approval or mutation", async () => {
+    const externalRoot = await mkdtemp(join(tmpdir(), "better-hashline-plugin-parents-"));
+    const value = await hooks();
+    try {
+      const { hashlineWrite } = registry(value);
+      const deniedAsks: AskRecord[] = [];
+      let externalAskCount = 0;
+      await expect(
+        hashlineWrite.execute(
+          {
+            filePath: join(externalRoot, "denied", "inner", "new.txt"),
+            content: "denied\n",
+            createParents: true,
+          },
+          context({
+            asks: deniedAsks,
+            onAsk(request) {
+              if (request.permission === "external_directory") {
+                externalAskCount += 1;
+                if (externalAskCount === 3) throw new Error("denied external parent chain");
+              }
+            },
+          }),
+        ),
+      ).rejects.toThrow("PERMISSION_DENIED:");
+      expect(deniedAsks.map(({ permission }) => permission)).toEqual([
+        "external_directory",
+        "external_directory",
+        "external_directory",
+      ]);
+      expect(await readdir(externalRoot)).toEqual([]);
+
+      const canonicalExternalRoot = await realpath(externalRoot);
+      const firstDirectory = join(canonicalExternalRoot, "allowed");
+      const secondDirectory = join(firstDirectory, "inner");
+      const target = join(secondDirectory, "new.txt");
+      const plannedPaths = [target, firstDirectory, secondDirectory];
+      const expectedPatterns = [
+        [join(secondDirectory, "*")],
+        [join(canonicalExternalRoot, "*")],
+        [join(firstDirectory, "*")],
+      ];
+      const allowedAsks: AskRecord[] = [];
+      await hashlineWrite.execute(
+        {
+          filePath: target,
+          content: "allowed\n",
+          createParents: true,
+        },
+        context({ asks: allowedAsks }),
+      );
+
+      const externalAsks = allowedAsks.filter(
+        ({ permission }) => permission === "external_directory",
+      );
+      expect(allowedAsks.map(({ permission }) => permission)).toEqual([
+        "external_directory",
+        "external_directory",
+        "external_directory",
+        "edit",
+      ]);
+      expect(externalAsks.map(({ metadata }) => metadata?.filepath)).toEqual(plannedPaths);
+      expect(externalAsks.map(({ patterns }) => patterns)).toEqual(expectedPatterns);
+      expect(externalAsks.map(({ always }) => always)).toEqual(expectedPatterns);
+      expect(allowedAsks.at(-1)).toMatchObject({
+        permission: "edit",
+        metadata: {
+          filepaths: plannedPaths,
+          createdDirectories: [firstDirectory, secondDirectory],
+        },
+      });
+      expect(await readFile(target, "utf8")).toBe("allowed\n");
+    } finally {
+      await value.dispose?.();
+      await rm(externalRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves existing-parent behavior for explicit false and zero-missing true", async () => {
+    await mkdir(join(root, "existing-parent"));
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineWrite } = registry(value);
+    const toolContext = context({ asks });
+
+    const strict = structured(
+      await hashlineWrite.execute(
+        {
+          filePath: "existing-parent/strict.txt",
+          content: "strict\n",
+          createParents: false,
+        },
+        toolContext,
+      ),
+    );
+    const planned = structured(
+      await hashlineWrite.execute(
+        {
+          filePath: "existing-parent/planned.txt",
+          content: "planned\n",
+          createParents: true,
+        },
+        toolContext,
+      ),
+    );
+
+    expect(strict.output).toContain("Created the file");
+    expect(planned.output).toContain("Created the file");
+    expect(planned.metadata.createdDirectories).toEqual([]);
+    expect(await readFile(join(root, "existing-parent", "strict.txt"), "utf8")).toBe("strict\n");
+    expect(await readFile(join(root, "existing-parent", "planned.txt"), "utf8")).toBe("planned\n");
+    expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(2);
+    await value.dispose?.();
+  });
+
+  test("does not replan parents that appear during write approval", async () => {
+    const value = await hooks();
+    const { hashlineWrite } = registry(value);
+    const asks: AskRecord[] = [];
+    const toolContext = context({
+      asks,
+      async onAsk(request) {
+        if (request.permission === "edit") await mkdir(join(root, "raced"));
+      },
+    });
+    await expect(
+      hashlineWrite.execute(
+        {
+          filePath: "raced/inner/new.txt",
+          content: "planned\n",
+          createParents: true,
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow("RACE_BEFORE_WRITE:");
+    await expect(readFile(join(root, "raced", "inner", "new.txt"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(1);
+    await value.dispose?.();
   });
 });
 

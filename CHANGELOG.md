@@ -9,9 +9,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Add text-only `readbackOffset` and `readbackLimit` controls for one contiguous post-edit successor page, with one-based/default-first-hunk addressing, a `1..1000`/default-1000 limit, and delivered-page-only issuance without an ID-only successor.
+- Add explicit `hashline_write.createParents` support for at most 64 missing directories through one deepest-ancestor plan, complete directory/target authorization and locking, exclusive root-to-leaf creation, staged no-clobber file publication, and no-rollback `PARTIAL_PUBLICATION` after a directory exists or creation becomes ambiguous.
+- Add schema-v7 deterministic methodology and an immutable write-once result for the expanded 29-case corpus, edit/write schemas, readback call, and parent-creation call.
+- Add sole snapshot-bound `delete_file` and no-clobber `move_file` operations with exact-byte freshness, complete issued BOF-to-EOF source coverage, direct regular single-link sources, source authorization, and, for moves, dual-path authorization plus an absent destination under a stable existing parent on the same filesystem.
+- Add the two-task `file-ops-v1` deterministic model manifest and current `native-aliases-v2` adapter identity without making a paid model claim.
+- Add model-free schema-v6 lifecycle operation-schema and compact call-wire fixtures, retained in a new immutable result without rewriting the schema-v5 evidence.
+
 ### Changed
 
+- Permit one `move_range` to compose with pairwise-disjoint replacements wholly inside its intervening corridor and outside its source while retaining full-corridor freshness/issuance, positional EOL validation, and conservative rejection of every other conflict.
+- Append deterministic zero-based operation-pair evidence to overlap and insertion-boundary diagnostics without changing their stable error codes, and shorten complete-snapshot recovery guidance to one full reread from `offset=1` through `@eof`.
+- Keep the `native-aliases/v2` marker name while changing the canonical schema SHA/fingerprint for the expanded tool contracts; prior v2 sessions fail closed and require a restart plus a new session.
+- Record current schema-v7 development values: adversarial counts strict `6/18/5/0`, unique `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, endpoint-8 `7/12/4/6`, endpoint-16 `7/13/4/5`; edit schema `3686 -> 5033` (+1347, 36.54%); write schema `282 -> 548` (+266, 94.33%); readback call `181 -> 218` (+37); and parent-create call `50 -> 81` (+31). Existing lifecycle, transfer, corridor, and static values are unchanged.
+- Remove the completed native-alias preview plan and superseded pre-v7 incident records while retaining the final pilot evidence and closed-ID safety rules.
+- Upgrade native-alias history and metadata to `native-aliases/v2`, binding each result to exact `update`, `delete_file`, or `move_file` operation identity and move destination correlation; v1 history now fails closed.
+- Plan file lifecycle operations separately from pure text `planEdits`, approve one immutable exact patch/metadata result before reread and publication, and serialize overlapping source/destination path sets while allowing disjoint sets to progress.
+- Keep retained schema-v5 and pilot-v7 evidence immutable and scoped to the earlier text-operation contract; neither result covers the new lifecycle task or adapter identity.
+- Keep the retained schema-v6 lifecycle result and pilot-v7 scope immutable; retain schema-v7 separately as model-free mechanical evidence without a paid or model-quality claim.
+
 ### Fixed
+
+- Canonicalize renderer, permission, and verifier roots through physical worktree identities so macOS `/var` aliases and Windows 8.3/case aliases retain correct relative paths.
+- Reject Windows alternate-data-stream path separators before permission or staging, classify ambiguous first-directory creation as `PARTIAL_PUBLICATION`, keep partial errors free of private canonical paths, and poison native-alias sessions after partial parent publication.
+- Explain exact selected-range EOL-only changes after failed unique relocation while preserving `TARGET_CHANGED` and making no normalization, fuzzy-match, or fallback change.
+- Report post-link move failures as `PARTIAL_PUBLICATION`, invalidate source and destination snapshots, poison the bound alias session, and require inspection plus a new session instead of attempting an unsafe rollback.
+- Preserve safe native-alias session-history failure categories, recover bounded transient fetches under one total deadline, and distinguish retryable host failures from oversized histories that require a genuinely new task ID.
 
 ## [0.5.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.4.0...v0.5.0) (2026-07-22)
 

@@ -1,3 +1,7 @@
+export type ModelFileOperation =
+  | { op: "delete_file"; filePath: string }
+  | { op: "move_file"; filePath: string; destinationPath: string };
+
 export type ModelTask = {
   id: string;
   category: string;
@@ -5,6 +9,7 @@ export type ModelTask = {
   files: Record<string, string>;
   expectedFiles: Record<string, string>;
   absentFiles?: string[];
+  fileOperations?: readonly ModelFileOperation[];
 };
 
 export const modelTasks: ModelTask[] = [
@@ -294,11 +299,38 @@ const nativeAliasCreateProbeTask: ModelTask = {
   },
 };
 
+export const fileOperationModelTasks: ModelTask[] = [
+  {
+    id: "delete-file",
+    category: "file-lifecycle",
+    prompt: "Delete src/obsolete.ts. Leave README.md unchanged.",
+    files: { "README.md": "fixture\n", "src/obsolete.ts": "export const obsolete = true;\n" },
+    expectedFiles: { "README.md": "fixture\n" },
+    absentFiles: ["src/obsolete.ts"],
+    fileOperations: [{ op: "delete_file", filePath: "src/obsolete.ts" }],
+  },
+  {
+    id: "move-file",
+    category: "file-lifecycle",
+    prompt: "Move src/old-name.ts to src/new-name.ts without changing its contents or README.md.",
+    files: { "README.md": "fixture\n", "src/old-name.ts": "export const value = 1;\n" },
+    expectedFiles: {
+      "README.md": "fixture\n",
+      "src/new-name.ts": "export const value = 1;\n",
+    },
+    absentFiles: ["src/old-name.ts"],
+    fileOperations: [
+      { op: "move_file", filePath: "src/old-name.ts", destinationPath: "src/new-name.ts" },
+    ],
+  },
+];
+
 export const modelTaskSets = {
   "baseline-v1": modelTasks,
   "create-file-probe-v1": [nativeAliasCreateProbeTask],
   "single-constant-probe-v1": [nativeAliasProbeTask],
   "transfer-v1": transferModelTasks,
+  "file-ops-v1": fileOperationModelTasks,
 } as const satisfies Record<string, readonly ModelTask[]>;
 
 export type ModelTaskSetId = keyof typeof modelTaskSets;

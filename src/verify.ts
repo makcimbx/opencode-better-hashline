@@ -1,15 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, parse, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tool } from "@opencode-ai/plugin";
 import { evaluateExactTree } from "./exact-tree.js";
 import { inspectNativeAliasTrace } from "./model-trace.js";
 import { openCodeProviderSchema } from "./native-alias.js";
-import { hashlineEditArgumentsSchema } from "./plugin.js";
+import { hashlineEditArgumentsSchema, hashlineWriteArgumentsSchema } from "./plugin.js";
 import {
   canonicalJson,
+  canonicalPathSha256,
   jsonSha256,
   NATIVE_ALIAS_PROTOCOL,
   nativeAliasProtocolFingerprint,
@@ -38,6 +39,55 @@ const FINAL_BYTES = "alpha\nBETA\ngamma\n";
 const CONTINUED_BYTES = "alpha\nGAMMA\ngamma\n";
 const FORKED_BYTES = "alpha\nFORKED\ngamma\n";
 const REOPENED_BYTES = "alpha\nDELTA\ngamma\n";
+const LIFECYCLE_DELETE_BYTES = "delete exact bytes\n";
+const LIFECYCLE_MOVE_BYTES = "move exact bytes\n";
+const LIFECYCLE_NO_CLOBBER_SOURCE_BYTES = "source remains exact\n";
+const LIFECYCLE_NO_CLOBBER_DESTINATION_BYTES = "destination remains exact\n";
+const LIFECYCLE_DELETE_PATH = "lifecycle-delete.txt";
+const LIFECYCLE_MOVE_PATH = "lifecycle-move.txt";
+const LIFECYCLE_MOVED_PATH = "lifecycle-moved.txt";
+const LIFECYCLE_NO_CLOBBER_PATH = "lifecycle-no-clobber.txt";
+const LIFECYCLE_OCCUPIED_PATH = "lifecycle-occupied.txt";
+const PROBE_PATH = "probe.txt";
+const NESTED_CREATE_PATH = "nested/inner/new.txt";
+const NESTED_CREATE_BYTES = "created\n";
+const NESTED_CREATE_DISPLAY_PATH = `<fixture>/${NESTED_CREATE_PATH}`;
+const NESTED_CREATE_DIFF = `Index: ${NESTED_CREATE_DISPLAY_PATH}
+===================================================================
+--- ${NESTED_CREATE_DISPLAY_PATH}\tbefore
++++ ${NESTED_CREATE_DISPLAY_PATH}\tafter
+@@ -0,0 +1,1 @@
++created
+`;
+const READBACK_PATH = "readback-window.txt";
+const READBACK_LINES = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`);
+const READBACK_BYTES = `${READBACK_LINES.join("\n")}\n`;
+const READBACK_EDITED_LINES = READBACK_LINES.map((line, index) =>
+  index === 9 ? "readback-changed" : line,
+);
+const READBACK_EDITED_BYTES = `${READBACK_EDITED_LINES.join("\n")}\n`;
+const READBACK_FINAL_LINES = READBACK_EDITED_LINES.map((line, index) =>
+  index === 7 ? "readback-inside" : line,
+);
+const READBACK_FINAL_BYTES = `${READBACK_FINAL_LINES.join("\n")}\n`;
+const COMPOSITION_PATH = "composition.txt";
+const COMPOSITION_BYTES = `${Array.from({ length: 13 }, (_, index) => `L${index + 1}`).join("\n")}\n`;
+const COMPOSITION_FINAL_BYTES = [
+  "L1",
+  "L4",
+  "R5",
+  "L6",
+  "L7",
+  "L8",
+  "L9",
+  "L10",
+  "L11",
+  "L12",
+  "L13",
+  "L2",
+  "L3",
+  "",
+].join("\n");
 const RENDERED_BYTES = VERIFIER_RENDERED_BYTES;
 const PRIVATE_CANARY = "BH_PRIVATE_CANARY_8f149f0a";
 const RELEVANT_TOOLS = new Set([
@@ -82,8 +132,14 @@ interface HookRecord {
   hook?: string;
   tool?: string;
   sessionID?: string;
+  callID?: string;
+  args?: unknown;
   output?: string;
   metadata?: Record<string, unknown>;
+  permission?: string;
+  pattern?: unknown;
+  requestedStatus?: string;
+  status?: string;
 }
 
 interface ToolPart {
@@ -254,8 +310,19 @@ async function record(value) {
   if (!logPath) throw new Error("BETTER_HASHLINE_VERIFY_HOOK_LOG is required");
   await appendFile(logPath, JSON.stringify(value) + "\\n", "utf8");
 }
-export default async function observer() {
+export default async function observer({ client }) {
   return {
+    async event({ event }) {
+      if (!${JSON.stringify(label === "first")}) return;
+      const permission = event?.type === "permission.asked" ? event.properties : undefined;
+      if (!permission || !Array.isArray(permission.metadata?.createdDirectories)) return;
+      const response = await client.postSessionIdPermissionsPermissionId({
+        path: { id: permission.sessionID, permissionID: permission.id },
+        body: { response: "once" },
+      });
+      if (response.error) throw new Error("Failed to approve verification permission");
+      await record({ label: ${JSON.stringify(label)}, hook: "permission.ask", permission: permission.permission, pattern: permission.patterns, metadata: permission.metadata, requestedStatus: "ask", status: "allow" });
+    },
     async "tool.execute.before"(input, output) {
       if (!relevant.has(input.tool)) return;
       await record({ label: ${JSON.stringify(label)}, hook: "before", tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args });
@@ -293,6 +360,205 @@ function collectToolParts(value: unknown) {
     pending.push(...Object.values(record));
   }
   return result;
+}
+
+type FileOperation = "delete_file" | "move_file";
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function hasExactObjectKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+}
+
+const PATCH_SEPARATOR = "===================================================================";
+const EDIT_RECEIPT = "@hashline-edit previous=consumed successor=none next=hashline_read";
+
+function expectedLifecyclePatch(operation: FileOperation): string {
+  const sourcePath = `<fixture>/${
+    operation === "delete_file" ? LIFECYCLE_DELETE_PATH : LIFECYCLE_MOVE_PATH
+  }`;
+  const destinationPath =
+    operation === "move_file" ? `<fixture>/${LIFECYCLE_MOVED_PATH}` : sourcePath;
+  const header = `${operation === "move_file" ? "" : `Index: ${sourcePath}\n`}${PATCH_SEPARATOR}\n--- ${sourcePath}\tbefore\n+++ ${destinationPath}\tafter\n`;
+  return operation === "delete_file" ? `${header}@@ -1,1 +0,0 @@\n-delete exact bytes\n` : header;
+}
+
+function toolPartOperation(part: ToolPart): string | undefined {
+  const input = objectRecord(part.state.input);
+  const operations = Array.isArray(input?.operations) ? input.operations : [];
+  return objectRecord(operations[0])?.op as string | undefined;
+}
+
+function assertSuccessfulFileOperation(
+  part: ToolPart | undefined,
+  scenario: Scenario,
+  expectedWorktree: string,
+  operation: FileOperation,
+  sourcePath: string,
+  sourceCanonicalPath: string,
+  destinationPath?: string,
+  destinationCanonicalPath?: string,
+): asserts part is ToolPart {
+  invariant(part?.state.status === "completed", `Missing completed ${operation} result`);
+  const input = objectRecord(part.state.input);
+  const operations = Array.isArray(input?.operations) ? input.operations : [];
+  const operationInput = objectRecord(operations[0]);
+  const sourceDisplayPath = relative(expectedWorktree, sourceCanonicalPath);
+  const destinationDisplayPath = destinationCanonicalPath
+    ? relative(expectedWorktree, destinationCanonicalPath)
+    : undefined;
+  invariant(
+    input !== undefined &&
+      JSON.stringify(Object.keys(input).sort()) ===
+        JSON.stringify(["filePath", "operations", "snapshotId"]) &&
+      input.filePath === sourcePath &&
+      typeof input.snapshotId === "string" &&
+      /^s_[A-Za-z0-9_-]{22}$/u.test(input.snapshotId) &&
+      operations.length === 1 &&
+      operationInput?.op === operation,
+    `Completed ${operation} input is not exact`,
+  );
+  if (operation === "delete_file") {
+    invariant(
+      JSON.stringify(Object.keys(operationInput).sort()) === JSON.stringify(["op"]),
+      "delete_file input contains unexpected fields",
+    );
+    invariant(
+      typeof part.state.output === "string" &&
+        part.state.output === `Deleted ${sourceDisplayPath}.\n${EDIT_RECEIPT}`,
+      "delete_file output is invalid",
+    );
+  } else {
+    invariant(destinationPath && destinationCanonicalPath, "move_file destination is missing");
+    invariant(
+      JSON.stringify(Object.keys(operationInput).sort()) ===
+        JSON.stringify(["destinationPath", "op"]) &&
+        operationInput.destinationPath === destinationPath,
+      "move_file input is invalid",
+    );
+    invariant(
+      typeof part.state.output === "string" &&
+        part.state.output ===
+          `Moved ${sourceDisplayPath} to ${destinationDisplayPath}.\n${EDIT_RECEIPT}`,
+      "move_file output is invalid",
+    );
+  }
+
+  const metadata = objectRecord(part.state.metadata);
+  invariant(metadata, `Completed ${operation} metadata is missing`);
+  const normalizedPatch = normalizeRendererValue(metadata.diff, [dirname(sourceCanonicalPath)]);
+  const expectedPatch = expectedLifecyclePatch(operation);
+  if (scenario.route === "hashline") {
+    invariant(
+      hasExactObjectKeys(metadata, [
+        ...(operation === "move_file" ? ["destinationPath"] : []),
+        "diff",
+        "operation",
+        "truncated",
+      ]) &&
+        metadata.operation === operation &&
+        metadata.truncated === false &&
+        normalizedPatch === expectedPatch &&
+        (operation === "move_file"
+          ? metadata.destinationPath === destinationCanonicalPath
+          : !("destinationPath" in metadata)),
+      `Hashline ${operation} metadata is invalid`,
+    );
+    return;
+  }
+
+  const marker = objectRecord(metadata.betterHashline);
+  const expectedSchemaSha256 = jsonSha256(
+    openCodeProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+  );
+  invariant(
+    marker !== undefined &&
+      hasExactObjectKeys(marker, [
+        "canonicalPathSha256",
+        ...(operation === "move_file" ? ["destinationPathSha256"] : []),
+        "hostVersion",
+        "operation",
+        "packageVersion",
+        "protocol",
+        "schemaSha256",
+        "surface",
+      ]) &&
+      marker.protocol === NATIVE_ALIAS_PROTOCOL &&
+      marker.packageVersion === PACKAGE_VERSION &&
+      marker.hostVersion === PINNED_OPENCODE_VERSION &&
+      marker.schemaSha256 === expectedSchemaSha256 &&
+      marker.surface === scenario.editTool &&
+      marker.operation === operation &&
+      marker.canonicalPathSha256 === canonicalPathSha256(sourceCanonicalPath) &&
+      (operation === "move_file"
+        ? marker.destinationPathSha256 === canonicalPathSha256(destinationCanonicalPath ?? "")
+        : !("destinationPathSha256" in marker)),
+    `Native ${operation} marker is invalid`,
+  );
+  const diagnostics = objectRecord(metadata.diagnostics);
+  invariant(
+    diagnostics !== undefined && hasExactObjectKeys(diagnostics, []),
+    `Native ${operation} diagnostics are invalid`,
+  );
+  const additions = 0;
+  const deletions = operation === "delete_file" ? 1 : 0;
+  if (scenario.editTool === "apply_patch") {
+    const files = Array.isArray(metadata.files) ? metadata.files : [];
+    const file = objectRecord(files[0]);
+    invariant(
+      hasExactObjectKeys(metadata, ["betterHashline", "diagnostics", "files", "truncated"]) &&
+        metadata.truncated === false &&
+        files.length === 1 &&
+        file !== undefined &&
+        hasExactObjectKeys(file, [
+          "additions",
+          "deletions",
+          "filePath",
+          ...(operation === "move_file" ? ["movePath"] : []),
+          "patch",
+          "relativePath",
+          "type",
+        ]) &&
+        file?.filePath === sourceCanonicalPath &&
+        file.additions === additions &&
+        file.deletions === deletions &&
+        file.relativePath ===
+          (operation === "move_file" ? destinationDisplayPath : sourceDisplayPath)?.replaceAll(
+            "\\",
+            "/",
+          ) &&
+        file.type === (operation === "move_file" ? "move" : "delete") &&
+        (operation === "move_file"
+          ? file.movePath === destinationCanonicalPath
+          : !("movePath" in file)) &&
+        normalizeRendererValue(file.patch, [dirname(sourceCanonicalPath)]) === expectedPatch,
+      `apply_patch ${operation} file metadata is invalid`,
+    );
+  } else {
+    const filediff = objectRecord(metadata.filediff);
+    invariant(
+      hasExactObjectKeys(metadata, [
+        "betterHashline",
+        "diagnostics",
+        "diff",
+        "filediff",
+        "truncated",
+      ]) &&
+        metadata.truncated === false &&
+        filediff !== undefined &&
+        hasExactObjectKeys(filediff, ["additions", "deletions", "file", "patch"]) &&
+        filediff.file === sourceCanonicalPath &&
+        filediff.additions === additions &&
+        filediff.deletions === deletions &&
+        filediff.patch === metadata.diff &&
+        normalizedPatch === expectedPatch,
+      `edit ${operation} file metadata is invalid`,
+    );
+  }
 }
 
 function assertSanitizedExport(value: unknown, secrets: string[]): void {
@@ -341,7 +607,11 @@ function assertSanitizedExport(value: unknown, secrets: string[]): void {
   }
 }
 
-function normalizeRendererValue(value: unknown, roots: string[]): unknown {
+function normalizeRendererValue(
+  value: unknown,
+  roots: string[],
+  pathDigests: ReadonlyMap<string, string> = new Map(),
+): unknown {
   if (typeof value === "string") {
     let result = value;
     const variants = roots
@@ -363,21 +633,51 @@ function normalizeRendererValue(value: unknown, roots: string[]): unknown {
       .filter((root) => root.length > 0)
       .sort((left, right) => right.length - left.length);
     for (const root of variants) result = result.replaceAll(root, "<fixture>");
-    return result.replaceAll(/s_[A-Za-z0-9_-]{22}/gu, "<snapshot>").replaceAll("\r\n", "\n");
+    return result
+      .replaceAll(/s_[A-Za-z0-9_-]{22}/gu, "<snapshot>")
+      .replaceAll("\\", "/")
+      .replaceAll("\r\n", "\n")
+      .replaceAll(/<fixture>\/+/gu, "<fixture>/")
+      .replaceAll(
+        /^((?:---|\+\+\+) )"(<fixture>\/[^"\n]+)"(\t(?:before|after))$/gmu,
+        (_match, prefix: string, path: string, suffix: string) =>
+          `${prefix}${path.replaceAll(/\/+/gu, "/")}${suffix}`,
+      );
   }
-  if (Array.isArray(value)) return value.map((item) => normalizeRendererValue(item, roots));
+  if (Array.isArray(value))
+    return value.map((item) => normalizeRendererValue(item, roots, pathDigests));
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        key === "canonicalPathSha256" ? "<path-sha256>" : normalizeRendererValue(item, roots),
+        key === "canonicalPathSha256" || key === "destinationPathSha256"
+          ? typeof item === "string"
+            ? (pathDigests.get(item) ?? item)
+            : item
+          : normalizeRendererValue(item, roots, pathDigests),
       ]),
     );
   }
   return value;
 }
 
-function normalizedRendererSnapshot(stdout: string, roots: string[]) {
+function normalizedRendererSnapshot(stdout: string, roots: string[], workspaces: string[]) {
+  const pathDigests = new Map<string, string>();
+  for (const workspace of workspaces) {
+    for (const path of [
+      PROBE_PATH,
+      LIFECYCLE_DELETE_PATH,
+      LIFECYCLE_MOVE_PATH,
+      LIFECYCLE_MOVED_PATH,
+      LIFECYCLE_NO_CLOBBER_PATH,
+      LIFECYCLE_OCCUPIED_PATH,
+    ]) {
+      pathDigests.set(
+        canonicalPathSha256(resolve(workspace, path)),
+        canonicalPathSha256(`<fixture>/${path}`),
+      );
+    }
+  }
   const events = stdout
     .split(/\r?\n/gu)
     .filter((line) => line.trim().length > 0)
@@ -397,9 +697,10 @@ function normalizedRendererSnapshot(stdout: string, roots: string[]) {
           ),
         },
         roots,
+        pathDigests,
       );
     });
-  invariant(events.length === 3, `Expected three renderer tool events, got ${events.length}`);
+  invariant(events.length === 9, `Expected nine renderer tool events, got ${events.length}`);
   const result = canonicalJson(events);
   invariant(result.length <= 8192, "Renderer output exceeded the verification snapshot limit");
   return result;
@@ -496,6 +797,14 @@ async function verifyScenario(
     const workspace = join(root, "workspace");
     const fixture = join(workspace, "probe.txt");
     const malformedFixture = join(workspace, "malformed.txt");
+    const deleteFixture = join(workspace, LIFECYCLE_DELETE_PATH);
+    const moveFixture = join(workspace, LIFECYCLE_MOVE_PATH);
+    const movedFixture = join(workspace, LIFECYCLE_MOVED_PATH);
+    const noClobberFixture = join(workspace, LIFECYCLE_NO_CLOBBER_PATH);
+    const occupiedFixture = join(workspace, LIFECYCLE_OCCUPIED_PATH);
+    const nestedFixture = join(workspace, NESTED_CREATE_PATH);
+    const readbackFixture = join(workspace, READBACK_PATH);
+    const compositionFixture = join(workspace, COMPOSITION_PATH);
     const hookLog = join(root, "hooks.jsonl");
     const providerLog = join(root, "provider.jsonl");
     const firstObserver = join(root, "observer-first.ts");
@@ -522,9 +831,17 @@ async function verifyScenario(
         betterPlugin,
       ].map((directory) => mkdir(directory, { recursive: true })),
     );
+    await rm(movedFixture, { force: true });
+    await rm(join(workspace, "nested"), { force: true, recursive: true });
     await Promise.all([
       writeFile(fixture, INITIAL_BYTES, "utf8"),
       writeFile(malformedFixture, `${PRIVATE_CANARY}\n`, "utf8"),
+      writeFile(deleteFixture, LIFECYCLE_DELETE_BYTES, "utf8"),
+      writeFile(moveFixture, LIFECYCLE_MOVE_BYTES, "utf8"),
+      writeFile(noClobberFixture, LIFECYCLE_NO_CLOBBER_SOURCE_BYTES, "utf8"),
+      writeFile(occupiedFixture, LIFECYCLE_NO_CLOBBER_DESTINATION_BYTES, "utf8"),
+      writeFile(readbackFixture, READBACK_BYTES, "utf8"),
+      writeFile(compositionFixture, COMPOSITION_BYTES, "utf8"),
       writeFile(hookLog, "", "utf8"),
       writeFile(providerLog, "", "utf8"),
       writeFile(firstObserver, observerSource("first"), "utf8"),
@@ -665,6 +982,253 @@ async function verifyScenario(
                     newString: "changed",
                   },
                 },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Exercise successful file lifecycle operations")) {
+          const prompt = "Exercise successful file lifecycle operations";
+          const phaseHistory = serialized.slice(serialized.lastIndexOf(prompt));
+          if (phaseHistory.includes("Moved ") && phaseHistory.includes(LIFECYCLE_MOVED_PATH)) {
+            return streamResponse(
+              { kind: "text", text: "File lifecycle operations verified." },
+              scenario.modelID,
+            );
+          }
+          const snapshotId = phaseHistory.match(/s_[A-Za-z0-9_-]{22}/gu)?.at(-1);
+          if (phaseHistory.includes("Deleted ") && phaseHistory.includes(LIFECYCLE_DELETE_PATH)) {
+            if (phaseHistory.includes(LIFECYCLE_MOVE_PATH) && snapshotId) {
+              return streamResponse(
+                {
+                  kind: "tool",
+                  id: "call_file-lifecycle_move",
+                  name: scenario.editTool,
+                  args: {
+                    filePath: LIFECYCLE_MOVE_PATH,
+                    snapshotId,
+                    operations: [{ op: "move_file", destinationPath: LIFECYCLE_MOVED_PATH }],
+                  },
+                },
+                scenario.modelID,
+              );
+            }
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_file-lifecycle_read-move",
+                name: "hashline_read",
+                args: { filePath: LIFECYCLE_MOVE_PATH },
+              },
+              scenario.modelID,
+            );
+          }
+          if (snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_file-lifecycle_delete",
+                name: scenario.editTool,
+                args: {
+                  filePath: LIFECYCLE_DELETE_PATH,
+                  snapshotId,
+                  operations: [{ op: "delete_file" }],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_file-lifecycle_read-delete",
+              name: "hashline_read",
+              args: { filePath: LIFECYCLE_DELETE_PATH },
+            },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Reject one no-clobber file move")) {
+          const prompt = "Reject one no-clobber file move";
+          const phaseHistory = serialized.slice(serialized.lastIndexOf(prompt));
+          if (phaseHistory.includes("TARGET_EXISTS")) {
+            return streamResponse(
+              { kind: "text", text: "No-clobber move verified after TARGET_EXISTS." },
+              scenario.modelID,
+            );
+          }
+          const snapshotId = phaseHistory.match(/s_[A-Za-z0-9_-]{22}/gu)?.at(-1);
+          if (snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_file-lifecycle_no-clobber",
+                name: scenario.editTool,
+                args: {
+                  filePath: LIFECYCLE_NO_CLOBBER_PATH,
+                  snapshotId,
+                  operations: [{ op: "move_file", destinationPath: LIFECYCLE_OCCUPIED_PATH }],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_file-lifecycle_read-no-clobber",
+              name: "hashline_read",
+              args: { filePath: LIFECYCLE_NO_CLOBBER_PATH },
+            },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Create one nested file through one approved parent plan")) {
+          if (serialized.includes("Created 2 parent directories and the file")) {
+            return streamResponse(
+              { kind: "text", text: "Nested parent creation verified." },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_hashline-write_nested",
+              name: "hashline_write",
+              args: {
+                filePath: NESTED_CREATE_PATH,
+                content: NESTED_CREATE_BYTES,
+                createParents: true,
+              },
+            },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Exercise one explicit contiguous edit readback window")) {
+          const prompt = "Exercise one explicit contiguous edit readback window";
+          const phaseHistory = serialized.slice(serialized.lastIndexOf(prompt));
+          const snapshotId = phaseHistory.match(/s_[A-Za-z0-9_-]{22}/gu)?.at(-1);
+          if (
+            phaseHistory.includes("readback-inside") &&
+            phaseHistory.includes("Applied 1 operation")
+          ) {
+            return streamResponse(
+              { kind: "text", text: "Contiguous edit readback verified." },
+              scenario.modelID,
+            );
+          }
+          if (phaseHistory.includes("RANGE_NOT_FULLY_ISSUED") && snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_readback-inside",
+                name: scenario.editTool,
+                args: {
+                  filePath: READBACK_PATH,
+                  snapshotId,
+                  operations: [
+                    {
+                      op: "replace",
+                      startLine: 8,
+                      endLine: 8,
+                      lines: ["readback-inside"],
+                    },
+                  ],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          if (phaseHistory.includes("readbackOffset") && snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_readback-outside",
+                name: scenario.editTool,
+                args: {
+                  filePath: READBACK_PATH,
+                  snapshotId,
+                  operations: [
+                    {
+                      op: "replace",
+                      startLine: 13,
+                      endLine: 13,
+                      lines: ["readback-outside"],
+                    },
+                  ],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          if (snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_readback-window",
+                name: scenario.editTool,
+                args: {
+                  filePath: READBACK_PATH,
+                  snapshotId,
+                  operations: [
+                    {
+                      op: "replace",
+                      startLine: 10,
+                      endLine: 10,
+                      lines: ["readback-changed"],
+                    },
+                  ],
+                  readback: true,
+                  readbackOffset: 8,
+                  readbackLimit: 5,
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_hashline-read_readback",
+              name: "hashline_read",
+              args: { filePath: READBACK_PATH },
+            },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Compose one move range with one contained replacement")) {
+          const prompt = "Compose one move range with one contained replacement";
+          const phaseHistory = serialized.slice(serialized.lastIndexOf(prompt));
+          if (phaseHistory.includes("Applied 2 operations")) {
+            return streamResponse(
+              { kind: "text", text: "Composite move and replacement verified." },
+              scenario.modelID,
+            );
+          }
+          const snapshotId = phaseHistory.match(/s_[A-Za-z0-9_-]{22}/gu)?.at(-1);
+          if (snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_composition",
+                name: scenario.editTool,
+                args: {
+                  filePath: COMPOSITION_PATH,
+                  snapshotId,
+                  operations: [
+                    { op: "move_range", startLine: 2, endLine: 3, afterLine: 13 },
+                    { op: "replace", startLine: 5, endLine: 5, lines: ["R5"] },
+                  ],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_hashline-read_composition",
+              name: "hashline_read",
+              args: { filePath: COMPOSITION_PATH },
+            },
             scenario.modelID,
           );
         }
@@ -998,6 +1562,517 @@ async function verifyScenario(
     await writeFile(hookLog, "", "utf8");
     environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
 
+    const [canonicalWorkspace, lifecycleDeleteCanonicalPath, lifecycleMoveCanonicalPath] =
+      await Promise.all([realpath(workspace), realpath(deleteFixture), realpath(moveFixture)]);
+    const expectedWorktree = parse(canonicalWorkspace).root;
+    const lifecycleMovedCanonicalPath = join(canonicalWorkspace, relative(workspace, movedFixture));
+    const fixtureRoots = [workspace, canonicalWorkspace];
+    const lifecycleRequestStart = providerRequests.length;
+    const lifecycleRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline file lifecycle verification ${scenario.route}`,
+        "Exercise successful file lifecycle operations with complete reads, one delete, and one move.",
+      ],
+      workspace,
+      environment,
+    );
+    invariant(
+      lifecycleRun.stdout.includes("File lifecycle operations verified"),
+      "Successful file lifecycle session did not finish",
+    );
+    invariant(
+      providerRequests.length === lifecycleRequestStart + 5,
+      "Successful file lifecycle session made unexpected provider requests",
+    );
+    invariant(!(await Bun.file(deleteFixture).exists()), "delete_file left its source present");
+    invariant(!(await Bun.file(moveFixture).exists()), "move_file left its source present");
+    invariant(await Bun.file(movedFixture).exists(), "move_file did not create its destination");
+    invariant(
+      (await readFile(movedFixture, "utf8")) === LIFECYCLE_MOVE_BYTES,
+      "move_file changed destination bytes",
+    );
+
+    const lifecycleHooks = (await readFile(hookLog, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as HookRecord);
+    const expectedLifecycleSequence = [
+      "hashline_read",
+      scenario.editTool,
+      "hashline_read",
+      scenario.editTool,
+    ].flatMap((toolName) => [
+      `first:before:${toolName}`,
+      `last:before:${toolName}`,
+      `first:after:${toolName}`,
+      `last:after:${toolName}`,
+    ]);
+    invariant(
+      JSON.stringify(lifecycleHooks.map(({ label, hook, tool }) => `${label}:${hook}:${tool}`)) ===
+        JSON.stringify(expectedLifecycleSequence),
+      "Successful file lifecycle hook order is invalid",
+    );
+    const lifecycleEditHooks = lifecycleHooks.filter(
+      ({ label, hook, tool }) => label === "last" && hook === "after" && tool === scenario.editTool,
+    );
+    const lifecycleSessionID = lifecycleEditHooks[0]?.sessionID;
+    invariant(
+      lifecycleEditHooks.length === 2 &&
+        typeof lifecycleSessionID === "string" &&
+        lifecycleEditHooks.every(({ sessionID: candidate }) => candidate === lifecycleSessionID),
+      "Successful file lifecycle operations did not share one session",
+    );
+    const lifecycleExported = await run(
+      [opencode, "export", lifecycleSessionID],
+      workspace,
+      environment,
+    );
+    const lifecycleParts = collectToolParts(JSON.parse(lifecycleExported.stdout) as unknown).filter(
+      (part) => part.tool === scenario.editTool && part.state.status === "completed",
+    );
+    invariant(lifecycleParts.length === 2, "File lifecycle export is missing completed operations");
+    const deletePart = lifecycleParts.find((part) => toolPartOperation(part) === "delete_file");
+    const movePart = lifecycleParts.find((part) => toolPartOperation(part) === "move_file");
+    assertSuccessfulFileOperation(
+      deletePart,
+      scenario,
+      expectedWorktree,
+      "delete_file",
+      LIFECYCLE_DELETE_PATH,
+      lifecycleDeleteCanonicalPath,
+    );
+    assertSuccessfulFileOperation(
+      movePart,
+      scenario,
+      expectedWorktree,
+      "move_file",
+      LIFECYCLE_MOVE_PATH,
+      lifecycleMoveCanonicalPath,
+      LIFECYCLE_MOVED_PATH,
+      lifecycleMovedCanonicalPath,
+    );
+    if (scenario.surface === "native-aliases") {
+      const lifecycleSchemaSha256 = jsonSha256(
+        openCodeProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
+      );
+      const lifecycleAttestation = await attestSessionExport(
+        lifecycleExported.stdout,
+        workspace,
+        lifecycleSessionID,
+        expectedWorktree,
+      );
+      assertNativeAliasHistory(
+        lifecycleAttestation.messages,
+        {
+          packageVersion: PACKAGE_VERSION,
+          schemaSha256: lifecycleSchemaSha256,
+          hostVersion: PINNED_OPENCODE_VERSION,
+          worktree: lifecycleAttestation.worktree,
+        },
+        {
+          sessionId: lifecycleAttestation.sessionId,
+          directory: lifecycleAttestation.directory,
+        },
+      );
+    }
+
+    const noClobberRequestStart = providerRequests.length;
+    const noClobberRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline no-clobber verification ${scenario.route}`,
+        "Reject one no-clobber file move after a complete read, then stop after the rejection.",
+      ],
+      workspace,
+      environment,
+    );
+    invariant(
+      noClobberRun.stdout.includes("No-clobber move verified") &&
+        noClobberRun.stdout.includes("TARGET_EXISTS"),
+      "No-clobber file move did not reject the occupied destination",
+    );
+    invariant(
+      providerRequests.length === noClobberRequestStart + 3,
+      "No-clobber file move made unexpected provider requests",
+    );
+    invariant(
+      (await readFile(noClobberFixture, "utf8")) === LIFECYCLE_NO_CLOBBER_SOURCE_BYTES,
+      "Rejected no-clobber move changed or removed its source",
+    );
+    invariant(
+      (await readFile(occupiedFixture, "utf8")) === LIFECYCLE_NO_CLOBBER_DESTINATION_BYTES,
+      "Rejected no-clobber move changed its destination",
+    );
+    await writeFile(hookLog, "", "utf8");
+
+    environment.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      ...config,
+      permission: { ...config.permission, edit: "ask" },
+    });
+    const nestedRequestStart = providerRequests.length;
+    const nestedRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline nested creation verification ${scenario.route}`,
+        "Create one nested file through one approved parent plan, then stop.",
+      ],
+      workspace,
+      environment,
+    );
+    environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
+    invariant(
+      nestedRun.stdout.includes("Nested parent creation verified"),
+      `Nested parent creation did not finish: ${nestedRun.stdout.slice(-4096)}`,
+    );
+    invariant(
+      providerRequests.length === nestedRequestStart + 2,
+      "Nested parent creation made unexpected provider requests",
+    );
+    const nestedTools = providerRequests[nestedRequestStart]?.tools ?? [];
+    const effectiveWrite = nestedTools.find((entry) => entry.function?.name === "hashline_write");
+    invariant(effectiveWrite?.function?.parameters, "Effective hashline_write schema is missing");
+    const expectedWriteSchema = providerSchemaProjection(
+      tool.schema.toJSONSchema(hashlineWriteArgumentsSchema),
+    );
+    const effectiveWriteSchema = providerSchemaProjection(effectiveWrite.function.parameters);
+    const writeSchemaSha256 = jsonSha256(expectedWriteSchema);
+    invariant(
+      jsonSha256(effectiveWriteSchema) === writeSchemaSha256,
+      "Effective hashline_write schema does not match Better Hashline",
+    );
+    invariant(
+      hashlineWriteArgumentsSchema.safeParse({
+        filePath: NESTED_CREATE_PATH,
+        content: NESTED_CREATE_BYTES,
+        createParents: true,
+      }).success &&
+        !hashlineWriteArgumentsSchema.safeParse({
+          filePath: NESTED_CREATE_PATH,
+          content: NESTED_CREATE_BYTES,
+          createParents: "true",
+        }).success,
+      "hashline_write createParents validation changed",
+    );
+
+    const nestedHooks = (await readFile(hookLog, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as HookRecord);
+    const permissionHooks = nestedHooks.filter(({ hook }) => hook === "permission.ask");
+    invariant(permissionHooks.length === 1, "Nested creation did not use one permission envelope");
+    const permissionHook = permissionHooks[0];
+    invariant(
+      permissionHook?.permission === "edit" &&
+        permissionHook.requestedStatus === "ask" &&
+        permissionHook.status === "allow",
+      "Nested creation permission envelope was not explicitly approved",
+    );
+    const normalizedPermissionPattern = normalizeRendererValue(
+      permissionHook.pattern,
+      fixtureRoots,
+    );
+    const normalizedPermissionMetadata = normalizeRendererValue(
+      permissionHook.metadata,
+      fixtureRoots,
+    );
+    const expectedPermissionPatterns = [
+      `<fixture>/${NESTED_CREATE_PATH}`,
+      "<fixture>/nested",
+      "<fixture>/nested/inner",
+    ];
+    const expectedPermissionMetadata = {
+      filepath: `<fixture>/${NESTED_CREATE_PATH}`,
+      filepaths: expectedPermissionPatterns,
+      diff: NESTED_CREATE_DIFF,
+      createdDirectories: ["<fixture>/nested", "<fixture>/nested/inner"],
+    };
+    invariant(
+      canonicalJson(normalizedPermissionPattern) === canonicalJson(expectedPermissionPatterns) &&
+        canonicalJson(normalizedPermissionMetadata) === canonicalJson(expectedPermissionMetadata),
+      `Nested creation permission envelope changed: ${canonicalJson({ pattern: normalizedPermissionPattern, metadata: normalizedPermissionMetadata })}`,
+    );
+    const nestedAfter = nestedHooks.find(
+      ({ label, hook, tool }) => label === "last" && hook === "after" && tool === "hashline_write",
+    );
+    invariant(
+      typeof nestedAfter?.sessionID === "string",
+      "Nested creation session was not observed",
+    );
+    const nestedExport = await run(
+      [opencode, "export", nestedAfter.sessionID],
+      workspace,
+      environment,
+    );
+    const nestedPart = collectToolParts(JSON.parse(nestedExport.stdout) as unknown).find(
+      (part) => part.tool === "hashline_write" && part.state.status === "completed",
+    );
+    const expectedNestedInput = {
+      filePath: NESTED_CREATE_PATH,
+      content: NESTED_CREATE_BYTES,
+      createParents: true,
+    };
+    const expectedNestedMetadata = {
+      diff: NESTED_CREATE_DIFF,
+      createdDirectories: ["<fixture>/nested", "<fixture>/nested/inner"],
+      created: true,
+      truncated: false,
+    };
+    const normalizedNestedInput = normalizeRendererValue(nestedPart?.state.input, fixtureRoots);
+    const normalizedNestedMetadata = normalizeRendererValue(
+      nestedPart?.state.metadata,
+      fixtureRoots,
+    );
+    invariant(
+      nestedPart?.state.output ===
+        "Created 2 parent directories and the file. Use hashline_read before editing it." &&
+        canonicalJson(normalizedNestedInput) === canonicalJson(expectedNestedInput) &&
+        canonicalJson(normalizedNestedMetadata) === canonicalJson(expectedNestedMetadata),
+      `Exported nested creation evidence changed: ${canonicalJson({ input: normalizedNestedInput, metadata: normalizedNestedMetadata, output: nestedPart?.state.output })}`,
+    );
+    const nestedTree = await evaluateExactTree(join(workspace, "nested"), {
+      expectedFiles: { "inner/new.txt": NESTED_CREATE_BYTES },
+    });
+    invariant(
+      nestedTree.exactFiles,
+      `Nested creation tree is not exact: ${nestedTree.mismatches.join("; ")}`,
+    );
+    const nestedCreationEvidence = canonicalJson({
+      creation: {
+        input: normalizedNestedInput,
+        metadata: normalizedNestedMetadata,
+        output: nestedPart.state.output,
+        status: nestedPart.state.status,
+        tool: nestedPart.tool,
+      },
+      permission: {
+        approved: true,
+        count: permissionHooks.length,
+        metadata: expectedPermissionMetadata,
+        patterns: normalizedPermissionPattern,
+        permission: permissionHook.permission,
+      },
+      tree: {
+        directories: ["nested", "nested/inner"],
+        files: [{ bytes: await readFile(nestedFixture, "utf8"), path: NESTED_CREATE_PATH }],
+      },
+    });
+    const nestedCreationEvidenceSha256 = sha256(nestedCreationEvidence);
+    await writeFile(hookLog, "", "utf8");
+
+    const readbackRequestStart = providerRequests.length;
+    const readbackRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline readback verification ${scenario.route}`,
+        "Exercise one explicit contiguous edit readback window, reject line 13, then edit line 8.",
+      ],
+      workspace,
+      environment,
+    );
+    invariant(
+      readbackRun.stdout.includes("Contiguous edit readback verified") &&
+        readbackRun.stdout.includes("RANGE_NOT_FULLY_ISSUED"),
+      `Explicit edit readback did not prove its issued boundary: ${readbackRun.stdout.slice(-4096)}`,
+    );
+    invariant(
+      providerRequests.length === readbackRequestStart + 5,
+      "Explicit edit readback made unexpected provider requests",
+    );
+    invariant(
+      (await readFile(readbackFixture, "utf8")) === READBACK_FINAL_BYTES,
+      "Explicit edit readback produced unexpected bytes",
+    );
+    const readbackHooks = (await readFile(hookLog, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as HookRecord);
+    const readbackSessionID = readbackHooks.findLast(
+      ({ label, hook, tool }) => label === "last" && hook === "after" && tool === scenario.editTool,
+    )?.sessionID;
+    invariant(typeof readbackSessionID === "string", "Readback session was not observed");
+    const readbackExport = await run(
+      [opencode, "export", readbackSessionID],
+      workspace,
+      environment,
+    );
+    const readbackParts = collectToolParts(JSON.parse(readbackExport.stdout) as unknown).filter(
+      (part) => part.tool === scenario.editTool,
+    );
+    invariant(readbackParts.length === 3, "Readback export is missing edit attempts");
+    const normalizedReadbackParts = readbackParts.map((part) => ({
+      part,
+      input: normalizeRendererValue(part.state.input, fixtureRoots),
+    }));
+    const readbackPart = normalizedReadbackParts.find(({ input }) =>
+      canonicalJson(input).includes('"readbackOffset":8'),
+    );
+    const outsidePart = normalizedReadbackParts.find(({ input }) =>
+      canonicalJson(input).includes('"readback-outside"'),
+    );
+    const insidePart = normalizedReadbackParts.find(({ input }) =>
+      canonicalJson(input).includes('"readback-inside"'),
+    );
+    const deliveredLines = READBACK_EDITED_LINES.slice(7, 12);
+    const expectedReadbackOutput = [
+      "Applied 1 operation.",
+      "@hashline-edit previous=consumed successor=attached",
+      `@hashline snapshot=<snapshot> sha256=${sha256(READBACK_EDITED_BYTES).slice(0, 12)} lines=20 partial=true`,
+      ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
+      "@more offset=13",
+    ].join("\n");
+    const normalizedReadbackOutput = normalizeRendererValue(
+      readbackPart?.part.state.output,
+      fixtureRoots,
+    );
+    invariant(
+      readbackPart?.part.state.status === "completed" &&
+        normalizedReadbackOutput === expectedReadbackOutput &&
+        !Object.hasOwn(readbackPart.part.state.metadata ?? {}, "hashlinePending"),
+      "Exported readback window was not exactly delivered and activated",
+    );
+    invariant(
+      outsidePart?.part.state.status === "error" &&
+        outsidePart.part.state.error?.includes("RANGE_NOT_FULLY_ISSUED") &&
+        insidePart?.part.state.status === "completed" &&
+        insidePart.part.state.output ===
+          "Applied 1 operation.\n@hashline-edit previous=consumed successor=none next=hashline_read",
+      "Exported readback issuance boundary changed",
+    );
+    const readbackEvidence = canonicalJson({
+      delivered: { endLine: 12, lines: deliveredLines, startLine: 8 },
+      finalBytes: await readFile(readbackFixture, "utf8"),
+      issuance: {
+        inside: {
+          input: insidePart.input,
+          output: insidePart.part.state.output,
+          status: insidePart.part.state.status,
+        },
+        outside: {
+          errorCode: "RANGE_NOT_FULLY_ISSUED",
+          input: outsidePart.input,
+          status: outsidePart.part.state.status,
+        },
+      },
+      readback: {
+        input: readbackPart.input,
+        output: normalizedReadbackOutput,
+        pendingRemoved: true,
+        status: readbackPart.part.state.status,
+        tool: readbackPart.part.tool,
+      },
+    });
+    const readbackEvidenceSha256 = sha256(readbackEvidence);
+    await writeFile(hookLog, "", "utf8");
+
+    const compositionRequestStart = providerRequests.length;
+    const compositionRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline composition verification ${scenario.route}`,
+        "Compose one move range with one contained replacement, then stop.",
+      ],
+      workspace,
+      environment,
+    );
+    invariant(
+      compositionRun.stdout.includes("Composite move and replacement verified"),
+      `Composite edit did not finish: ${compositionRun.stdout.slice(-4096)}`,
+    );
+    invariant(
+      providerRequests.length === compositionRequestStart + 3,
+      "Composite edit made unexpected provider requests",
+    );
+    invariant(
+      (await readFile(compositionFixture, "utf8")) === COMPOSITION_FINAL_BYTES,
+      "Composite edit produced unexpected bytes",
+    );
+    const compositionHooks = (await readFile(hookLog, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as HookRecord);
+    const compositionSessionID = compositionHooks.find(
+      ({ label, hook, tool }) => label === "last" && hook === "after" && tool === scenario.editTool,
+    )?.sessionID;
+    invariant(typeof compositionSessionID === "string", "Composite edit session was not observed");
+    const compositionExport = await run(
+      [opencode, "export", compositionSessionID],
+      workspace,
+      environment,
+    );
+    const compositionPart = collectToolParts(JSON.parse(compositionExport.stdout) as unknown).find(
+      (part) => part.tool === scenario.editTool && part.state.status === "completed",
+    );
+    const normalizedCompositionInput = normalizeRendererValue(
+      compositionPart?.state.input,
+      fixtureRoots,
+    );
+    const expectedCompositionInput = {
+      filePath: COMPOSITION_PATH,
+      operations: [
+        { op: "move_range", startLine: 2, endLine: 3, afterLine: 13 },
+        { op: "replace", startLine: 5, endLine: 5, lines: ["R5"] },
+      ],
+      snapshotId: "<snapshot>",
+    };
+    invariant(
+      compositionPart?.state.output ===
+        "Applied 2 operations.\n@hashline-edit previous=consumed successor=none next=hashline_read" &&
+        canonicalJson(normalizedCompositionInput) === canonicalJson(expectedCompositionInput),
+      "Exported composite edit evidence changed",
+    );
+    const compositionEvidence = canonicalJson({
+      edit: {
+        input: normalizedCompositionInput,
+        output: compositionPart.state.output,
+        status: compositionPart.state.status,
+        tool: compositionPart.tool,
+      },
+      finalBytes: await readFile(compositionFixture, "utf8"),
+    });
+    const compositionEvidenceSha256 = sha256(compositionEvidence);
+    await writeFile(hookLog, "", "utf8");
+
     const mainRequestStart = providerRequests.length;
     const firstRun = await run(
       [
@@ -1159,7 +2234,6 @@ async function verifyScenario(
 
     const exported = await run([opencode, "export", sessionID], workspace, environment);
     const exportValue = JSON.parse(exported.stdout) as unknown;
-    const expectedWorktree = parse(resolve(workspace)).root;
     const attestedExport = await attestSessionExport(
       exported.stdout,
       workspace,
@@ -1205,7 +2279,7 @@ async function verifyScenario(
           packageVersion: PACKAGE_VERSION,
           schemaSha256,
           hostVersion: PINNED_OPENCODE_VERSION,
-          allowedPathRoot: workspace,
+          allowedPathRoot: canonicalWorkspace,
           expectedDirectory: workspace,
           expectedWorktree,
         },
@@ -1381,6 +2455,12 @@ async function verifyScenario(
       files: {},
       expectedFiles: {
         "malformed.txt": `${PRIVATE_CANARY}\n`,
+        [LIFECYCLE_MOVED_PATH]: LIFECYCLE_MOVE_BYTES,
+        [LIFECYCLE_NO_CLOBBER_PATH]: LIFECYCLE_NO_CLOBBER_SOURCE_BYTES,
+        [LIFECYCLE_OCCUPIED_PATH]: LIFECYCLE_NO_CLOBBER_DESTINATION_BYTES,
+        [NESTED_CREATE_PATH]: NESTED_CREATE_BYTES,
+        [READBACK_PATH]: READBACK_FINAL_BYTES,
+        [COMPOSITION_PATH]: COMPOSITION_FINAL_BYTES,
         "probe.txt": RENDERED_BYTES,
       },
     });
@@ -1390,18 +2470,21 @@ async function verifyScenario(
     );
 
     const metadataSnapshot = normalizedRendererSnapshot(
-      `${malformedRun.stdout}\n${firstRun.stdout}`,
-      [root, workspace],
+      `${malformedRun.stdout}\n${lifecycleRun.stdout}\n${noClobberRun.stdout}\n${firstRun.stdout}`,
+      [root, await realpath(root), ...fixtureRoots],
+      fixtureRoots,
     );
     return {
       route: scenario.route,
       model: providerModel,
       editTool: scenario.editTool,
       schemaSha256,
+      writeSchemaSha256,
       ...(fingerprint ? { protocolFingerprint: fingerprint } : {}),
       finalBytesSha256: sha256(RENDERED_BYTES),
       providerRequests: providerRequests.length,
       malformedRejected: true,
+      fileOperationsVerified: true,
       continuationVerified: true,
       forkVerified: true,
       exportVerified: true,
@@ -1415,6 +2498,12 @@ async function verifyScenario(
       retryProviderRequests,
       metadataSnapshotSha256: sha256(metadataSnapshot),
       metadataSnapshot,
+      nestedCreationEvidenceSha256,
+      nestedCreationEvidence,
+      readbackEvidenceSha256,
+      readbackEvidence,
+      compositionEvidenceSha256,
+      compositionEvidence,
       rendererSnapshotSha256: rendererSha256,
       rendererSnapshot,
     };
@@ -1473,6 +2562,9 @@ export async function verifyInstallation(
     hostVersion,
     protocol: NATIVE_ALIAS_PROTOCOL,
     rollbackVerified: surface === "all" && cases.at(-1)?.route === "hashline" && cases.length === 3,
+    fileOperationsVerified: cases.every(
+      (verificationCase) => verificationCase.fileOperationsVerified,
+    ),
     modelRoutingVerified:
       surface === "hashline" ||
       cases.some((verificationCase) => verificationCase.modelRoutingVerified),

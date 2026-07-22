@@ -20,6 +20,7 @@ import { tool } from "@opencode-ai/plugin";
 import { openCodeProviderSchema } from "../../src/native-alias.js";
 import { hashlineEditArgumentsSchema } from "../../src/plugin.js";
 import { jsonSha256 } from "../../src/presentation.js";
+import { assertFullVerificationReport } from "../../src/verification-report.js";
 import {
   type AdapterId,
   type AdapterSetId,
@@ -50,7 +51,11 @@ import {
   writeJsonAtomic,
 } from "./evidence.js";
 import { inspectMutationLedger } from "./ledger.js";
-import { verifyNativeAliasOracleFixture } from "./oracle-fixture.js";
+import {
+  excludesSensitiveJsonPaths,
+  resolveSensitivePathAliases,
+  verifyNativeAliasOracleFixture,
+} from "./oracle-fixture.js";
 import {
   assertNativeAliasPreflightReceipt,
   NATIVE_ALIAS_PREFLIGHT_SCHEMA_VERSION,
@@ -105,12 +110,6 @@ async function captureSessionExport(
     success:
       result.exitCode === 0 && !result.timedOut && !result.stdoutOverflow && !result.stderrOverflow,
   };
-}
-
-function excludesSensitivePaths(value: string, paths: string[]): boolean {
-  return paths.every(
-    (path) => !value.includes(path) && !value.includes(path.replaceAll("\\", "/")),
-  );
 }
 
 const MAX_AGENT_STEPS = nativeAliasPilotV7.maxAgentSteps;
@@ -183,6 +182,16 @@ async function run(command: string[], cwd: string): Promise<string> {
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function canonicalDirectory(path: string, label: string): Promise<string> {
+  try {
+    const canonical = await realpath(path);
+    if (!(await lstat(canonical)).isDirectory()) throw new Error();
+    return canonical;
+  } catch {
+    throw new Error(`${label} could not be canonicalized as a directory.`);
+  }
 }
 
 async function readBoundedRegularFile(
@@ -543,6 +552,7 @@ async function verifyAdapterIsolation(input: {
   packageDirectory: string;
   packageUrl: string;
   adapterSet: AdapterSetId;
+  hostVersion: string;
 }) {
   const root = await mkdtemp(join(tmpdir(), "better-hashline-preflight-"));
   try {
@@ -590,19 +600,31 @@ async function verifyAdapterIsolation(input: {
         `Packed native-alias preflight failed:\n${verification.stderr || verification.stdout}`,
       );
     }
-    const report = JSON.parse(verification.stdout) as { ok?: boolean; cases?: unknown[] };
-    const expectedCases = input.adapterSet === "native-aliases-v1" ? 3 : 1;
-    if (!report.ok || report.cases?.length !== expectedCases) {
+    const packageVersion = JSON.parse(
+      await readFile(join(input.packageDirectory, "package.json"), "utf8"),
+    ).version as string;
+    const report = JSON.parse(verification.stdout) as {
+      ok?: boolean;
+      cases?: unknown[];
+      hostVersion?: unknown;
+    };
+    const expectedCases = input.adapterSet.startsWith("native-aliases-") ? 3 : 1;
+    if (
+      !report.ok ||
+      report.cases?.length !== expectedCases ||
+      report.hostVersion !== input.hostVersion
+    ) {
       throw new Error(`Packed verifier did not produce ${expectedCases} expected route(s).`);
+    }
+    if (input.adapterSet.startsWith("native-aliases-")) {
+      assertFullVerificationReport(report, packageVersion, input.hostVersion);
     }
     return {
       verifierReport: report,
       oracleFixture: await verifyNativeAliasOracleFixture({
-        packageVersion: JSON.parse(
-          await readFile(join(input.packageDirectory, "package.json"), "utf8"),
-        ).version as string,
+        packageVersion,
         schemaSha256: EDIT_SCHEMA_SHA256,
-        hostVersion: "1.18.3",
+        hostVersion: report.hostVersion,
       }),
     };
   } finally {
@@ -612,13 +634,22 @@ async function verifyAdapterIsolation(input: {
 
 function requiredTreatmentTools(task: ModelTask): string[] {
   const required = new Set<string>();
+  const moveDestinations = new Set(
+    (task.fileOperations ?? [])
+      .filter((operation) => operation.op === "move_file")
+      .map((operation) => operation.destinationPath),
+  );
   for (const [path, expected] of Object.entries(task.expectedFiles)) {
     const original = task.files[path];
-    if (original === undefined) required.add("hashline_write");
-    else if (original !== expected) {
+    if (original === undefined && !moveDestinations.has(path)) required.add("hashline_write");
+    else if (original !== undefined && original !== expected) {
       required.add("hashline_read");
       required.add("hashline_edit");
     }
+  }
+  if (task.fileOperations?.length) {
+    required.add("hashline_read");
+    required.add("hashline_edit");
   }
   return [...required].sort();
 }
@@ -777,6 +808,7 @@ async function runSession(input: {
   authFile?: string;
   passthroughEnvironment: readonly string[];
   output: string;
+  outputPathAliases: readonly string[];
   timeoutMs: number;
   providerConfig?: Record<string, unknown>;
   outputTokenLimit?: number;
@@ -787,11 +819,20 @@ async function runSession(input: {
   hostVersion: string;
   scheduleIndex: number;
 }) {
-  const fixture = await realpath(await mkdtemp(join(tmpdir(), "better-hashline-model-")));
-  const environmentRoot = await mkdtemp(join(tmpdir(), "better-hashline-env-"));
+  const fixtureLexical = await mkdtemp(join(tmpdir(), "better-hashline-model-"));
+  const fixture = await canonicalDirectory(fixtureLexical, "Benchmark fixture");
+  const environmentRootLexical = await mkdtemp(join(tmpdir(), "better-hashline-env-"));
+  const environmentRoot = await canonicalDirectory(environmentRootLexical, "Benchmark environment");
   const modelName = input.model.replaceAll(/[^A-Za-z0-9_-]+/gu, "_");
   const rawName = `${String(input.scheduleIndex).padStart(3, "0")}.${modelName}.${input.task.id}.${input.adapter}.${input.repeat}`;
   try {
+    const sensitivePaths = await resolveSensitivePathAliases([
+      fixtureLexical,
+      fixture,
+      environmentRootLexical,
+      environmentRoot,
+      ...input.outputPathAliases,
+    ]);
     await writeFixture(fixture, input.task);
     const expectedWorktree = parse(fixture).root;
     const retryGuardState = join(environmentRoot, "provider-retry.json");
@@ -908,9 +949,9 @@ export default async () => ({
             allowedPathRoot: fixture,
             expectedDirectory: fixture,
             expectedWorktree,
-            requireNativeAliasMarker: !Object.keys(input.task.expectedFiles).some(
-              (path) => !(path in input.task.files),
-            ),
+            requireNativeAliasMarker:
+              Boolean(input.task.fileOperations?.length) ||
+              !Object.keys(input.task.expectedFiles).some((path) => !(path in input.task.files)),
           },
         )
       : initialTrace;
@@ -934,8 +975,7 @@ export default async () => ({
           stderrOverflow: false,
         };
     const sanitizedExportVerified =
-      exportedProcess.success &&
-      excludesSensitivePaths(exportedProcess.stdout, [fixture, environmentRoot, input.output]);
+      exportedProcess.success && excludesSensitiveJsonPaths(exportedProcess.stdout, sensitivePaths);
     const exported = inspectSessionExport(sanitizedExportVerified ? exportedProcess.stdout : "");
     const observedIdentity = inspectIdentity({
       requestedModel: input.model,
@@ -1088,6 +1128,11 @@ if (!Object.hasOwn(modelAdapterSets, adapterSetName)) {
 }
 const adapterSet = adapterSetName as AdapterSetId;
 const adapters: readonly AdapterId[] = modelAdapterSets[adapterSet];
+if (adapterSet === "native-aliases-v1" && !nativeAliasPilot) {
+  throw new Error(
+    "native-aliases-v1 is retained only for frozen historical verification; use native-aliases-v2 for current execution.",
+  );
+}
 if (nativeAliasPilot) {
   if (requestedTimeoutMs && timeoutMs !== nativeAliasPilotV7.sessionTimeoutMs) {
     throw new Error(
@@ -1129,7 +1174,7 @@ if (nativeAliasProbe) {
   }
   if (
     !["baseline-v1", "single-constant-probe-v1", "create-file-probe-v1"].includes(taskSet) ||
-    !["native-alias-probe-v1", "native-aliases-v1"].includes(adapterSet) ||
+    !["native-alias-probe-v1", "native-aliases-v2"].includes(adapterSet) ||
     !probeModel ||
     variant !== ("variant" in probeModel ? probeModel.variant : "") ||
     agent !== "build"
@@ -1203,7 +1248,7 @@ if (nativeAliasPilot) {
     throw new Error("The frozen native-alias pilot schedule does not match its proposal digest.");
   }
 }
-const output = resolve(
+const requestedOutput = resolve(
   option("output") ??
     join(
       repository,
@@ -1213,6 +1258,7 @@ const output = resolve(
       new Date().toISOString().replaceAll(":", "-"),
     ),
 );
+let output = requestedOutput;
 const pilotOutputRoot = resolve(repository, "benchmarks", "results", preflight ? "local" : "model");
 const pilotOutputRelative = relative(pilotOutputRoot, output);
 if (
@@ -1322,6 +1368,7 @@ if (nativeAliasPilot && execute) {
 if (preflight) {
   if (nativeAliasPilot) await reservePilotOutput(output, pilotOutputRoot, repository);
   else await reserveOutput(output);
+  output = await canonicalDirectory(output, "Benchmark output");
   const privateOpenCode = await stagePrivateExecutable(
     toolchain.opencode.binary,
     "OpenCode executable",
@@ -1339,6 +1386,7 @@ if (preflight) {
       packageDirectory: artifact.packageDirectory,
       packageUrl: pathToFileURL(artifact.packageDirectory).href,
       adapterSet,
+      hostVersion: toolchain.opencode.packageVersion,
     });
     const finalCommit = (await run(["git", "rev-parse", "HEAD"], repository)).trim();
     const finalStatus = (
@@ -1634,6 +1682,7 @@ if (nativeAliasPilot) {
   const brokerPath = option("reservation-broker");
   if (!brokerPath) throw new Error("Pilot v7 requires --reservation-broker.");
   await reservePilotOutput(output, pilotOutputRoot, repository);
+  output = await canonicalDirectory(output, "Benchmark output");
   const worktreeRoots = (await run(["git", "worktree", "list", "--porcelain"], repository))
     .split(/\r?\n/u)
     .filter((line) => line.startsWith("worktree "))
@@ -1647,8 +1696,10 @@ if (nativeAliasPilot) {
   await writeJsonAtomic(join(output, "reservation.json"), reservationReceipt);
 } else if (nativeAliasProbe) {
   await reservePilotOutput(output, pilotOutputRoot, repository);
+  output = await canonicalDirectory(output, "Benchmark output");
 } else {
   await reserveOutput(output);
+  output = await canonicalDirectory(output, "Benchmark output");
 }
 const journalPath = join(output, "journal.json");
 const results: Awaited<ReturnType<typeof runSession>>[] = [];
@@ -1750,6 +1801,7 @@ try {
     packageDirectory: artifact.packageDirectory,
     packageUrl,
     adapterSet,
+    hostVersion: toolchain.opencode.packageVersion,
   });
 
   await writeJournal("running");
@@ -1798,6 +1850,7 @@ try {
         : {}),
       passthroughEnvironment,
       output,
+      outputPathAliases: [requestedOutput, output],
       timeoutMs,
       ...(nativeAliasPilot || nativeAliasProbe
         ? {

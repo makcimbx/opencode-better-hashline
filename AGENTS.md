@@ -16,9 +16,14 @@
 - Keep `.js` specifiers in TypeScript imports. Do not edit generated `dist/` or `coverage/`.
 - Snapshot refs become editable only in `tool.execute.after`, after host truncation and output-digest checks. Retained or pending bytes are not issued provenance.
 - Exact retained bytes are freshness authority. `rebase: "none"` stays strict by default; `"unique"` is explicit, exact, and ambiguity-rejecting. Do not add fuzzy matching, normalization, nearest-match selection, source repair, or silent fallback.
+- Preserve stable overlap/boundary error codes and deterministic zero-based operation-pair diagnostic suffixes. One `move_range` may compose only with pairwise-disjoint replacements wholly inside its intervening corridor and outside its source; all other conflicts remain conservative.
+- Text readback is one optional contiguous successor page. `readbackOffset` and `readbackLimit` require `readback:true`; only an after-hook-attested delivered page issues refs, and there is no ID-only successor.
 - Keep `hashline` as the default unique-ID surface and native `read`. Experimental `native-aliases` requires `enforce:true`, compatible host capabilities, exact observed-version/schema session identity, bounded history/metadata, and no silent fallback; it never aliases native `write`. Neither surface is a shell sandbox.
+- Keep the native-alias marker name `native-aliases/v2`, but treat every schema SHA/fingerprint change as session-incompatible: old sessions fail closed and require a restart plus a new session.
 - Current native-alias history may be reread only within the bounded stabilization window for the same exact active call ID and tool; execution still requires exact persisted input equality. Never substitute fuzzy, cross-ID, or stale-input correlation.
 - Preserve the filesystem order: canonicalize and authorize, plan one immutable result, approve that exact diff, reread bytes/identity, then stage and publish. Never replan after approval.
+- File lifecycle operations stay sole, strict, complete-coverage mutations outside `planEdits`. Delete revalidates a direct single-link source; move is no-clobber and same-filesystem with pinned parents, deterministic two-path locks, explicit `PARTIAL_PUBLICATION`, and no rollback that could delete a raced path.
+- `hashline_write` parent creation is explicit, bounded to 64 directories, and fixed from the deepest existing ancestor. Authorize and lock every directory plus the target, create root-to-leaf with exclusive non-recursive `mkdir`, then use existing staged no-clobber file publication. After the first directory exists or a mkdir outcome becomes ambiguous, fail as `PARTIAL_PUBLICATION` without rollback. Omitted/false stays strict, and `move_file` never creates parents.
 - OpenCode may swallow plugin initialization failures. Option errors must retain diagnostic fail-closed mode rather than escaping initialization.
 - Keep public tool schemas flat/provider-friendly; validate operation-specific field combinations at runtime instead of adding union-heavy schemas.
 - Tool schemas, rendering, defaults, mismatch behavior, and normalization are public protocol surface. Changes require deterministic tests plus updates to `docs/protocol.md`; follow `CONTRIBUTING.md` for wire-size and migration evidence.
@@ -28,8 +33,9 @@
 - Coverage thresholds are 90% and can fail for an individual included source file even when aggregate coverage passes.
 - Filesystem and plugin tests cover authorization, races, host hooks, and fail-closed behavior; update them when those paths change.
 - `bun run bench` is deterministic but result paths are write-once. Never `--force` published evidence; add a new dated result.
+- The current deterministic runner uses schema v7 and has a retained write-once model-free result. Keep schema-v5, schema-v6, schema-v7, and pilot-v7 evidence immutable; make no paid or model-quality claim from deterministic output.
 - `bun run bench:model` is a no-cost dry run. `--preflight` performs installs/writes but no model call. Never use `--execute` without explicit user approval, a model/auth source, and `BENCHMARK_ACK_COSTS=yes`.
-- The native-alias pilot uses the frozen `--native-alias-pilot` manifest. Pilot v2 is retired unexecuted; pilots v3, v4, v5, and v6 consumed their reservations and failed closed, while pilot v7 consumed its reservation and completed 48/48 sessions. None may resume or retry. A new pilot identity is created only after a paid launch consumed its durable reservation, never for pre-reservation failures or ordinary development findings. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
+- The frozen native-alias pilot v7 completed 48/48 sessions. Every pilot ID through v7 is closed and may never resume or retry. A new pilot identity is created only after a paid launch consumes its durable reservation, never for pre-reservation failures or ordinary development findings. Never treat development probes, deterministic checks, or packed evidence as the paid release gate.
 
 ## Fast Benchmark Development
 
@@ -38,7 +44,7 @@
 - Candidate A is forbidden until the full rehearsal passes. Then run one consolidated independent audit, remediate its findings, and run the final verifier/CI/pack matrix once on the unchanged tree.
 - Build external bundle B and anchor-only commit C only after candidate A and its clean eligible preflight are final. Do not rebuild approval evidence while implementation or schedule bytes are changing.
 - Parallelize independent checks and per-model rehearsals. Communicate only material blockers, terminal outcomes, and evidence changes.
-- Ignored local preflights, raw pilot outputs, and development-probe results are temporary. After diagnosis and a sanitized terminal incident, delete them before candidate A. Track only publishable deterministic results and privacy-safe terminal incidents.
+- Ignored local preflights, raw pilot outputs, and development-probe results are temporary. Delete them before candidate A after diagnosis; retain only publishable deterministic evidence and the privacy-safe terminal result needed for the current release decision.
 
 ## Workflow
 

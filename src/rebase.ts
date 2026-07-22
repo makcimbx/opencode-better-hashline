@@ -43,6 +43,7 @@ type ComparableLine = { text: string; eol?: string };
 
 type SearchBudget = {
   consume(work: number): void;
+  tryConsume(work: number): boolean;
 };
 
 function createSearchBudget(maxWork: number): SearchBudget {
@@ -56,6 +57,11 @@ function createSearchBudget(maxWork: number): SearchBudget {
           "Unique relocation exceeded its safety budget. Reread the file and retry in strict mode.",
         );
       }
+    },
+    tryConsume(work) {
+      if (work > remaining) return false;
+      remaining -= work;
+      return true;
     },
   };
 }
@@ -90,6 +96,35 @@ function lineTokens(lines: readonly ComparableLine[]): string[] {
   return lines.map((line) => JSON.stringify([line.text, line.eol ?? ""]));
 }
 
+function onlyLineDelimitersChangedAt(
+  base: readonly ComparableLine[],
+  current: readonly ComparableLine[],
+  start: number,
+  end: number,
+  budget: SearchBudget,
+): boolean {
+  if (start < 0 || end < start || end >= base.length || end >= current.length) return false;
+
+  let delimiterChanged = false;
+  for (let index = start; index <= end; index += 1) {
+    const baseLine = base[index];
+    const currentLine = current[index];
+    if (
+      baseLine === undefined ||
+      currentLine === undefined ||
+      !budget.tryConsume(Math.max(baseLine.text.length, currentLine.text.length, 1)) ||
+      baseLine.text !== currentLine.text
+    ) {
+      return false;
+    }
+    const baseEol = baseLine.eol ?? "";
+    const currentEol = currentLine.eol ?? "";
+    if (!budget.tryConsume(Math.max(baseEol.length, currentEol.length, 1))) return false;
+    if (baseEol !== currentEol) delimiterChanged = true;
+  }
+  return delimiterChanged;
+}
+
 function agree(candidate: number | undefined, next: number, message: string): number {
   if (candidate !== undefined && candidate !== next) {
     fail("AMBIGUOUS_RELOCATION", message);
@@ -111,6 +146,8 @@ export interface UniqueMapper {
 function mapRange(
   base: readonly string[],
   current: readonly string[],
+  baseLines: readonly ComparableLine[],
+  currentLines: readonly ComparableLine[],
   startLine: number,
   endLine: number,
   maxContextLines: number,
@@ -122,7 +159,14 @@ function mapRange(
   const baseTargetMatches = findSubsequences(base, target, budget);
   const targetMatches = findSubsequences(current, target, budget);
   if (targetMatches.length === 0) {
-    fail("TARGET_CHANGED", `Lines ${startLine}-${endLine} are no longer unchanged.`);
+    const message = `Lines ${startLine}-${endLine} are no longer unchanged.`;
+    if (onlyLineDelimitersChangedAt(baseLines, currentLines, start, end, budget)) {
+      fail(
+        "TARGET_CHANGED",
+        `${message} Exact line delimiters changed; reread the file before retrying.`,
+      );
+    }
+    fail("TARGET_CHANGED", message);
   }
   if (
     baseTargetMatches.length === 1 &&
@@ -263,7 +307,16 @@ export function createUniqueMapper(
   const budget = createSearchBudget(maxWork);
   return {
     mapRange(startLine, endLine, maxContextLines) {
-      return mapRange(base, current, startLine, endLine, maxContextLines, budget);
+      return mapRange(
+        base,
+        current,
+        baseLines,
+        currentLines,
+        startLine,
+        endLine,
+        maxContextLines,
+        budget,
+      );
     },
     mapBoundary(position, maxContextLines) {
       return mapBoundary(base, current, position, maxContextLines, budget);

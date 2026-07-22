@@ -31,6 +31,22 @@ const multiFileTask: ModelTask = {
   expectedFiles: { "src/a.ts": "new a\n", "src/b.ts": "new b\n" },
 };
 
+const lifecycleTask: ModelTask = {
+  id: "lifecycle-ledger",
+  category: "file-lifecycle",
+  prompt: "fixture",
+  files: {
+    "src/obsolete.ts": "obsolete\n",
+    "src/old-name.ts": "moved\n",
+  },
+  expectedFiles: { "src/new-name.ts": "moved\n" },
+  absentFiles: ["src/obsolete.ts", "src/old-name.ts"],
+  fileOperations: [
+    { op: "delete_file", filePath: "src/obsolete.ts" },
+    { op: "move_file", filePath: "src/old-name.ts", destinationPath: "src/new-name.ts" },
+  ],
+};
+
 function event(
   tool: string,
   targetPath: string,
@@ -350,6 +366,112 @@ describe("model mutation ledger", () => {
     expect(inspectMutationLedger(creationTask, unauthorized, "native-aliases")).toMatchObject({
       valid: false,
       unauthorized: ["hashline_write:src/other.ts"],
+    });
+  });
+
+  test("requires exact lifecycle operations, paths, snapshots, and executors", () => {
+    for (const surface of ["hashline", "native-aliases"] as const) {
+      const editTool = surface === "hashline" ? "hashline_edit" : "edit";
+      const valid = trace([
+        event("hashline_read", "src/obsolete.ts", {
+          sequence: 0,
+          snapshotId: "snapshot:obsolete",
+        }),
+        event("hashline_read", "src/old-name.ts", {
+          sequence: 1,
+          snapshotId: "snapshot:move",
+        }),
+        event(editTool, "src/obsolete.ts", {
+          sequence: 2,
+          snapshotId: "snapshot:obsolete",
+          operation: "delete_file",
+        }),
+        event(editTool, "src/old-name.ts", {
+          sequence: 3,
+          snapshotId: "snapshot:move",
+          operation: "move_file",
+          destinationPath: "src/new-name.ts",
+        }),
+      ]);
+
+      expect(inspectMutationLedger(lifecycleTask, valid, surface)).toMatchObject({
+        valid: true,
+        changed: [],
+        created: ["src/new-name.ts"],
+        absent: ["src/obsolete.ts", "src/old-name.ts"],
+        deleted: ["src/obsolete.ts"],
+        moved: ["src/old-name.ts->src/new-name.ts"],
+        missing: [],
+        unauthorized: [],
+        wrongExecutor: [],
+      });
+
+      const wrongDestination = trace([
+        event("hashline_read", "src/obsolete.ts", {
+          sequence: 0,
+          snapshotId: "snapshot:obsolete",
+        }),
+        event("hashline_read", "src/old-name.ts", {
+          sequence: 1,
+          snapshotId: "snapshot:move",
+        }),
+        event(editTool, "src/obsolete.ts", {
+          sequence: 2,
+          snapshotId: "snapshot:obsolete",
+          operation: "delete_file",
+          issuedSnapshotId: "snapshot:forbidden",
+        }),
+        event(editTool, "src/old-name.ts", {
+          sequence: 3,
+          snapshotId: "snapshot:move",
+          operation: "move_file",
+          destinationPath: "src/wrong-name.ts",
+        }),
+      ]);
+
+      expect(inspectMutationLedger(lifecycleTask, wrongDestination, surface)).toMatchObject({
+        valid: false,
+        missing: expect.arrayContaining([
+          "lifecycle-readback-snapshot:src/obsolete.ts",
+          "move:src/old-name.ts->src/new-name.ts",
+          "write-or-move:src/new-name.ts",
+        ]),
+        unauthorized: [`${editTool}:src/wrong-name.ts`],
+        wrongExecutor: ["move:src/old-name.ts->src/wrong-name.ts"],
+      });
+    }
+  });
+
+  test("sorts lifecycle expectations and rejects undeclared deletion", () => {
+    const twoMoveTask: ModelTask = {
+      id: "two-move-ledger",
+      category: "file-lifecycle",
+      prompt: "fixture",
+      files: { "src/a.ts": "a\n", "src/z.ts": "z\n" },
+      expectedFiles: { "src/b.ts": "a\n", "src/y.ts": "z\n" },
+      absentFiles: ["src/a.ts", "src/z.ts"],
+      fileOperations: [
+        { op: "move_file", filePath: "src/z.ts", destinationPath: "src/y.ts" },
+        { op: "move_file", filePath: "src/a.ts", destinationPath: "src/b.ts" },
+      ],
+    };
+    expect(inspectMutationLedger(twoMoveTask, trace([]), "hashline").missing).toEqual([
+      "move:src/a.ts->src/b.ts",
+      "move:src/z.ts->src/y.ts",
+      "read:src/a.ts",
+      "read:src/z.ts",
+      "write-or-move:src/b.ts",
+      "write-or-move:src/y.ts",
+    ]);
+
+    const undeclaredDelete = trace([
+      event("hashline_read", "src/a.ts", { sequence: 0 }),
+      event("edit", "src/a.ts", { sequence: 1, operation: "delete_file" }),
+      event("hashline_write", "src/new.ts", { sequence: 2 }),
+    ]);
+    expect(inspectMutationLedger(task, undeclaredDelete, "native-aliases")).toMatchObject({
+      valid: false,
+      wrongExecutor: ["delete:src/a.ts"],
     });
   });
 });

@@ -64,6 +64,64 @@ function moveOracle(text: string, startLine: number, endLine: number, afterLine:
   return renderLines(moved, eols);
 }
 
+type MoveOperation = Extract<EditOperation, { op: "move_range" }>;
+type ReplaceOperation = Extract<EditOperation, { op: "replace" }>;
+
+function replacementOracle(text: string, replacementOperations: readonly ReplaceOperation[]) {
+  const parsed = document(text);
+  const replacements = replacementOperations
+    .map((operation) => {
+      const start = operation.startLine - 1;
+      const end = operation.endLine;
+      const first = parsed.lines[start];
+      const last = parsed.lines[end - 1];
+      if (!first || !last) throw new Error("Expected a valid replacement range.");
+      const eol = last.eol || first.eol || parsed.preferredEol;
+      return {
+        start,
+        end,
+        lines: operation.lines.map((line, index) => ({
+          text: line,
+          eol: index === operation.lines.length - 1 ? last.eol : eol,
+        })),
+      };
+    })
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const mapBoundary = (position: number): number =>
+    position +
+    replacements.reduce(
+      (delta, replacement) =>
+        position >= replacement.end
+          ? delta + replacement.lines.length - (replacement.end - replacement.start)
+          : delta,
+      0,
+    );
+  const lines: Array<{ text: string; eol: string }> = [];
+  let cursor = 0;
+  for (const replacement of replacements) {
+    lines.push(...parsed.lines.slice(cursor, replacement.start), ...replacement.lines);
+    cursor = replacement.end;
+  }
+  lines.push(...parsed.lines.slice(cursor));
+  return { lines, mapBoundary };
+}
+
+function composedMoveOracle(
+  text: string,
+  move: MoveOperation,
+  replacementOperations: readonly ReplaceOperation[],
+): string {
+  const { lines, mapBoundary } = replacementOracle(text, replacementOperations);
+  const texts = lines.map((line) => line.text);
+  const eols = lines.map((line) => line.eol);
+  const sourceStart = mapBoundary(move.startLine - 1);
+  const sourceEnd = mapBoundary(move.endLine);
+  const destination = mapBoundary(move.afterLine);
+  if (destination >= sourceStart && destination <= sourceEnd) return renderLines(texts, eols);
+  const moved = movedTexts(texts, sourceStart + 1, sourceEnd, destination);
+  return renderLines(moved, eols);
+}
+
 function permutations<T>(items: readonly T[]): T[][] {
   if (items.length <= 1) return [[...items]];
   const result: T[][] = [];
@@ -147,6 +205,111 @@ describe("range transfers", () => {
     ]);
     expect(downward.text).toBe("C\r\nD\nA\rB");
     expect(downward.bytes.byteLength).toBe(document(text).bytes.byteLength);
+  });
+
+  test("exhaustively composes contained replacements across move geometry, cardinality, and order", () => {
+    const texts = ["L1", "L2", "L3", "L4", "L5"];
+    const eolLayouts = [
+      ["\r\n", "\n", "\r", "\r\n", ""],
+      ["\n", "\r", "\r\n", "\n", "\r\n"],
+    ];
+    for (const eols of eolLayouts) {
+      const text = renderLines(texts, eols);
+      for (let startLine = 1; startLine <= texts.length; startLine += 1) {
+        for (let endLine = startLine; endLine <= texts.length; endLine += 1) {
+          for (let afterLine = 0; afterLine <= texts.length; afterLine += 1) {
+            if (afterLine >= startLine - 1 && afterLine <= endLine) continue;
+            const move: MoveOperation = {
+              op: "move_range",
+              startLine,
+              endLine,
+              afterLine,
+            };
+            const interveningStart = afterLine < startLine - 1 ? afterLine + 1 : endLine + 1;
+            const interveningEnd = afterLine < startLine - 1 ? startLine - 1 : afterLine;
+            for (
+              let replacementStart = interveningStart;
+              replacementStart <= interveningEnd;
+              replacementStart += 1
+            ) {
+              for (
+                let replacementEnd = replacementStart;
+                replacementEnd <= interveningEnd;
+                replacementEnd += 1
+              ) {
+                const targetLength = replacementEnd - replacementStart + 1;
+                const cardinalities = [0, targetLength, targetLength + 1];
+                for (const cardinality of cardinalities) {
+                  const replacement: ReplaceOperation = {
+                    op: "replace",
+                    startLine: replacementStart,
+                    endLine: replacementEnd,
+                    lines: Array.from(
+                      { length: cardinality },
+                      (_, index) => `R${replacementStart}-${replacementEnd}-${index}`,
+                    ),
+                  };
+                  const expected = composedMoveOracle(text, move, [replacement]);
+                  const replacementOnly = replacementOracle(text, [replacement]).lines;
+                  const replacementOnlyText = renderLines(
+                    replacementOnly.map((line) => line.text),
+                    replacementOnly.map((line) => line.eol),
+                  );
+                  for (const operations of permutations<EditOperation>([move, replacement])) {
+                    if (expected === replacementOnlyText) {
+                      expect(failureMessage(() => plan(text, text, operations))).toBe(
+                        "NO_CHANGE: A move changes no bytes.",
+                      );
+                    } else {
+                      expect(plan(text, text, operations).text).toBe(expected);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test("composes multiple disjoint replacements from immutable line identities", () => {
+    const text = renderLines(
+      ["A", "B", "C", "D", "E", "F"],
+      ["\r\n", "\n", "\r", "\r\n", "\n", ""],
+    );
+    const replacements: ReplaceOperation[] = [
+      { op: "replace", startLine: 2, endLine: 2, lines: [] },
+      { op: "replace", startLine: 3, endLine: 3, lines: ["equal"] },
+      {
+        op: "replace",
+        startLine: 4,
+        endLine: 5,
+        lines: ["expand-1", "expand-2", "expand-3"],
+      },
+    ];
+    const moves: MoveOperation[] = [
+      { op: "move_range", startLine: 6, endLine: 6, afterLine: 1 },
+      { op: "move_range", startLine: 1, endLine: 1, afterLine: 6 },
+    ];
+    for (const move of moves) {
+      const expected = composedMoveOracle(text, move, replacements);
+      for (const operations of permutations<EditOperation>([move, ...replacements])) {
+        expect(plan(text, text, operations).text).toBe(expected);
+      }
+    }
+  });
+
+  test("keeps copy reads immutable while composing a move and replacement", () => {
+    const text = "A\nB\nC\nD\nE\n";
+    const operations: EditOperation[] = [
+      { op: "move_range", startLine: 5, endLine: 5, afterLine: 1 },
+      { op: "replace", startLine: 3, endLine: 3, lines: ["X"] },
+      { op: "copy_range", startLine: 3, endLine: 3, afterLine: 0 },
+    ];
+    for (const ordered of permutations(operations)) {
+      expect(plan(text, text, ordered).text).toBe("C\nA\nE\nB\nX\nD\n");
+    }
   });
 
   test("preserves BOM, line count, delimiter layout, and final-newline state for moves", () => {
@@ -307,12 +470,26 @@ describe("range transfers", () => {
   });
 
   test("uses deterministic failure precedence for conflicting and independently failing moves", () => {
-    const conflict: EditOperation[] = [
-      { op: "move_range", startLine: 2, endLine: 2, afterLine: 1 },
-      { op: "replace", startLine: 2, endLine: 2, lines: ["B"] },
+    const conflicts: Array<{ operations: EditOperation[]; expected: string }> = [
+      {
+        operations: [
+          { op: "move_range", startLine: 2, endLine: 2, afterLine: 1 },
+          { op: "replace", startLine: 2, endLine: 2, lines: ["B"] },
+        ],
+        expected:
+          "OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (move_range) and operations[1] (replace).",
+      },
+      {
+        operations: [
+          { op: "replace", startLine: 2, endLine: 2, lines: ["B"] },
+          { op: "move_range", startLine: 2, endLine: 2, afterLine: 1 },
+        ],
+        expected:
+          "OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (move_range).",
+      },
     ];
-    for (const ordered of permutations(conflict)) {
-      expect(() => plan("a\nb", "a\nb", ordered)).toThrow("OPERATIONS_OVERLAP:");
+    for (const { operations, expected } of conflicts) {
+      expect(failureMessage(() => plan("a\nb", "a\nb", operations))).toBe(expected);
     }
 
     const independentFailures: EditOperation[] = [
@@ -334,22 +511,78 @@ describe("range transfers", () => {
     }
   });
 
-  test("uses one conflict-class diagnostic for every operation permutation", () => {
+  test("keeps source, destination, replacement, and move-move conflicts conservative", () => {
+    const text = "a\nb\nc\nd\ne\nf\n";
+    const scenarios: EditOperation[][] = [
+      [
+        { op: "move_range", startLine: 4, endLine: 4, afterLine: 1 },
+        { op: "replace", startLine: 4, endLine: 4, lines: ["source"] },
+      ],
+      [
+        { op: "move_range", startLine: 4, endLine: 4, afterLine: 1 },
+        { op: "replace", startLine: 1, endLine: 2, lines: ["destination"] },
+      ],
+      [
+        { op: "move_range", startLine: 4, endLine: 4, afterLine: 1 },
+        { op: "move_range", startLine: 3, endLine: 3, afterLine: 0 },
+      ],
+    ];
+    for (const scenario of scenarios) {
+      for (const operations of permutations(scenario)) {
+        const left = operations[0];
+        const right = operations[1];
+        if (!left || !right) throw new Error("Expected two conflicting operations.");
+        expect(failureMessage(() => plan(text, text, operations))).toBe(
+          `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (${left.op}) and operations[1] (${right.op}).`,
+        );
+      }
+    }
+
+    const overlapping: EditOperation[] = [
+      { op: "move_range", startLine: 6, endLine: 6, afterLine: 1 },
+      { op: "replace", startLine: 2, endLine: 4, lines: ["left"] },
+      { op: "replace", startLine: 3, endLine: 5, lines: ["right"] },
+    ];
+    for (const operations of permutations(overlapping)) {
+      const replacementIndexes = operations.flatMap((operation, index) =>
+        operation.op === "replace" ? [index] : [],
+      );
+      const leftIndex = replacementIndexes[0];
+      const rightIndex = replacementIndexes[1];
+      if (leftIndex === undefined || rightIndex === undefined) {
+        throw new Error("Expected two conflicting replacements.");
+      }
+      expect(failureMessage(() => plan(text, text, operations))).toBe(
+        `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[${leftIndex}] (replace) and operations[${rightIndex}] (replace).`,
+      );
+    }
+  });
+
+  test("selects the conflict class and pair deterministically for every operation permutation", () => {
     const text = "a\nb\nc\nd\ne\nf\n";
     const operations: EditOperation[] = [
       { op: "insert", afterLine: 5, lines: ["X"] },
-      { op: "insert", afterLine: 5, lines: ["Y"] },
-      { op: "copy_range", startLine: 2, endLine: 3, afterLine: 0 },
+      { op: "copy_range", startLine: 6, endLine: 6, afterLine: 5 },
+      { op: "move_range", startLine: 3, endLine: 3, afterLine: 0 },
+      { op: "replace", startLine: 2, endLine: 2, lines: ["B"] },
       { op: "replace", startLine: 3, endLine: 3, lines: ["C"] },
     ];
-    const messages = permutations(operations).map((ordered) =>
-      failureMessage(() => plan(text, text, ordered)),
-    );
-    expect(new Set(messages)).toEqual(
-      new Set([
-        "INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
-      ]),
-    );
+    for (const ordered of permutations(operations)) {
+      const moveIndex = ordered.findIndex((operation) => operation.op === "move_range");
+      const conflict = ordered
+        .flatMap((operation, index) =>
+          operation.op === "replace" && operation.startLine === 3
+            ? [[Math.min(moveIndex, index), Math.max(moveIndex, index)] as const]
+            : [],
+        )
+        .sort((left, right) => left[0] - right[0] || left[1] - right[1])[0];
+      const left = conflict ? ordered[conflict[0]] : undefined;
+      const right = conflict ? ordered[conflict[1]] : undefined;
+      if (!conflict || !left || !right) throw new Error("Expected a move/replace conflict.");
+      expect(failureMessage(() => plan(text, text, ordered))).toBe(
+        `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[${conflict[0]}] (${left.op}) and operations[${conflict[1]}] (${right.op}).`,
+      );
+    }
   });
 
   test("accepts independent mixed batches and is permutation invariant", () => {
@@ -452,15 +685,60 @@ describe("range transfers", () => {
       expect(plan(text, text, [...operations].reverse()).text).toBe(expected);
     }
 
-    for (const operations of [
-      [
-        { op: "copy_range", startLine: 1, endLine: 1, afterLine: 6 },
-        { op: "copy_range", startLine: 2, endLine: 2, afterLine: 6 },
-      ],
-    ] satisfies EditOperation[][]) {
-      expect(() => plan(text, text, operations)).toThrow("INSERTION_BOUNDARY_CONFLICT:");
-      expect(() => plan(text, text, [...operations].reverse())).toThrow(
-        "INSERTION_BOUNDARY_CONFLICT:",
+    const sharedDestination: EditOperation[] = [
+      { op: "copy_range", startLine: 1, endLine: 1, afterLine: 6 },
+      { op: "copy_range", startLine: 2, endLine: 2, afterLine: 6 },
+      { op: "insert", afterLine: 6, lines: ["X"] },
+    ];
+    for (const operations of permutations(sharedDestination)) {
+      expect(failureMessage(() => plan(text, text, operations))).toBe(
+        `INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order. Conflict: operations[0] (${operations[0]?.op}) and operations[1] (${operations[1]?.op}).`,
+      );
+    }
+  });
+
+  test("preflights composite bounds and preserves move no-op validation", () => {
+    const text = "A\nB\nC\nD\n";
+    const move: MoveOperation = {
+      op: "move_range",
+      startLine: 4,
+      endLine: 4,
+      afterLine: 0,
+    };
+    const replacement: ReplaceOperation = {
+      op: "replace",
+      startLine: 2,
+      endLine: 2,
+      lines: ["long-1", "é", "emoji-😀", "long-4"],
+    };
+    const expected = composedMoveOracle(text, move, [replacement]);
+    const expectedDocument = document(expected);
+    for (const operations of permutations<EditOperation>([move, replacement])) {
+      expect(
+        plan(text, text, operations, "none", {
+          maxFileBytes: expectedDocument.bytes.byteLength,
+          maxLines: expectedDocument.lines.length,
+        }).text,
+      ).toBe(expected);
+      expect(() =>
+        plan(text, text, operations, "none", {
+          maxFileBytes: expectedDocument.bytes.byteLength - 1,
+        }),
+      ).toThrow("UNSUPPORTED_FILE:");
+      expect(() =>
+        plan(text, text, operations, "none", {
+          maxLines: expectedDocument.lines.length - 1,
+        }),
+      ).toThrow("UNSUPPORTED_FILE:");
+    }
+
+    const noChange: EditOperation[] = [
+      { op: "move_range", startLine: 3, endLine: 3, afterLine: 0 },
+      { op: "replace", startLine: 1, endLine: 1, lines: ["A"] },
+    ];
+    for (const operations of permutations(noChange)) {
+      expect(failureMessage(() => plan("B\nA\nA\n", "B\nA\nA\n", operations))).toBe(
+        "NO_CHANGE: A move changes no bytes.",
       );
     }
   });
@@ -576,6 +854,31 @@ describe("range transfers", () => {
     expect(() =>
       plan("a\nb\nc\nd\ne\nf\n", "a\nb\nc\nnew\nd\ne\nf\n", [operation], "unique"),
     ).toThrow(/TARGET_CHANGED:|AMBIGUOUS_RELOCATION:/);
+  });
+
+  test("relocates an intact composite corridor and rejects external changes inside it", () => {
+    const base = "head\nA\nB\nC\nD\ntail\n";
+    const move: MoveOperation = {
+      op: "move_range",
+      startLine: 5,
+      endLine: 5,
+      afterLine: 2,
+    };
+    const replacement: ReplaceOperation = {
+      op: "replace",
+      startLine: 3,
+      endLine: 4,
+      lines: ["X", "Y", "Z"],
+    };
+    const expected = composedMoveOracle(base, move, [replacement]);
+    for (const operations of permutations<EditOperation>([move, replacement])) {
+      const relocated = plan(base, `prefix\n${base}`, operations, "unique");
+      expect(relocated.text).toBe(`prefix\n${expected}`);
+      expect(relocated.rebased).toBe(true);
+      expect(() => plan(base, "head\nA\nB\nchanged\nC\nD\ntail\n", operations, "unique")).toThrow(
+        /TARGET_CHANGED:|AMBIGUOUS_RELOCATION:/,
+      );
+    }
   });
 
   test("rejects ambiguous transfer anchors under exact unique relocation", () => {

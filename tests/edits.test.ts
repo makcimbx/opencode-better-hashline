@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { type EditOperation, planEdits } from "../src/edits.js";
+import { HashlineError } from "../src/errors.js";
 import { decodeTextDocument } from "../src/text.js";
 
 const encoder = new TextEncoder();
@@ -21,6 +22,16 @@ function plan(
     rebase,
     maxContextLines: 2,
   });
+}
+
+function failureMessage(action: () => unknown): string {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof HashlineError) return error.message;
+    throw error;
+  }
+  throw new Error("Expected a HashlineError.");
 }
 
 describe("line edit planning", () => {
@@ -103,34 +114,62 @@ describe("line edit planning", () => {
     ).toThrow("TARGET_CHANGED:");
   });
 
+  test("reports original operations for conflicts after unique relocation", () => {
+    const operations: EditOperation[] = [
+      { op: "replace", startLine: 1, endLine: 2, lines: ["first"] },
+      { op: "replace", startLine: 4, endLine: 5, lines: ["second"] },
+    ];
+    expect(
+      failureMessage(() => plan("A\nB\nmiddle\nB\nC\n", "A\nB\nC\n", operations, "unique")),
+    ).toBe(
+      "OPERATIONS_OVERLAP: Edit operations overlap after relocation. Conflict: operations[0] (replace) and operations[1] (replace).",
+    );
+  });
+
   test("rejects malformed, overlapping, and ineffective batches", () => {
     expect(() => plan("a\n", "a\n", [])).toThrow("INVALID_ARGUMENT:");
     expect(() =>
       plan("a\nb\n", "a\nb\n", [{ op: "replace", startLine: 0, endLine: 1, lines: ["x"] }]),
     ).toThrow("INVALID_ARGUMENT:");
-    expect(() =>
-      plan("a\nb\n", "a\nb\n", [
-        { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
-        { op: "replace", startLine: 2, endLine: 2, lines: ["y"] },
-      ]),
-    ).toThrow(
-      "OPERATIONS_OVERLAP: Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits.",
+    expect(
+      failureMessage(() =>
+        plan("a\nb\n", "a\nb\n", [
+          { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
+          { op: "replace", startLine: 2, endLine: 2, lines: ["y"] },
+        ]),
+      ),
+    ).toBe(
+      "OPERATIONS_OVERLAP: Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (replace).",
     );
-    expect(() =>
-      plan("a\nb\n", "a\nb\n", [
-        { op: "insert", afterLine: 1, lines: ["x"] },
-        { op: "insert", afterLine: 1, lines: ["y"] },
-      ]),
-    ).toThrow(
-      "INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+    expect(
+      failureMessage(() =>
+        plan("a\nb\n", "a\nb\n", [
+          { op: "insert", afterLine: 1, lines: ["x"] },
+          { op: "insert", afterLine: 1, lines: ["y"] },
+        ]),
+      ),
+    ).toBe(
+      "INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order. Conflict: operations[0] (insert) and operations[1] (insert).",
     );
-    expect(() =>
-      plan("a\nb\n", "a\nb\n", [
-        { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
-        { op: "insert", afterLine: 1, lines: ["y"] },
-      ]),
-    ).toThrow(
-      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits.",
+    expect(
+      failureMessage(() =>
+        plan("a\nb\n", "a\nb\n", [
+          { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
+          { op: "insert", afterLine: 1, lines: ["y"] },
+        ]),
+      ),
+    ).toBe(
+      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (insert).",
+    );
+    expect(
+      failureMessage(() =>
+        plan("a\nb\n", "a\nb\n", [
+          { op: "insert", afterLine: 1, lines: ["y"] },
+          { op: "replace", startLine: 1, endLine: 2, lines: ["x"] },
+        ]),
+      ),
+    ).toBe(
+      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits. Conflict: operations[0] (insert) and operations[1] (replace).",
     );
     expect(() => plan("a\n", "a\n", [{ op: "insert", afterLine: 1, lines: [] }])).toThrow(
       "INVALID_ARGUMENT:",

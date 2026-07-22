@@ -103,7 +103,15 @@ describe("snapshot store", () => {
       "SNAPSHOT_UNKNOWN:",
     );
     expect(() => store.assertBoundaryIssued(evicted, -1)).toThrow("INVALID_ARGUMENT:");
-    expect(() => store.assertComplete(evicted)).toThrow("RANGE_NOT_FULLY_ISSUED:");
+    expect(() => store.assertComplete(evicted)).toThrow(
+      "RANGE_NOT_FULLY_ISSUED: replace_file needs a complete snapshot. Read the file from offset=1 through @eof with the same snapshotId, then retry.",
+    );
+    expect(() => store.assertComplete(evicted, "delete_file")).toThrow(
+      "RANGE_NOT_FULLY_ISSUED: delete_file needs a complete snapshot. Read the file from offset=1 through @eof with the same snapshotId, then retry.",
+    );
+    expect(() => store.assertComplete(evicted, "move_file")).toThrow(
+      "RANGE_NOT_FULLY_ISSUED: move_file needs a complete snapshot. Read the file from offset=1 through @eof with the same snapshotId, then retry.",
+    );
     store.clear();
   });
 });

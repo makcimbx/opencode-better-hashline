@@ -2,6 +2,12 @@
 
 Status: design only. No model result is implied by this document.
 
+Current implementation note: the deterministic runner now emits schema v7. Its 29-case corpus and
+expanded edit/write/readback/parent-create wire fixtures are retained in the immutable model-free
+[`2026-07-22-edit-protocol-ux-windows-x64.json`](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json).
+The schema-v6 result and closed pilot-v7 scope remain immutable. Neither the schema-v7 result nor
+this plan supports a paid or model-quality claim.
+
 | Field | Value |
 | --- | --- |
 | Plan version | 1.0 draft |
@@ -55,8 +61,8 @@ This study will not attempt to prove:
 | Mechanism ablation | Yes | Isolate addressing semantics | Mechanism-specific result |
 
 No result may be promoted from one layer to a stronger layer. In particular, the existing 12-task
-model harness remains a development smoke and the 28-case deterministic corpus remains mechanical
-protocol evidence.
+model harness remains a development smoke and the current 29-case deterministic corpus remains
+mechanical protocol evidence.
 
 ## Causal Estimands
 
@@ -136,6 +142,7 @@ Before the first scored inference request, commit a versioned preregistration co
 - exact model IDs, requested variants, and endpoint eligibility rules;
 - observed provider metadata requirements;
 - complete prompts, system guidance, tool schemas, and tool order;
+- exact native-alias marker, canonical schema SHA, and protocol fingerprint;
 - agent, step, timeout, retry, token, and file-scope budgets;
 - adapter order seed and scheduling algorithm;
 - primary and secondary outcomes;
@@ -167,7 +174,8 @@ changing the 12-task transport baseline. Its eight checked-in exact-output tasks
 copy, upward and downward moves, multiple independent transfers, a 5,000-line corridor, conflict
 recovery, duplicate source content, and a legacy-operation control. Deterministic mechanism scenarios
 separately cover source/destination shifts, relocation ambiguity, pre-edit copy semantics when a write intersects its source,
-and changed move corridors.
+changed move corridors, and the sole allowed composition: one move plus pairwise-disjoint
+replacements wholly inside its intervening corridor and outside its source.
 
 Report `copy_range` and `move_range` independently. Copy can avoid retransmitting any sufficiently
 large issued source, while move requires issuance of its complete source-to-destination corridor and
@@ -187,9 +195,10 @@ plugin and stock OpenCode. Initial scenarios should include:
 | Copied insertion boundary | Can an insertion move to a copy? | Is the copied boundary rejected? |
 | Permission-wait mutation | Is the approved plan still current? | Does the fixed plan fail closed? |
 | EOL-only mutation | Is newline drift detected? | Does exact text/EOL authority reject it? |
-| Output truncation/mutation | Can undelivered refs be used? | Are only delivered refs issued? |
+| Output truncation/mutation | Can undelivered refs be used? | Does one attested readback page issue only delivered refs, with no ID-only successor? |
 | Long complete line | Is it editable within output budget? | Is complete byte-budget issuance usable? |
 | Create race | Can a destination be overwritten? | Does no-replace publication hold? |
+| Parent-chain race | Can approval drift change created paths? | Does a fixed, fully authorized plan fail closed without rollback? |
 | Post-publication interference | Can success be false? | Is post-write mismatch reported? |
 | Native win | Does strict safety impose a false reject? | Can the model recover by rereading? |
 

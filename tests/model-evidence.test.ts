@@ -41,7 +41,7 @@ describe("model evidence durability", () => {
     const root = join(repository, "benchmarks", "results", "model");
     await reservePilotOutput(join(root, "first"), root, repository);
     await reservePilotOutput(join(root, "second"), root, repository);
-    await expect(access(join(root, ".native-alias-pilot-v3.reservation.json"))).rejects.toThrow();
+    await expect(access(join(root, ".native-alias-pilot-v7.reservation.json"))).rejects.toThrow();
   });
 
   test("rejects unsafe roots and occupied output paths", async () => {

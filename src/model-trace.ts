@@ -1,10 +1,10 @@
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { exactRelativePath, physicalRelativePath } from "./path-identity.js";
-import { canonicalJson } from "./presentation.js";
+import { canonicalJson, type NativeAliasOperation } from "./presentation.js";
 import { attestSessionExport } from "./session-export.js";
 import type { NativeAliasProtocolIdentity } from "./session-protocol.js";
-import { assertNativeAliasHistory } from "./session-protocol.js";
+import { assertNativeAliasHistory, inspectNativeAliasHistory } from "./session-protocol.js";
 
 export interface TokenUsage {
   input: number;
@@ -26,6 +26,8 @@ export interface ToolTerminalEvent {
   protocolMarker: "absent" | "valid" | "invalid";
   protocolReason?: OracleReason;
   targetPath?: string;
+  operation?: Exclude<NativeAliasOperation, "update">;
+  destinationPath?: string;
   snapshotId?: string;
   issuedSnapshotId?: string;
   rebase?: "none" | "unique";
@@ -154,22 +156,15 @@ function argumentShape(tool: string, input: unknown): ToolTerminalEvent["argumen
   return "other";
 }
 
-function argumentTargetPath(
-  input: unknown,
-  allowedPathRoot: string | undefined,
-): string | undefined {
-  if (!allowedPathRoot) {
-    return undefined;
-  }
-  const filePath = object(input)?.filePath;
-  if (typeof filePath !== "string") return undefined;
+function argumentPath(pathValue: unknown, allowedPathRoot: string | undefined): string | undefined {
+  if (!allowedPathRoot || typeof pathValue !== "string") return undefined;
   let root: string;
   try {
     root = canonicalPathFn(allowedPathRoot);
   } catch {
     return undefined;
   }
-  const candidate = isAbsolute(filePath) ? resolve(filePath) : resolve(root, filePath);
+  const candidate = isAbsolute(pathValue) ? resolve(pathValue) : resolve(root, pathValue);
   let target: string;
   try {
     target = canonicalPathFn(candidate);
@@ -184,19 +179,81 @@ function argumentTargetPath(
   return confined === undefined || outside(confined) ? undefined : confined.replaceAll("\\", "/");
 }
 
+function argumentTargetPath(
+  input: unknown,
+  allowedPathRoot: string | undefined,
+): string | undefined {
+  return argumentPath(object(input)?.filePath, allowedPathRoot);
+}
+
+function inputLifecycle(inputValue: unknown): {
+  operation?: Exclude<NativeAliasOperation, "update">;
+  destinationPathValue?: string;
+} {
+  const operations = object(inputValue)?.operations;
+  if (!Array.isArray(operations) || operations.length !== 1) return {};
+  const operation = object(operations[0]);
+  if (operation?.op === "delete_file") return { operation: "delete_file" };
+  if (operation?.op === "move_file" && typeof operation.destinationPath === "string") {
+    return { operation: "move_file", destinationPathValue: operation.destinationPath };
+  }
+  return {};
+}
+
+function physicalConfinedPath(rootValue: string, targetValue: string): string | undefined {
+  let root: string;
+  try {
+    root = canonicalPathFn(rootValue);
+  } catch {
+    return undefined;
+  }
+  let confined: string | undefined;
+  try {
+    confined = physicalRelativePath(root, canonicalPathFn(targetValue));
+  } catch {
+    try {
+      const target = resolve(targetValue);
+      const parent = canonicalPathFn(dirname(target));
+      const parentRelative = physicalRelativePath(root, parent);
+      if (parentRelative === undefined) return undefined;
+      confined = join(parentRelative, basename(target));
+    } catch {
+      return undefined;
+    }
+  }
+  return confined === undefined || outside(confined) ? undefined : confined.replaceAll("\\", "/");
+}
+
 function protocolMarker(
   tool: string,
+  input: unknown,
   metadata: unknown,
   expected: TraceInspectionOptions["nativeAlias"],
 ): {
   marker: ToolTerminalEvent["protocolMarker"];
   targetPath: string | null;
+  operation: NativeAliasOperation | null;
+  destinationPath: string | null;
   reason: OracleReason;
 } {
+  const absent = {
+    marker: "absent" as const,
+    targetPath: null,
+    operation: null,
+    destinationPath: null,
+    reason: "not-inspected" as const,
+  };
+  const invalid = (reason: OracleReason) => ({
+    marker: "invalid" as const,
+    targetPath: null,
+    operation: null,
+    destinationPath: null,
+    reason,
+  });
   const marker = object(object(metadata)?.betterHashline);
-  if (!marker) return { marker: "absent", targetPath: null, reason: "not-inspected" };
+  if (!marker) return absent;
   if (!expected || (tool !== "edit" && tool !== "apply_patch")) {
-    return { marker: "invalid", targetPath: null, reason: "protocol-history-invalid" };
+    return invalid("protocol-history-invalid");
   }
   try {
     const metadataRecord = object(metadata);
@@ -208,32 +265,23 @@ function protocolMarker(
           : undefined;
     const canonicalPath = tool === "edit" ? file?.file : file?.filePath;
     const patch = file?.patch;
-    const shownPath =
-      tool === "edit" && typeof patch === "string"
-        ? /^--- ([^\t\r\n]+)\tbefore$/mu.exec(patch)?.[1]
-        : file?.relativePath;
+    const shownSourcePath =
+      typeof patch === "string" ? /^--- ([^\t\r\n]+)\tbefore$/mu.exec(patch)?.[1] : undefined;
     if (
       typeof canonicalPath !== "string" ||
-      typeof shownPath !== "string" ||
-      isAbsolute(shownPath)
+      typeof shownSourcePath !== "string" ||
+      isAbsolute(shownSourcePath)
     ) {
-      return { marker: "invalid", targetPath: null, reason: "canonical-path-unreadable" };
+      return invalid("canonical-path-unreadable");
     }
-    const root = canonicalPathFn(expected.allowedPathRoot);
-    const target = canonicalPathFn(canonicalPath);
-    const confined = physicalRelativePath(root, target);
-    if (confined === undefined) {
-      return { marker: "invalid", targetPath: null, reason: "canonical-path-outside-fixture" };
-    }
-    const expectedShownPath = physicalRelativePath(
-      canonicalPathFn(expected.worktree),
-      target,
-    )?.replaceAll("\\", "/");
-    if (!expectedShownPath || outside(expectedShownPath) || shownPath !== expectedShownPath) {
-      return { marker: "invalid", targetPath: null, reason: "display-path-mismatch" };
+    const targetPath = physicalConfinedPath(expected.allowedPathRoot, canonicalPath);
+    if (targetPath === undefined) return invalid("canonical-path-outside-fixture");
+    const expectedShownPath = physicalConfinedPath(expected.worktree, canonicalPath);
+    if (!expectedShownPath || shownSourcePath !== expectedShownPath) {
+      return invalid("display-path-mismatch");
     }
     const { allowedPathRoot: _allowedPathRoot, ...identity } = expected;
-    assertNativeAliasHistory(
+    const completed = inspectNativeAliasHistory(
       [
         {
           parts: [
@@ -241,20 +289,31 @@ function protocolMarker(
               type: "tool",
               tool,
               callID: "benchmark-trace",
-              state: { status: "completed", metadata },
+              state: { status: "completed", input, metadata },
             },
           ],
         },
       ],
       identity,
+      { directory: expected.allowedPathRoot },
     );
+    const evidence = completed[0];
+    if (!evidence) return invalid("protocol-history-invalid");
+    const destinationPath = evidence.destinationCanonicalPath
+      ? (physicalConfinedPath(expected.allowedPathRoot, evidence.destinationCanonicalPath) ?? null)
+      : null;
+    if (evidence.destinationCanonicalPath && destinationPath === null) {
+      return invalid("canonical-path-outside-fixture");
+    }
     return {
       marker: "valid",
-      targetPath: confined.replaceAll("\\", "/"),
+      targetPath,
+      operation: evidence.operation,
+      destinationPath,
       reason: "valid",
     };
   } catch {
-    return { marker: "invalid", targetPath: null, reason: "protocol-history-invalid" };
+    return invalid("protocol-history-invalid");
   }
 }
 
@@ -498,13 +557,21 @@ export function inspectJsonlTrace(
       }
       terminalCalls.set(terminalKey, status);
       increment(inspection.toolAttempts, partRecord.tool);
-      const protocol = protocolMarker(partRecord.tool, state.metadata, options.nativeAlias);
-      const targetPath =
-        protocol.targetPath ??
-        argumentTargetPath(
-          state.input,
-          options.allowedPathRoot ?? options.nativeAlias?.allowedPathRoot,
-        );
+      const protocol = protocolMarker(
+        partRecord.tool,
+        state.input,
+        state.metadata,
+        options.nativeAlias,
+      );
+      const pathRoot = options.allowedPathRoot ?? options.nativeAlias?.allowedPathRoot;
+      const targetPath = protocol.targetPath ?? argumentTargetPath(state.input, pathRoot);
+      const lifecycle = inputLifecycle(state.input);
+      const operation =
+        protocol.operation === "delete_file" || protocol.operation === "move_file"
+          ? protocol.operation
+          : lifecycle.operation;
+      const destinationPath =
+        protocol.destinationPath ?? argumentPath(lifecycle.destinationPathValue, pathRoot);
       const input = object(state.input);
       const metadata = object(state.metadata);
       const snapshotId =
@@ -528,6 +595,8 @@ export function inspectJsonlTrace(
         protocolMarker: protocol.marker,
         ...(protocol.marker === "absent" ? {} : { protocolReason: protocol.reason }),
         ...(targetPath === undefined ? {} : { targetPath }),
+        ...(operation === undefined ? {} : { operation }),
+        ...(destinationPath === undefined || destinationPath === null ? {} : { destinationPath }),
         ...(typeof snapshotId === "string" ? { snapshotId } : {}),
         ...(issuedSnapshotId === undefined ? {} : { issuedSnapshotId }),
         ...(["edit", "apply_patch", "hashline_edit"].includes(partRecord.tool) ? { rebase } : {}),
