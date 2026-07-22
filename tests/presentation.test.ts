@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { openCodeProviderSchema } from "../src/native-alias.js";
-import { hashlineEditArgumentsSchema, hashlineEditDescription } from "../src/plugin.js";
+import {
+  hashlineEditArgumentsSchema,
+  hashlineEditDescription,
+  nativeAliasEditDescription,
+} from "../src/plugin.js";
 import {
   buildNativeAliasMetadata,
   canonicalJson,
@@ -14,7 +18,8 @@ import {
 
 const unifiedDiff = "--- src/a.ts\tbefore\n+++ src/a.ts\tafter\n@@ -1 +1 @@\n-old\n+new \u03c0\n";
 
-const schema = z.toJSONSchema(hashlineEditArgumentsSchema);
+const rawSchema = z.toJSONSchema(hashlineEditArgumentsSchema);
+const schema = openCodeProviderSchema(rawSchema);
 const schemaSha256 = jsonSha256(schema);
 const commonInput = {
   canonicalPath: "/repo/src/a.ts",
@@ -28,27 +33,35 @@ const commonInput = {
 } satisfies Omit<NativeAliasMetadataInput, "surface">;
 
 describe("native alias presentation contracts", () => {
-  test("fingerprints the provider contract and protocol identity", () => {
-    const providerContract = {
-      description: hashlineEditDescription,
-      parameters: schema,
-    };
-    const serialized = JSON.stringify(providerContract);
+  test("fingerprints the actual hashline and native-alias provider contracts", () => {
+    const hashlineContract = { description: hashlineEditDescription, parameters: schema };
+    const nativeAliasContract = { description: nativeAliasEditDescription, parameters: schema };
+    const hashlineSerialized = JSON.stringify(hashlineContract);
+    const nativeAliasSerialized = JSON.stringify(nativeAliasContract);
 
-    expect(new TextEncoder().encode(serialized)).toHaveLength(3732);
-    expect(createHash("sha256").update(serialized).digest("hex")).toBe(
-      "c99baf32e55357a4dd9822c1b5017147067576fb5054a74563402c5f676e04cd",
-    );
-    expect(schemaSha256).toBe("34336fe2e7a625533979c93d639e661d9a92b94b531c78ae6faa5589e8d906c9");
-    expect(jsonSha256(openCodeProviderSchema(schema))).toBe(
-      "53887ee61c4554c8fe52320a8083a5546c148a578ce9d4f383b8b3e5fc51e0c3",
-    );
-    expect(jsonSha256(providerContract)).toBe(
-      "8111a2f79bac4e0c1e9ff1fea7b7bfa07965819fa5bab4e94a4601d7ea5efcfd",
-    );
-    expect(nativeAliasProtocolFingerprint(commonInput)).toBe(
-      "5817b34f11b60cf7569f900361abe648168e73eb6b128490cc71621553507a21",
-    );
+    expect({
+      hashlineBytes: Buffer.byteLength(hashlineSerialized, "utf8"),
+      hashlineSerializedSha256: createHash("sha256").update(hashlineSerialized).digest("hex"),
+      hashlineCanonicalSha256: jsonSha256(hashlineContract),
+      nativeAliasBytes: Buffer.byteLength(nativeAliasSerialized, "utf8"),
+      nativeAliasSerializedSha256: createHash("sha256").update(nativeAliasSerialized).digest("hex"),
+      nativeAliasCanonicalSha256: jsonSha256(nativeAliasContract),
+      rawSchemaSha256: jsonSha256(rawSchema),
+      providerSchemaSha256: schemaSha256,
+      protocolFingerprint: nativeAliasProtocolFingerprint(commonInput),
+    }).toEqual({
+      hashlineBytes: 3_326,
+      hashlineSerializedSha256: "327d4573cf53a6fbdc9874881c6421b386fce2d4e0c2aa7904058fac9fa56df3",
+      hashlineCanonicalSha256: "27a0a53e36b2bc821d4ea8160380953c915c19447739400518a8c98a2bf44d75",
+      nativeAliasBytes: 3_496,
+      nativeAliasSerializedSha256:
+        "615808e9af1ff15b7795849fd4aa8ba13ae99dedabe1f1017c287a1ceafb9929",
+      nativeAliasCanonicalSha256:
+        "d1e331aaed3c389bdbd8cecb2ede10fd41af7ac61669124050fb571bf64d5317",
+      rawSchemaSha256: "70d2ded38049d1ea851b01a7b3236a5099c79a9b2dea31fc7b5c377266b6f73f",
+      providerSchemaSha256: "8422dfe1152e229c8eefdbc2b3bca488ada671c99115340252f2102b2b1905b1",
+      protocolFingerprint: "4767648d213a21cf5dbd45f9b6fd282c6f5212390f66e922111b41a6f2f75bae",
+    });
   });
 
   test("builds the renderer metadata required by edit", () => {

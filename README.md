@@ -71,6 +71,7 @@ The agent calls `hashline_read` instead of native `read` for a UTF-8 text file i
 ```
 
 The prefixes are annotations, not file content. A line shown as `N!|... [preview only; line not issued]` is too large for one configured output page and cannot be edited by line reference.
+The header's `lines=<count>` value is the file's total logical-line count. A paged, preview-only, or bounded readback result adds `partial=true` only when that rendered page does not cover complete BOF-to-EOF evidence. Its displayed `N|` refs are editable, but that page does not by itself authorize whole-file replacement; multiple attested pages for the same unchanged snapshot can accumulate complete coverage.
 
 ### 2. Submit logical line operations
 
@@ -97,10 +98,11 @@ The prefixes are annotations, not file content. A line shown as `N!|... [preview
 
 `lines: []` deletes a replacement range. `lines: [""]` supplies one empty logical-line value; at an unterminated EOF this can add only the final delimiter rather than a phantom line. Payload lines may not contain embedded CR or LF characters.
 
-Batch every known change to one file in the same call. Set `readback: true` only when a dependent
-follow-up edit is expected. A successful result then includes a new attested snapshot near the first
-changed hunk, avoiding a separate read round trip. If OpenCode truncates or changes that continuation,
-the edit remains applied but a normal `hashline_read` is required.
+Column-zero positive decimal annotations such as `17|`, `17!|`, `@hashline`, `@more`, `@eof`, `@note`, and `@hashline-edit` are rejected in model-supplied payload lines. Set top-level `allowHashlinePrefixes: true` in the initial call only when that exact prefix is intentional source content. Numeric diagnostics are bounded to `N|` or `N!|`; the renderer never emits `0|` or zero-padded numbers. Native aliases persist this failure as a completed non-mutating terminal result so an unsanitized session can recover after restart.
+
+Batch every known change to one file in the same call. Every successful edit keeps the first line `Applied N operations.` and follows it with `@hashline-edit previous=consumed successor=<state>`. `successor=none` or `unavailable` includes `next=hashline_read`; `successor=attached` is immediately followed by the new snapshot page.
+
+Set `readback: true` for structural verification or a dependent follow-up edit. A successful result then includes a new attested snapshot with unified-diff context near the first changed hunk, avoiding a separate read round trip. If OpenCode truncates or changes that continuation, the edit remains applied, the lifecycle receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
 
 Retained source ranges can also be transferred without echoing their contents:
 
@@ -130,6 +132,8 @@ The plugin resolves the canonical path, checks snapshot scope and issued ranges,
 `rebase: "unique"` is explicit recovery for cooperative concurrent changes. It relocates only when exact non-normalized evidence identifies the selected base occurrence and every successful bounded context agrees. Insertion requires the original adjacent boundary to remain intact; copied BOF/EOF evidence is ambiguous. Transfer sources and destinations relocate independently through one bounded mapper, then must retain their complete original topology. It never chooses a nearest match, strips prefixes, repairs indentation, or inserts conflict markers.
 
 Unique rebase proves textual relocation only. It does not prove semantic independence or edit-history causality.
+
+A concrete `unique` case is an external writer prepending a line after your read: a still-retained snapshot can relocate its unchanged, uniquely identified target from old line 2 to current line 3. It cannot revive an ID consumed by an earlier Better Hashline edit; that fails as `SNAPSHOT_UNKNOWN` before relocation and requires the readback successor or another read.
 
 ## Configuration
 
@@ -197,6 +201,8 @@ session:
 The mode still exposes unique `hashline_read` and create-only `hashline_write`; it never aliases
 native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Transport, schema, or
 session incompatibility fails closed without falling back to a builtin or to `hashline_edit`.
+
+Before exact process-local session binding, native-alias edits must be serialized because the preview cannot safely attest multiple unfinished native-looking calls. After system guidance explicitly reports `native-alias-session=bound`, independent single-file calls for different paths may run concurrently; calls for the same path remain serialized and every file has an independent approval/publication outcome. A restart or protocol mismatch removes that permission. This restriction is specific to the experimental alias surface; the default `hashline` surface does not need native session attestation.
 
 Run the credential-free clean-room verifier after installation and after every plugin-order or
 configuration change:

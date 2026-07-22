@@ -44,16 +44,19 @@ function fitPreview(prefix: string, content: string, suffix: string, budget: num
   return `${prefix}${content.slice(0, safeSliceEnd(content, low))}${suffix}`;
 }
 
-export function renderSnapshotPage(input: {
-  snapshot: Snapshot;
-  offset: number;
-  limit: number;
-  maxOutputBytes: number;
-}): RenderedSnapshotPage {
+function renderSnapshotPagePass(
+  input: {
+    snapshot: Snapshot;
+    offset: number;
+    limit: number;
+    maxOutputBytes: number;
+  },
+  reservePartialMarker: boolean,
+): RenderedSnapshotPage {
   const { snapshot, offset, limit, maxOutputBytes } = input;
   const total = snapshot.document.lines.length;
   const header = `@hashline snapshot=${snapshot.id} sha256=${snapshot.digest.slice(0, 12)} lines=${total}`;
-  const rendered = [header];
+  const rendered = [reservePartialMarker ? `${header} partial=true` : header];
   const ranges: IssuedRange[] = [];
   let cursor = Math.min(offset - 1, total);
   let displayedLines = 0;
@@ -87,6 +90,10 @@ export function renderSnapshotPage(input: {
   }
 
   const eof = cursor >= total;
+  const partial = offset !== 1 || !eof || hasPreviewOnlyLine;
+  // A byte-limited result discovered to be partial is rerendered with marker bytes reserved.
+  if (partial && !reservePartialMarker) return renderSnapshotPagePass(input, true);
+  if (!partial && reservePartialMarker) rendered[0] = header;
   rendered.push(eof ? "@eof" : `@more offset=${cursor + 1}`);
   if (hasPreviewOnlyLine) {
     rendered.push("@note lines marked ! cannot be edited by line reference");
@@ -99,4 +106,16 @@ export function renderSnapshotPage(input: {
   };
   if (!eof) result.nextOffset = cursor + 1;
   return result;
+}
+
+export function renderSnapshotPage(input: {
+  snapshot: Snapshot;
+  offset: number;
+  limit: number;
+  maxOutputBytes: number;
+}): RenderedSnapshotPage {
+  const total = input.snapshot.document.lines.length;
+  const start = Math.min(input.offset - 1, total);
+  const knownPartial = input.offset !== 1 || start + input.limit < total;
+  return renderSnapshotPagePass(input, knownPartial);
 }

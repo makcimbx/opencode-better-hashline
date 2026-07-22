@@ -347,7 +347,7 @@ describe("range transfers", () => {
     );
     expect(new Set(messages)).toEqual(
       new Set([
-        "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+        "INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
       ]),
     );
   });
@@ -458,8 +458,10 @@ describe("range transfers", () => {
         { op: "copy_range", startLine: 2, endLine: 2, afterLine: 6 },
       ],
     ] satisfies EditOperation[][]) {
-      expect(() => plan(text, text, operations)).toThrow("OPERATIONS_OVERLAP:");
-      expect(() => plan(text, text, [...operations].reverse())).toThrow("OPERATIONS_OVERLAP:");
+      expect(() => plan(text, text, operations)).toThrow("INSERTION_BOUNDARY_CONFLICT:");
+      expect(() => plan(text, text, [...operations].reverse())).toThrow(
+        "INSERTION_BOUNDARY_CONFLICT:",
+      );
     }
   });
 

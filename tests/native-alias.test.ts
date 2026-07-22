@@ -12,6 +12,9 @@ import {
 import { buildNativeAliasMetadata, type NativeAliasSurface } from "../src/presentation.js";
 import {
   assertNativeAliasHistory,
+  buildNativeAliasDisplayPrefixRejectionMetadata,
+  displayPrefixRejectionMessage,
+  findHashlineDisplayPrefix,
   type NativeAliasProtocolIdentity,
   NativeAliasSessionRegistry,
   SESSION_BINDING_LIMIT,
@@ -335,6 +338,99 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
+  test("accepts only exact completed display-prefix rejections", () => {
+    const input = {
+      filePath: "src/a.ts",
+      snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
+      operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["17!|old"] }],
+    };
+    const match = findHashlineDisplayPrefix(input.operations);
+    if (!match) throw new Error("Expected a display-prefix match");
+    const markerMetadata = buildNativeAliasDisplayPrefixRejectionMetadata(
+      "edit",
+      input,
+      identity,
+      match,
+    );
+    const metadata = { ...markerMetadata, truncated: false };
+    const output = `DISPLAY_PREFIX_REJECTED: ${displayPrefixRejectionMessage(match)}`;
+    const rejected = (stateInput: unknown, stateMetadata: unknown, stateOutput = output) => [
+      {
+        parts: [
+          {
+            type: "tool",
+            tool: "edit",
+            state: {
+              status: "completed",
+              input: stateInput,
+              metadata: stateMetadata,
+              output: stateOutput,
+              title: "src/a.ts",
+              time: { start: 1, end: 2 },
+            },
+          },
+        ],
+      },
+    ];
+
+    expect(() => assertNativeAliasHistory(rejected(input, metadata), identity)).not.toThrow();
+    expect(() =>
+      assertNativeAliasHistory(
+        rejected(
+          { ...input, operations: [{ ...input.operations[0], lines: ["18!|old"] }] },
+          metadata,
+        ),
+        identity,
+      ),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    expect(() =>
+      assertNativeAliasHistory(
+        rejected(input, {
+          ...metadata,
+          betterHashlineRejection: {
+            ...(markerMetadata.betterHashlineRejection as Record<string, unknown>),
+            lineIndex: 1,
+          },
+        }),
+        identity,
+      ),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    expect(() => assertNativeAliasHistory(rejected(input, undefined), identity)).toThrow(
+      "SESSION_PROTOCOL_MISMATCH:",
+    );
+    expect(() =>
+      assertNativeAliasHistory(rejected(input, metadata, `${output} changed`), identity),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    expect(() =>
+      assertNativeAliasHistory(rejected(input, metadata), {
+        ...identity,
+        worktree: resolve(worktree, "other"),
+      }),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("bounds numeric display-prefix evidence", () => {
+    const input = {
+      filePath: "src/a.ts",
+      snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
+      operations: [
+        {
+          op: "replace",
+          startLine: 1,
+          endLine: 1,
+          lines: [`1${"0".repeat(1024 * 1024)}!|old`],
+        },
+      ],
+    };
+    const match = findHashlineDisplayPrefix(input.operations);
+    if (!match) throw new Error("Expected a display-prefix match");
+    const metadata = buildNativeAliasDisplayPrefixRejectionMetadata("edit", input, identity, match);
+
+    expect(match.prefix).toBe("N!|");
+    expect(Buffer.byteLength(displayPrefixRejectionMessage(match), "utf8")).toBeLessThan(512);
+    expect(Buffer.byteLength(JSON.stringify(metadata), "utf8")).toBeLessThan(1024);
+  });
+
   test("enforces exact metadata keys and unified-diff hunk arithmetic", () => {
     const extraMetadata = { ...validMetadata("edit"), unexpected: true };
     const malformedPatch = validMetadata("apply_patch");
@@ -596,10 +692,13 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
-  test("binds a session to one fingerprint, evicts entries, and clears on disposal", () => {
+  test("reports binding states, evicts entries, and clears on disposal", () => {
     const registry = new NativeAliasSessionRegistry();
+    expect(registry.status("session", "fingerprint-a")).toBe("unbound");
     expect(registry.isBound("session", "fingerprint-a")).toBeFalse();
     registry.bind("session", "fingerprint-a");
+    expect(registry.status("session", "fingerprint-a")).toBe("bound");
+    expect(registry.status("session", "fingerprint-b")).toBe("mismatch");
     expect(registry.isBound("session", "fingerprint-a")).toBeTrue();
     expect(() => registry.isBound("session", "fingerprint-b")).toThrow(
       "SESSION_PROTOCOL_MISMATCH:",
@@ -608,9 +707,9 @@ describe("native alias session protocol", () => {
     for (let index = 0; index < SESSION_BINDING_LIMIT + 1; index += 1) {
       registry.bind(`session-${index}`, "fingerprint-a");
     }
-    expect(registry.isBound("session", "fingerprint-a")).toBeFalse();
-    expect(registry.isBound(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBeTrue();
+    expect(registry.status("session", "fingerprint-a")).toBe("unbound");
+    expect(registry.status(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBe("bound");
     registry.clear();
-    expect(registry.isBound(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBeFalse();
+    expect(registry.status(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBe("unbound");
   });
 });

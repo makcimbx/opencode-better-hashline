@@ -10,10 +10,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Add a project-local OpenCode configuration that loads the working-tree plugin in enforced `native-aliases` mode for dogfooding.
+- Add `INSERTION_BOUNDARY_CONFLICT` so duplicate insert/copy destinations are distinguishable from spatial overlap.
+- Add `@hashline-edit` lifecycle receipts that distinguish consumed snapshots with attached, absent, or unavailable successors.
 
 ### Changed
+- Mark incomplete snapshot pages and bounded readbacks with `partial=true`, clarify cumulative issued coverage, and provide actionable reread guidance.
+- Clarify that `unique` relocates only still-retained snapshots after external changes.
+- Permit concurrent native-alias calls for independent files only after exact process-local session binding; unbound and same-path calls remain serialized.
+- Report exact display-prefix coordinates with bounded numeric evidence, recognize lifecycle markers, and reserve `allowHashlinePrefixes` for intentional source bytes in the initial call.
+- Verify native-alias prefix rejection and restart recovery through two real pinned OpenCode processes during `pack:check`.
 
 ### Fixed
+- Classify mixed `replace_file` batches as `INVALID_ARGUMENT` instead of spatial overlap.
+- Persist native-alias `DISPLAY_PREFIX_REJECTED` recovery as an exact worktree-bound, completed non-mutating terminal result on supported OpenCode hosts.
+- Measure actual projected hashline and native-alias provider contracts instead of a hybrid schema fixture.
 
 ## [0.4.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.3.2...v0.4.0) (2026-07-21)
 

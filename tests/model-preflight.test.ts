@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import {
   assertNativeAliasPreflightReceipt,
   NATIVE_ALIAS_PREFLIGHT_SCHEMA_VERSION,
@@ -7,10 +8,21 @@ import {
   type NativeAliasPreflightReceipt,
 } from "../benchmarks/model/preflight.js";
 import type { EffectiveToolIdentities } from "../benchmarks/model/provenance.js";
-import { canonicalJson, jsonSha256 } from "../src/presentation.js";
+import { openCodeProviderSchema } from "../src/native-alias.js";
+import { hashlineEditArgumentsSchema } from "../src/plugin.js";
+import { canonicalJson, jsonSha256, nativeAliasProtocolFingerprint } from "../src/presentation.js";
+import { PACKAGE_VERSION } from "../src/version.js";
 
 const hash = "a".repeat(64);
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+const schemaSha256 = jsonSha256(
+  openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema)),
+);
+const protocolFingerprint = nativeAliasProtocolFingerprint({
+  packageVersion: PACKAGE_VERSION,
+  schemaSha256,
+  hostVersion: "1.18.3",
+});
 const schedule = [{ index: 1, model: "provider/model", adapter: "better-hashline" }];
 const limits = {
   timeoutMs: 300_000,
@@ -50,16 +62,16 @@ const toolchain: EffectiveToolIdentities = {
   },
 };
 const artifact = {
-  packageVersion: "0.2.1",
-  filename: "opencode-better-hashline-0.2.1.tgz",
-  relativePath: "artifacts/opencode-better-hashline-0.2.1.tgz",
+  packageVersion: PACKAGE_VERSION,
+  filename: `opencode-better-hashline-${PACKAGE_VERSION}.tgz`,
+  relativePath: `artifacts/opencode-better-hashline-${PACKAGE_VERSION}.tgz`,
   sha256: hash,
   installedLockfileSha256: hash,
   packageTreeSha256: hash,
 };
 const platform = { name: process.platform, arch: process.arch, osRelease: "test-os" };
 const expected = {
-  pilotId: "native-alias-pilot-v7",
+  pilotId: "synthetic-native-alias-preflight",
   sourceCommit: "b".repeat(40),
   sourceStatusSha256: hash,
   runnerExecutableSha256: hash,
@@ -112,11 +124,11 @@ const caseReport = (
     route,
     model: route === "native-apply-patch" ? "scripted/gpt-5-scripted" : "scripted/scripted",
     editTool,
-    schemaSha256: "53887ee61c4554c8fe52320a8083a5546c148a578ce9d4f383b8b3e5fc51e0c3",
+    schemaSha256,
     ...(route === "hashline"
       ? {}
       : {
-          protocolFingerprint: "1633511a6dea50f48730a565aaad23db54018b4125c4528de0c1a52e9365b971",
+          protocolFingerprint,
         }),
     finalBytesSha256: "8b1f3c90fab7f353b4a997497392fa025ea08f0b023c2f5f4ab9ec0993494293",
     providerRequests: route === "native-edit" ? 24 : route === "native-apply-patch" ? 21 : 17,
@@ -166,7 +178,7 @@ const receipt: NativeAliasPreflightReceipt = {
   platform,
   verifierReport: {
     ok: true,
-    packageVersion: "0.2.1",
+    packageVersion: PACKAGE_VERSION,
     hostVersion: "1.18.3",
     protocol: "native-aliases/v1",
     rollbackVerified: true,
@@ -193,7 +205,7 @@ const receipt: NativeAliasPreflightReceipt = {
 };
 
 describe("native alias preflight receipt", () => {
-  test("accepts one clean receipt bound to the frozen schedule and artifact", () => {
+  test("accepts one coherent synthetic receipt for the current package identity", () => {
     expect(() =>
       assertNativeAliasPreflightReceipt(structuredClone(receipt), expected),
     ).not.toThrow();

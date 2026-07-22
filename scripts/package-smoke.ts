@@ -199,6 +199,17 @@ try {
   if (!`${invalidProbe.stdout}\n${invalidProbe.stderr}`.includes("CONFIG_INVALID")) {
     throw new Error("Invalid plugin options did not produce a fail-closed OpenCode diagnostic");
   }
+  await run(
+    [
+      process.execPath,
+      join(root, "scripts", "session-smoke.ts"),
+      opencode,
+      join(sandbox, "node_modules", "opencode-better-hashline"),
+      join(sandbox, "native-alias-session"),
+      "--native-alias-recovery",
+    ],
+    root,
+  );
   const binDirectory = join(sandbox, "node_modules", ".bin");
   const binCandidates =
     process.platform === "win32"

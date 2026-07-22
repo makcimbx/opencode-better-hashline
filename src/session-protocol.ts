@@ -6,6 +6,7 @@ import { exactRelativePath } from "./path-identity.js";
 import {
   canonicalJson,
   canonicalPathSha256,
+  jsonSha256,
   NATIVE_ALIAS_PROTOCOL,
   type NativeAliasSurface,
 } from "./presentation.js";
@@ -42,6 +43,73 @@ type HistoryOptions = {
 function record(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   return value as Record<string, unknown>;
+}
+
+export type NativeAliasBindingStatus = "bound" | "unbound" | "mismatch";
+
+export type HashlineDisplayPrefixMatch = {
+  operationIndex: number;
+  lineIndex: number;
+  prefix: string;
+};
+
+function numericDisplayPrefix(line: string): "N|" | "N!|" | undefined {
+  const first = line.charCodeAt(0);
+  if (first < 49 || first > 57) return undefined;
+  let index = 1;
+  while (index < line.length) {
+    const code = line.charCodeAt(index);
+    if (code < 48 || code > 57) break;
+    index += 1;
+  }
+  if (line.charCodeAt(index) === 124) return "N|";
+  if (line.charCodeAt(index) === 33 && line.charCodeAt(index + 1) === 124) return "N!|";
+  return undefined;
+}
+
+export function findHashlineDisplayPrefix(
+  operationsValue: readonly unknown[],
+): HashlineDisplayPrefixMatch | undefined {
+  for (const [operationIndex, operationValue] of operationsValue.entries()) {
+    const operation = record(operationValue);
+    if (!operation || operation.op === "copy_range" || operation.op === "move_range") continue;
+    if (!Array.isArray(operation.lines)) continue;
+    for (const [lineIndex, line] of operation.lines.entries()) {
+      if (typeof line !== "string") continue;
+      const prefix =
+        numericDisplayPrefix(line) ??
+        /^@(?:hashline(?:-edit)?|more|eof|note)(?=\s|$)/u.exec(line)?.[0];
+      if (prefix) return { operationIndex, lineIndex, prefix };
+    }
+  }
+  return undefined;
+}
+
+export function displayPrefixRejectionMessage(match: HashlineDisplayPrefixMatch): string {
+  return `operations[${match.operationIndex}].lines[${match.lineIndex}] starts with ${JSON.stringify(match.prefix)}, which looks copied from hashline_read. Remove the annotation, or retry with top-level allowHashlinePrefixes:true only when that prefix is intentional file content. No file was changed.`;
+}
+
+export function buildNativeAliasDisplayPrefixRejectionMetadata(
+  toolName: NativeAliasSurface,
+  input: unknown,
+  identity: NativeAliasProtocolIdentity,
+  match: HashlineDisplayPrefixMatch,
+): Record<string, unknown> {
+  return {
+    betterHashlineRejection: {
+      protocol: NATIVE_ALIAS_PROTOCOL,
+      packageVersion: identity.packageVersion,
+      schemaSha256: identity.schemaSha256,
+      hostVersion: identity.hostVersion,
+      worktreeSha256: canonicalPathSha256(identity.worktree),
+      surface: toolName,
+      errorCode: "DISPLAY_PREFIX_REJECTED",
+      inputSha256: jsonSha256(input),
+      operationIndex: match.operationIndex,
+      lineIndex: match.lineIndex,
+      prefix: match.prefix,
+    },
+  };
 }
 
 function rejectHistory(reason: string): never {
@@ -433,10 +501,10 @@ function assertCompletedInput(
   assertAliasInput(toolName, inputValue, canonicalPath, directory);
 }
 
-function isKnownRejectedAliasCall(toolName: NativeAliasSurface, state: Record<string, unknown>) {
+function isKnownNativeShapeRejection(toolName: NativeAliasSurface, state: Record<string, unknown>) {
   const input = record(state.input);
   const expectedError = `INVALID_ARGUMENT: Invalid ${toolName} arguments.`;
-  if (!input || state.error !== expectedError) return false;
+  if (!input || state.error !== expectedError || state.metadata !== undefined) return false;
   if (toolName === "apply_patch") {
     return exactKeys(input, ["patchText"]) && typeof input.patchText === "string";
   }
@@ -448,6 +516,64 @@ function isKnownRejectedAliasCall(toolName: NativeAliasSurface, state: Record<st
     typeof input.newString === "string" &&
     (input.replaceAll === undefined || typeof input.replaceAll === "boolean")
   );
+}
+
+function isAttestedCompletedDisplayPrefixRejection(
+  toolName: NativeAliasSurface,
+  state: Record<string, unknown>,
+  identity: NativeAliasProtocolIdentity,
+): boolean {
+  const metadata = record(state.metadata);
+  const marker = record(metadata?.betterHashlineRejection);
+  if (
+    state.status !== "completed" ||
+    !metadata ||
+    metadata.truncated !== false ||
+    !marker ||
+    !exactKeys(metadata, ["betterHashlineRejection", "truncated"]) ||
+    !exactKeys(marker, [
+      "errorCode",
+      "hostVersion",
+      "inputSha256",
+      "lineIndex",
+      "operationIndex",
+      "packageVersion",
+      "prefix",
+      "protocol",
+      "schemaSha256",
+      "surface",
+      "worktreeSha256",
+    ]) ||
+    marker.protocol !== NATIVE_ALIAS_PROTOCOL ||
+    marker.packageVersion !== identity.packageVersion ||
+    marker.schemaSha256 !== identity.schemaSha256 ||
+    marker.hostVersion !== identity.hostVersion ||
+    marker.worktreeSha256 !== canonicalPathSha256(identity.worktree) ||
+    marker.surface !== toolName ||
+    marker.errorCode !== "DISPLAY_PREFIX_REJECTED" ||
+    typeof marker.inputSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(marker.inputSha256)
+  ) {
+    return false;
+  }
+  const input = assertAliasInput(toolName, state.input);
+  const match = findHashlineDisplayPrefix(input.operations as unknown[]);
+  return (
+    match !== undefined &&
+    marker.inputSha256 === jsonSha256(input) &&
+    marker.operationIndex === match.operationIndex &&
+    marker.lineIndex === match.lineIndex &&
+    marker.prefix === match.prefix &&
+    input.allowHashlinePrefixes !== true &&
+    state.output === `DISPLAY_PREFIX_REJECTED: ${displayPrefixRejectionMessage(match)}`
+  );
+}
+
+function isKnownRejectedAliasCall(
+  toolName: NativeAliasSurface,
+  state: Record<string, unknown>,
+): boolean {
+  return isKnownNativeShapeRejection(toolName, state);
 }
 
 function assertTime(value: unknown, completed: boolean): void {
@@ -654,6 +780,12 @@ function inspectHistory(
         rejectHistory("This session contains the hashline tool surface.");
       }
       if (state?.status === "error" && isKnownRejectedAliasCall(part.tool, state)) continue;
+      if (
+        state?.status === "completed" &&
+        isAttestedCompletedDisplayPrefixRejection(part.tool, state, identity)
+      ) {
+        continue;
+      }
       if (state?.status !== "completed") {
         const correlation = options.currentCall
           ? ` Current correlation: id=${part.callID === options.currentCall.id ? "match" : "mismatch"}, tool=${part.tool === options.currentCall.tool ? "match" : "mismatch"}, input=${currentInputMatches ? "match" : "mismatch"}.`
@@ -685,12 +817,18 @@ export function assertNativeAliasHistory(
 export class NativeAliasSessionRegistry {
   readonly #bindings = new Map<string, string>();
 
-  isBound(sessionId: string, fingerprint: string): boolean {
+  status(sessionId: string, fingerprint: string): NativeAliasBindingStatus {
     const existing = this.#bindings.get(sessionId);
-    if (existing !== undefined && existing !== fingerprint) {
+    if (existing === undefined) return "unbound";
+    return existing === fingerprint ? "bound" : "mismatch";
+  }
+
+  isBound(sessionId: string, fingerprint: string): boolean {
+    const status = this.status(sessionId, fingerprint);
+    if (status === "mismatch") {
       rejectHistory("This session is already bound to another Better Hashline protocol.");
     }
-    return existing === fingerprint;
+    return status === "bound";
   }
 
   bind(sessionId: string, fingerprint: string): void {

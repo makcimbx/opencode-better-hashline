@@ -164,6 +164,8 @@ async function aliasHarness(options: AliasHarnessOptions = {}) {
                       };
                     } else if (boundState?.status === "running") {
                       boundState = { ...boundState, time: boundState.time ?? { start: 1 } };
+                    } else if (boundState?.status === "error") {
+                      boundState = { ...boundState, time: boundState.time ?? { start: 1, end: 2 } };
                     }
                     return {
                       ...record,
@@ -258,9 +260,9 @@ function replaceArgs(filePath: string, snapshotId: string, replacement = "TWO") 
   };
 }
 
-async function systemGuidance(value: Hooks): Promise<string> {
+async function systemGuidance(value: Hooks, sessionID?: string): Promise<string> {
   const output = { system: [] as string[] };
-  await value["experimental.chat.system.transform"]?.({} as never, output);
+  await value["experimental.chat.system.transform"]?.({ sessionID } as never, output);
   return output.system.join("\n");
 }
 
@@ -282,10 +284,10 @@ describe("native alias activation and visibility", () => {
     expect(value.tool?.edit?.description).toBe(nativeAliasEditDescription);
     expect(value.tool?.apply_patch?.description).toBe(nativeAliasEditDescription);
     expect(nativeAliasEditDescription).toContain(
-      "Never issue edit or apply_patch calls concurrently or in the same assistant message",
+      "serialize while system guidance says native-alias-session=unbound",
     );
-    expect(hashlineEditDescription).not.toContain("edit or apply_patch calls concurrently");
-    expect(await systemGuidance(value)).toContain("native aliases are active");
+    expect(hashlineEditDescription).not.toContain("native-alias-session");
+    expect(await systemGuidance(value)).toContain("native-alias-session=unbound");
     expect(await systemGuidance(value)).toContain(
       "Never issue edit or apply_patch calls concurrently or in the same assistant message",
     );
@@ -528,7 +530,9 @@ describe("native alias argument and mutation contract", () => {
         result,
       );
 
-      expect(result.output).toContain("Applied 1 operation.\n@hashline snapshot=");
+      expect(result.output).toContain(
+        "Applied 1 operation.\n@hashline-edit previous=consumed successor=attached\n@hashline snapshot=",
+      );
       expect(result.output).toContain("2|TWO");
       expect(result.metadata.hashlinePending).toBeUndefined();
       expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\nTWO\nthree\n");
@@ -671,6 +675,123 @@ describe("native alias argument and mutation contract", () => {
     expect(String(outcome.error)).toContain("SNAPSHOT_UNKNOWN:");
     expect(editApprovals).toBe(1);
     expect(await readFile(join(root, "concurrent.txt"), "utf8")).toBe("one\nFIRST\n");
+  });
+
+  test("overlaps independent-file aliases only after exact session binding", async () => {
+    const sessionID = "bound-parallel";
+    const toolContext = context({ sessionID });
+    const { value, historyCalls } = await aliasHarness();
+    const { edit, applyPatch } = aliasRegistry(value);
+    for (const filePath of ["bind.txt", "left.txt", "right.txt"]) {
+      await writeFile(join(root, filePath), "one\ntwo\n");
+    }
+    const bindSnapshot = await issueSnapshot(value, toolContext, "bind.txt");
+    await edit.execute(
+      replaceArgs("bind.txt", String(bindSnapshot.metadata.snapshotId), "BOUND"),
+      toolContext,
+    );
+    const guidance = await systemGuidance(value, sessionID);
+    expect(guidance).toContain("native-alias-session=bound");
+    expect(guidance).toContain("Different paths may run concurrently");
+    expect(guidance).not.toContain("Never issue edit or apply_patch calls concurrently");
+
+    const leftSnapshot = await issueSnapshot(value, toolContext, "left.txt");
+    const rightSnapshot = await issueSnapshot(value, toolContext, "right.txt");
+    let approvalCount = 0;
+    let markBothStarted = () => {};
+    let releaseApprovals = () => {};
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
+    const approvalGate = new Promise<void>((resolve) => {
+      releaseApprovals = resolve;
+    });
+    const concurrentContext = context({
+      sessionID,
+      async onAsk(request) {
+        if (request.permission !== "edit") return;
+        approvalCount += 1;
+        if (approvalCount === 2) markBothStarted();
+        await approvalGate;
+      },
+    });
+    const left = edit.execute(
+      replaceArgs("left.txt", String(leftSnapshot.metadata.snapshotId), "LEFT"),
+      concurrentContext,
+    );
+    const right = applyPatch.execute(
+      replaceArgs("right.txt", String(rightSnapshot.metadata.snapshotId), "RIGHT"),
+      concurrentContext,
+    );
+    await bothStarted;
+    expect(approvalCount).toBe(2);
+    releaseApprovals();
+    await Promise.all([left, right]);
+
+    expect(historyCalls).toEqual([sessionID]);
+    expect(await readFile(join(root, "left.txt"), "utf8")).toBe("one\nLEFT\n");
+    expect(await readFile(join(root, "right.txt"), "utf8")).toBe("one\nRIGHT\n");
+  });
+
+  test("persists completed display-prefix rejection so a restarted session can recover", async () => {
+    const sessionID = "prefix-retry";
+    await writeFile(join(root, "prefix.txt"), "one\ntwo\n");
+    const first = await aliasHarness();
+    const firstContext = context({ sessionID });
+    const initialRead = await issueSnapshot(first.value, firstContext, "prefix.txt");
+    const blockedArgs = {
+      ...replaceArgs("prefix.txt", String(initialRead.metadata.snapshotId), "@hashline"),
+      operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["@hashline"] }],
+      readback: true,
+    };
+    const rejection = structured(
+      await aliasRegistry(first.value).edit.execute(blockedArgs, firstContext),
+    );
+    expect(rejection.output).toStartWith("DISPLAY_PREFIX_REJECTED:");
+    expect(rejection.metadata.betterHashlineRejection).toBeDefined();
+    expect(await readFile(join(root, "prefix.txt"), "utf8")).toBe("one\ntwo\n");
+
+    const persisted = {
+      ...rejection,
+      metadata: { ...rejection.metadata, truncated: false },
+    };
+    const after = first.value["tool.execute.after"];
+    if (!after) throw new Error("Missing after hook");
+    await after({ tool: "edit", sessionID, callID: "rejected-call", args: blockedArgs }, persisted);
+    expect(persisted.output).toBe(rejection.output);
+    await first.value.dispose?.();
+
+    const second = await aliasHarness({
+      history: [
+        {
+          parts: [
+            {
+              type: "tool",
+              tool: "edit",
+              state: {
+                status: "completed",
+                input: blockedArgs,
+                metadata: persisted.metadata,
+                output: persisted.output,
+                title: persisted.title,
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const secondContext = context({ sessionID });
+    const freshRead = await issueSnapshot(second.value, secondContext, "prefix.txt");
+    await aliasRegistry(second.value).edit.execute(
+      {
+        ...replaceArgs("prefix.txt", String(freshRead.metadata.snapshotId), "@hashline"),
+        operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["@hashline"] }],
+        allowHashlinePrefixes: true,
+      },
+      secondContext,
+    );
+    expect(second.historyCalls).toEqual([sessionID]);
+    expect(await readFile(join(root, "prefix.txt"), "utf8")).toBe("one\n@hashline\n");
   });
 
   test("rejects oversized renderer metadata before edit permission and publication", async () => {

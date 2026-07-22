@@ -11,7 +11,7 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/render.ts` | Byte-bounded `N|content` pages and preview-only oversized lines |
 | `src/presentation.ts` | Experimental native-alias metadata, canonical fingerprints, and serialized-size measurement |
 | `src/native-alias.ts` | Bounded exact-host detection through OpenCode's configured SDK transport |
-| `src/session-protocol.ts` | Bounded persisted-history validation and instance-local alias session binding |
+| `src/session-protocol.ts` | Bounded persisted-history validation, attested rejection markers, and instance-local alias session binding |
 | `src/session-export.ts` | Strict bounded export identity and independently bound worktree-locator attestation |
 | `src/model-trace.ts` | Shared trace/export correlation and native-alias benchmark oracle |
 | `src/path-identity.ts` | Exact canonical path equality, containment, and filesystem-root identity |
@@ -61,17 +61,15 @@ The default unique tool IDs avoid three OpenCode hazards:
 
 The plugin keeps native `read` and adds `hashline_read`, `hashline_edit`, and `hashline_write`. With `enforce: true`, `chat.message` disables native mutator IDs on every user turn and `tool.execute.before` is a second tripwire. This is defense in depth, not a shell sandbox.
 
-The explicit native-alias preview instead registers Better Hashline's shared executor as `edit` and
-`apply_patch`, lets OpenCode retain one by model route, and preserves unique read/create tools.
-Activation uses the host-configured SDK transport, exact observed host and schema fingerprints, bounded
-session-history validation, double argument parsing, and native renderer metadata. Registry ownership
-still cannot be attested, so this surface does not replace the unique-ID recommendation.
+The explicit native-alias preview instead registers Better Hashline's shared executor as `edit` and `apply_patch`, lets OpenCode retain one by model route, and preserves unique read/create tools. Activation uses the host-configured SDK transport, exact observed host and schema fingerprints, bounded session-history validation, double argument parsing, and native renderer metadata. Registry ownership still cannot be attested, so this surface does not replace the unique-ID recommendation.
+
+Before process-local session binding, alias calls remain sequential so history validation sees at most one active native-looking call. A bound session skips repeated history inspection for the same exact package/schema/host/worktree fingerprint, allowing per-path locks to overlap independent files. Same-path calls remain serialized, and independent approvals/publications explicitly do not form a transaction.
 
 ## State and Eviction
 
 Snapshots are process-memory objects. Retained weight accounts for raw bytes plus decoded UTF-16 text. Limits apply globally, per session, and per session/path. LRU and TTL eviction skip pinned edits. If all eligible entries are pinned or one file cannot fit the configured budget, the operation rejects rather than exceeding the budget silently.
 
-A successful or attempted publication transition invalidates prior snapshots for the path. By default the agent must reread before another edit. With explicit `readback: true`, the post-rename exact verification bytes may instead create a new snapshot near the changed hunk. Its refs are issued only after the after-hook attests delivery; a failed continuation never changes the already-completed write into a reported mutation failure. Multiple exact reads can reuse one retained snapshot only when digest and bytes both match.
+A successful or attempted publication transition invalidates prior snapshots for the path. Successful output explicitly reports that transition through `@hashline-edit previous=consumed successor=none|attached|unavailable`. By default the agent must reread before another edit. With explicit `readback: true`, the post-rename exact verification bytes may instead create a new snapshot near the changed hunk. Its refs are issued only after the after-hook attests delivery; a failed continuation never changes the already-completed write into a reported mutation failure. Multiple exact reads can reuse one retained snapshot only when digest and bytes both match, and their issued pages can accumulate complete coverage.
 
 ## Filesystem Model
 
@@ -79,7 +77,7 @@ Existing files resolve through symlinks to a canonical target. The canonical tar
 
 Supported existing targets are regular, single-link, writable files within the size limit. Hardlinks are rejected because replacing one directory entry breaks alias expectations. Special files and unsupported metadata states reject.
 
-The process-global lock key is the canonical physical path, case-folded on Windows. It serializes cooperating plugin calls in one process. It cannot coordinate another OpenCode process, formatter, editor, daemon, or network client.
+The process-global lock key is the canonical physical path, case-folded on Windows. It serializes cooperating plugin calls targeting that path while allowing independent paths to progress concurrently after any native session requirement is satisfied. It cannot coordinate another OpenCode process, formatter, editor, daemon, or network client.
 
 ## Testing Strategy
 
@@ -89,8 +87,8 @@ The test suite has separate layers:
 - snapshot provenance, TTL, pinning, and byte-budget tests;
 - renderer truncation and UTF-8 budget tests;
 - real temporary-filesystem tests for symlinks, hardlinks, races, modes, and no-replace creation;
-- plugin contract tests with fake OpenCode contexts and real tool/hook definitions;
-- packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions for unique, non-GPT alias, and GPT-like alias routes;
+- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including lifecycle receipts, attested terminal rejections, and bound/unbound alias concurrency;
+- packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including two-process native-alias rejection/restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
 - deterministic non-gating benchmarks and an opt-in model harness.
 
