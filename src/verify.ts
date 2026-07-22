@@ -2279,7 +2279,7 @@ async function verifyScenario(
           packageVersion: PACKAGE_VERSION,
           schemaSha256,
           hostVersion: PINNED_OPENCODE_VERSION,
-          allowedPathRoot: workspace,
+          allowedPathRoot: canonicalWorkspace,
           expectedDirectory: workspace,
           expectedWorktree,
         },
