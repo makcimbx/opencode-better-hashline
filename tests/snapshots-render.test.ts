@@ -114,12 +114,14 @@ describe("snapshot rendering", () => {
     const snapshot = store.remember(scope, "/worktree/file", document("a\nb\nc"));
     const first = renderSnapshotPage({ snapshot, offset: 1, limit: 2, maxOutputBytes: 4096 });
     expect(first.output).toContain(`@hashline snapshot=${snapshot.id}`);
+    expect(first.output).toContain("lines=3 partial=true");
     expect(first.output).toContain("1|a\n2|b\n@more offset=3");
     expect(first.page).toEqual({ ranges: [{ start: 1, end: 2 }], bof: true, eof: false });
     expect(first.nextOffset).toBe(3);
 
     const second = renderSnapshotPage({ snapshot, offset: 3, limit: 2, maxOutputBytes: 4096 });
     expect(second.output).toContain("3|c\n@eof");
+    expect(second.output).toContain("lines=3 partial=true");
     expect(second.page).toEqual({ ranges: [{ start: 3, end: 3 }], bof: false, eof: true });
     expect(second.nextOffset).toBeUndefined();
   });
@@ -134,7 +136,32 @@ describe("snapshot rendering", () => {
       maxOutputBytes: 4096,
     });
     expect(complete.output).toContain(`1|${"x".repeat(3000)}`);
+    expect(complete.output).not.toContain("partial=true");
     expect(complete.page.ranges).toEqual([{ start: 1, end: 1 }]);
+
+    const exactBudget = renderSnapshotPage({
+      snapshot,
+      offset: 1,
+      limit: 1,
+      maxOutputBytes: Buffer.byteLength(complete.output, "utf8"),
+    });
+    expect(exactBudget.output).toBe(complete.output);
+
+    const displacedSnapshot = store.remember(
+      scope,
+      "/worktree/displaced",
+      document(`${"x".repeat(935)}\n${"y".repeat(100)}`),
+    );
+    const displaced = renderSnapshotPage({
+      snapshot: displacedSnapshot,
+      offset: 1,
+      limit: 2,
+      maxOutputBytes: 1024,
+    });
+    expect(Buffer.byteLength(displaced.output, "utf8")).toBeLessThanOrEqual(1024);
+    expect(displaced.output).toContain("partial=true");
+    expect(displaced.output).toContain("1!|");
+    expect(displaced.page.ranges).toEqual([]);
 
     const rendered = renderSnapshotPage({
       snapshot,
@@ -145,6 +172,7 @@ describe("snapshot rendering", () => {
     expect(Buffer.byteLength(rendered.output, "utf8")).toBeLessThanOrEqual(1024);
     expect(rendered.output).toContain("1!|");
     expect(rendered.output).toContain("line not issued");
+    expect(rendered.output).toContain("partial=true");
     expect(rendered.page.ranges).toEqual([]);
   });
 
@@ -182,5 +210,6 @@ describe("snapshot rendering", () => {
 
     const pastEnd = renderSnapshotPage({ snapshot, offset: 99, limit: 1, maxOutputBytes: 1024 });
     expect(pastEnd.page).toEqual({ ranges: [], bof: false, eof: true });
+    expect(pastEnd.output).toContain("lines=1 partial=true");
   });
 });

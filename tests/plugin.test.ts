@@ -165,6 +165,9 @@ describe("OpenCode plugin protocol", () => {
       ),
     );
     expect(editResult.output).toContain("Applied 1 operation");
+    expect(editResult.output).toBe(
+      "Applied 1 operation.\n@hashline-edit previous=consumed successor=none next=hashline_read",
+    );
     expect(await readFile(file, "utf8")).toBe("one\nTWO\nthree\n");
     expect(asks.at(-1)).toMatchObject({ permission: "edit" });
     expect(String(asks.at(-1)?.metadata?.diff)).toContain("-two");
@@ -203,7 +206,11 @@ describe("OpenCode plugin protocol", () => {
     const editResult = structured(await hashlineEdit.execute(args, toolContext));
     const successorId = /@hashline snapshot=(s_[A-Za-z0-9_-]{22})/u.exec(editResult.output)?.[1];
     expect(successorId).toBeDefined();
+    expect(editResult.output).toContain(
+      "@hashline-edit previous=consumed successor=attached\n@hashline snapshot=",
+    );
     expect(editResult.output).toContain("2|TWO");
+    expect(editResult.output).not.toContain("partial=true");
 
     await expect(
       hashlineEdit.execute(
@@ -243,6 +250,51 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
+  test("marks bounded readback partial before whole-file replacement", async () => {
+    const file = join(root, "file.txt");
+    const lines = Array.from({ length: 12 }, (_, index) => `line-${index + 1}`);
+    await writeFile(file, `${lines.join("\n")}\n`);
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const args = {
+      filePath: "file.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+      readback: true,
+      operations: [{ op: "replace" as const, startLine: 10, endLine: 10, lines: ["changed"] }],
+    };
+    const editResult = structured(await hashlineEdit.execute(args, toolContext));
+    const successorId = String(
+      /@hashline snapshot=(s_[A-Za-z0-9_-]{22})/u.exec(editResult.output)?.[1],
+    );
+    expect(editResult.output).toContain("lines=12 partial=true");
+    expect(editResult.output).toContain("7|line-7");
+    expect(editResult.output).toContain("10|changed");
+    expect(editResult.output).toContain("11|line-11");
+
+    await value["tool.execute.after"]?.(
+      { tool: "hashline_edit", sessionID: "session", callID: "partial-readback", args },
+      editResult,
+    );
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "file.txt",
+          snapshotId: successorId,
+          operations: [{ op: "replace_file", lines: ["only"], finalNewline: true }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      "RANGE_NOT_FULLY_ISSUED: replace_file requires complete BOF-to-EOF issued coverage.",
+    );
+    await value.dispose?.();
+  });
+
   test("fails post-edit readback closed without misreporting the applied edit", async () => {
     const value = await hooks();
     const { hashlineRead, hashlineEdit } = registry(value);
@@ -273,7 +325,7 @@ describe("OpenCode plugin protocol", () => {
         editResult,
       );
       expect(editResult.output).toBe(
-        "Applied 1 operation. Post-edit snapshot unavailable; run hashline_read before the next edit.",
+        "Applied 1 operation.\n@hashline-edit previous=consumed successor=unavailable next=hashline_read",
       );
       expect(editResult.metadata.hashlinePending).toBeUndefined();
       expect(await readFile(file, "utf8")).toBe("one\nTWO\n");
@@ -576,7 +628,7 @@ describe("OpenCode plugin protocol", () => {
     expect(await readFile(file, "utf8")).toBe("new\n");
   });
 
-  test("rejects copied display prefixes unless explicitly opted in", async () => {
+  test("rejects every display prefix, permits safe similarities, and requires explicit opt-in", async () => {
     const file = join(root, "file.txt");
     await writeFile(file, "old\n");
     const value = await hooks();
@@ -586,17 +638,62 @@ describe("OpenCode plugin protocol", () => {
       await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
     );
     await activateRead(value, readResult);
-    const base = {
-      filePath: "file.txt",
-      snapshotId: String(readResult.metadata.snapshotId),
-      rebase: "none" as const,
-      operations: [{ op: "replace" as const, startLine: 1, endLine: 1, lines: ["1|old"] }],
-    };
-    await expect(hashlineEdit.execute(base, toolContext)).rejects.toThrow(
-      "DISPLAY_PREFIX_REJECTED:",
+    const snapshotId = String(readResult.metadata.snapshotId);
+    const blocked = [
+      { operation: { op: "replace", startLine: 1, endLine: 1, lines: ["1|old"] }, prefix: "N|" },
+      { operation: { op: "insert", afterLine: 0, lines: ["17!|old"] }, prefix: "N!|" },
+      { operation: { op: "replace_file", lines: ["@hashline snapshot=s_x"] }, prefix: "@hashline" },
+      {
+        operation: { op: "replace", startLine: 1, endLine: 1, lines: ["@more offset=2"] },
+        prefix: "@more",
+      },
+      { operation: { op: "insert", afterLine: 1, lines: ["@eof"] }, prefix: "@eof" },
+      { operation: { op: "replace_file", lines: ["@note line not issued"] }, prefix: "@note" },
+      {
+        operation: {
+          op: "replace",
+          startLine: 1,
+          endLine: 1,
+          lines: ["@hashline-edit previous=consumed"],
+        },
+        prefix: "@hashline-edit",
+      },
+    ];
+
+    for (const { operation, prefix } of blocked) {
+      await expect(
+        hashlineEdit.execute(
+          { filePath: "file.txt", snapshotId, operations: [operation] },
+          toolContext,
+        ),
+      ).rejects.toThrow(`operations[0].lines[0] starts with ${JSON.stringify(prefix)}`);
+    }
+
+    const safeLines = ["N|literal", "0|literal", "01|literal", "@hashline-style", " @hashline"];
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId,
+        operations: [{ op: "replace_file", lines: safeLines, finalNewline: true }],
+      },
+      toolContext,
     );
-    await hashlineEdit.execute({ ...base, allowHashlinePrefixes: true }, toolContext);
-    expect(await readFile(file, "utf8")).toBe("1|old\n");
+    expect(await readFile(file, "utf8")).toBe(`${safeLines.join("\n")}\n`);
+
+    const intentionalRead = structured(
+      await hashlineRead.execute({ filePath: "file.txt" }, toolContext),
+    );
+    await activateRead(value, intentionalRead);
+    await hashlineEdit.execute(
+      {
+        filePath: "file.txt",
+        snapshotId: String(intentionalRead.metadata.snapshotId),
+        allowHashlinePrefixes: true,
+        operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["@hashline"] }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toStartWith("@hashline\n");
   });
 
   test("never publishes an edit that its own reader would reject", async () => {
@@ -866,7 +963,7 @@ describe("OpenCode plugin protocol", () => {
         },
         toolContext,
       ),
-    ).rejects.toThrow("OPERATIONS_OVERLAP: replace_file must be the only operation.");
+    ).rejects.toThrow("INVALID_ARGUMENT: replace_file must be the only operation.");
     expect(await readFile(file, "utf8")).toBe("old\n");
   });
 
@@ -930,14 +1027,18 @@ describe("OpenCode plugin protocol", () => {
       "an empty file requires false",
     );
     expect(schema.properties?.rebase?.description).toContain("replace_file forbids unique");
-    expect(schema.properties?.allowHashlinePrefixes?.description).toContain(
-      "Only affects replace, insert, and replace_file payloads",
-    );
-    expect(schema.properties?.readback?.description).toContain("attested successor snapshot");
+    expect(schema.properties?.rebase?.description).toContain("still-retained snapshot");
+    expect(schema.properties?.allowHashlinePrefixes?.description).toContain("Column-0 prefixes");
+    expect(schema.properties?.allowHashlinePrefixes?.description).toContain("initial call");
+    expect(schema.properties?.readback?.description).toContain("structural verification");
+    expect(schema.properties?.readback?.description).toContain("attested successor");
+    expect(schema.properties?.readback?.description).toContain("potentially partial");
     expect(hashlineEditDescription).toContain("immutable pre-batch snapshot");
     expect(hashlineEditDescription).toContain("copy reads pre-edit source");
     expect(hashlineEditDescription).toContain("may touch a destructive endpoint");
-    expect(hashlineEditDescription).toContain("Set readback:true");
+    expect(hashlineEditDescription).toContain("readback:true returns a successor");
+    expect(hashlineEditDescription).toContain("partial=true");
+    expect(hashlineEditDescription).toContain("cannot revive a consumed or unknown snapshot");
     expect(hashlineEditDescription).toContain("afterLine is never adjusted");
     expect(hashlineEditDescription).toContain("finalNewline is replace_file-only");
     expect(hashlineEditDescription).toContain("replace lines:[] deletes");

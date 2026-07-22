@@ -188,7 +188,7 @@ export class SnapshotStore {
     if (!covered) {
       fail(
         "RANGE_NOT_FULLY_ISSUED",
-        `Lines ${start}-${end} were not fully issued by hashline_read.`,
+        `Lines ${start}-${end} were not fully issued. Read hashline_read pages covering this exact range, then retry with the same snapshotId.`,
       );
     }
   }
@@ -199,10 +199,16 @@ export class SnapshotStore {
       fail("INVALID_ARGUMENT", `Boundary ${position} is outside the snapshot.`);
     }
     if (position === 0 && !snapshot.issuedBof) {
-      fail("REF_NOT_ISSUED", "The beginning-of-file boundary was not issued.");
+      fail(
+        "REF_NOT_ISSUED",
+        "The beginning-of-file boundary was not issued. Read hashline_read with offset=1, then retry with the same snapshotId.",
+      );
     }
     if (position === lineCount && !snapshot.issuedEof) {
-      fail("REF_NOT_ISSUED", "The end-of-file boundary was not issued.");
+      fail(
+        "REF_NOT_ISSUED",
+        "The end-of-file boundary was not issued. Read a hashline_read page that reaches @eof, then retry with the same snapshotId.",
+      );
     }
     if (position > 0) this.assertRangeIssued(snapshot, position, position);
     if (position < lineCount) {
@@ -212,7 +218,10 @@ export class SnapshotStore {
 
   assertComplete(snapshot: Snapshot): void {
     if (!snapshot.complete) {
-      fail("RANGE_NOT_FULLY_ISSUED", "replace_file requires a complete, untruncated snapshot.");
+      fail(
+        "RANGE_NOT_FULLY_ISSUED",
+        "replace_file requires complete BOF-to-EOF issued coverage. Read additional pages for the same unchanged file; partial=true describes only the current page, and an N! preview line cannot establish full coverage.",
+      );
     }
   }
 

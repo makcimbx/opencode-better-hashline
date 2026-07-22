@@ -257,7 +257,13 @@ function assertCompatibleChanges(changes: readonly ChangeLocation[]): void {
       const first = changes[left];
       const second = changes[right];
       if (first && second && changesOverlap(first, second)) {
-        fail("OPERATIONS_OVERLAP", "Edit operations overlap after relocation.");
+        const duplicateBoundary = first.start === first.end && second.start === second.end;
+        fail(
+          duplicateBoundary ? "INSERTION_BOUNDARY_CONFLICT" : "OPERATIONS_OVERLAP",
+          duplicateBoundary
+            ? "Edit insertions share a byte boundary after relocation."
+            : "Edit operations overlap after relocation.",
+        );
       }
     }
   }
@@ -333,7 +339,7 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
   }
   if (insertionConflict) {
     fail(
-      "OPERATIONS_OVERLAP",
+      "INSERTION_BOUNDARY_CONFLICT",
       relocated
         ? "Relocated insertions use the same boundary. Combine them into one insertion in the desired order."
         : "Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
@@ -352,7 +358,7 @@ function assertLegacyBaseOperationsCompatible(
       if (first.op === "insert" && second.op === "insert") {
         if (first.afterLine === second.afterLine) {
           fail(
-            "OPERATIONS_OVERLAP",
+            "INSERTION_BOUNDARY_CONFLICT",
             "Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
           );
         }
@@ -429,7 +435,7 @@ export function validateEditOperations(
   const wholeFile = operations.find((operation) => operation.op === "replace_file");
   if (wholeFile) {
     if (operations.length !== 1) {
-      fail("OPERATIONS_OVERLAP", "replace_file must be the only operation.");
+      fail("INVALID_ARGUMENT", "replace_file must be the only operation.");
     }
     renderWholeFile(base, wholeFile);
     return;
@@ -733,7 +739,7 @@ function mapTransferOperations(
       };
     }
     if (operation.op === "replace_file") {
-      fail("OPERATIONS_OVERLAP", "replace_file must be the only operation.");
+      fail("INVALID_ARGUMENT", "replace_file must be the only operation.");
     }
 
     const source = getMappedRange(mapped, rangeFor(operation.startLine, operation.endLine));

@@ -122,7 +122,7 @@ describe("line edit planning", () => {
         { op: "insert", afterLine: 1, lines: ["y"] },
       ]),
     ).toThrow(
-      "OPERATIONS_OVERLAP: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+      "INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
     );
     expect(() =>
       plan("a\nb\n", "a\nb\n", [
@@ -173,7 +173,7 @@ describe("line edit planning", () => {
         { op: "replace_file", lines: ["x"] },
         { op: "insert", afterLine: 1, lines: ["y"] },
       ]),
-    ).toThrow("OPERATIONS_OVERLAP:");
+    ).toThrow("INVALID_ARGUMENT: replace_file must be the only operation.");
     expect(() => plan("a\n", "a\n", [{ op: "replace_file", lines: ["x"] }], "unique")).toThrow(
       "INVALID_ARGUMENT: replace_file does not support unique rebase.",
     );

@@ -37,6 +37,11 @@ import {
 import { renderSnapshotPage } from "./render.js";
 import {
   assertNativeAliasHistory,
+  buildNativeAliasDisplayPrefixRejectionMetadata,
+  displayPrefixRejectionMessage,
+  findHashlineDisplayPrefix,
+  type HashlineDisplayPrefixMatch,
+  type NativeAliasBindingStatus,
   NativeAliasCurrentCallPendingError,
   type NativeAliasProtocolIdentity,
   NativeAliasSessionRegistry,
@@ -117,18 +122,20 @@ function createEditSchema() {
     rebase: tool.schema
       .enum(["none", "unique"])
       .optional()
-      .describe("none is default; replace_file forbids unique."),
+      .describe(
+        "none is default; unique only relocates a still-retained snapshot after external changes, and replace_file forbids unique.",
+      ),
     allowHashlinePrefixes: tool.schema
       .boolean()
       .optional()
       .describe(
-        "Only affects replace, insert, and replace_file payloads. Set true only to write an intentional N| or @hashline-style source line.",
+        "Default false. Column-0 prefixes like 17|, 17!|, and @hashline are rejected. Set true in the initial call only for intentional source text; applies to every payload line.",
       ),
     readback: tool.schema
       .boolean()
       .optional()
       .describe(
-        "Set true when another edit of this file is expected. On success, returns an attested successor snapshot near the first changed hunk.",
+        "Use for structural verification or a follow-up edit; returns a bounded, potentially partial attested successor near the first hunk.",
       ),
     operations: tool.schema.array(editOperation).min(1).max(100),
   };
@@ -143,9 +150,9 @@ const editArgumentShape = editSchema.argumentShape;
 export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 
 export const hashlineEditDescription =
-  'Atomically edit one exact hashline_read snapshot. Batch every known change to this file in one call. Pass snapshotId as a top-level string and operations as a JSON array of operation objects; never encode arguments as text or XML. Minimal replace shape: {"filePath":"path","snapshotId":"s_...","operations":[{"op":"replace","startLine":1,"endLine":1,"lines":["replacement"]}]}. Use only fields listed for each op; finalNewline is replace_file-only. replace_file must be sole and use rebase:none. All coordinates use one immutable pre-batch snapshot; copy reads pre-edit source even when another operation changes that source; afterLine is never adjusted for moves/deletes. Destructive writes may be adjacent but not overlap. Insert/copy destinations may touch a destructive endpoint but not lie strictly inside it, and two insertion-like operations may not share a destination; merge conflicting payloads instead of relying on array order. replace lines:[] deletes; insert forbids []; use replace_file with lines:[],finalNewline:false for an empty file. lines:[""] is one empty logical value and may only alter EOL bytes. Set readback:true only when a dependent follow-up edit is expected; the result then includes a successor snapshot near the first changed hunk. unique rebase is exact, unchanged, ambiguity-rejecting, and never fuzzy.';
+  'Atomically edit one exact hashline_read snapshot. Batch changes to this file. Pass top-level snapshotId and operations JSON; do not encode arguments as text. Operations use one immutable pre-batch snapshot: copy reads pre-edit source, and afterLine is never adjusted. replace_file must be sole and use rebase:none; finalNewline is replace_file-only. Destructive writes may be adjacent but not overlap. Insert/copy destinations may touch a destructive endpoint, but may not lie inside a destructive span or share a destination. replace lines:[] deletes; insert forbids []; an empty file uses replace_file with lines:[],finalNewline:false. lines:[""] is one empty logical line and may change only EOL bytes. readback:true returns a successor for verification/follow-up; partial pages say partial=true. unique exactly relocates a still-retained snapshot after external changes; it cannot revive a consumed or unknown snapshot.';
 
-export const nativeAliasEditDescription = `${hashlineEditDescription} Never issue edit or apply_patch calls concurrently or in the same assistant message. For multiple files, call one edit tool, wait for its result, then call the next.`;
+export const nativeAliasEditDescription = `${hashlineEditDescription} Native aliases: serialize while system guidance says native-alias-session=unbound; when bound, different paths may run concurrently but the same path remains serialized.`;
 
 type SnapshotEditToolName = "hashline_edit" | "edit" | "apply_patch";
 
@@ -232,18 +239,8 @@ function invalidArguments(toolName: string): never {
   fail("INVALID_ARGUMENT", `Invalid ${toolName} arguments.`);
 }
 
-function assertNoDisplayPrefixes(operations: readonly EditOperation[]): void {
-  for (const operation of operations) {
-    if (operation.op === "copy_range" || operation.op === "move_range") continue;
-    for (const line of operation.lines) {
-      if (/^(?:\d+[!]?\||@(?:hashline|more|eof|note)(?:\s|$))/u.test(line)) {
-        fail(
-          "DISPLAY_PREFIX_REJECTED",
-          "A replacement line looks copied from hashline_read. Remove the annotation, or set allowHashlinePrefixes only when that prefix is intentional file content.",
-        );
-      }
-    }
-  }
+function rejectDisplayPrefix(match: HashlineDisplayPrefixMatch): never {
+  fail("DISPLAY_PREFIX_REJECTED", displayPrefixRejectionMessage(match));
 }
 
 function parseOperations(
@@ -450,12 +447,24 @@ function withoutPendingMetadata(metadata: unknown): Record<string, unknown> {
   return rest;
 }
 
+type EditSuccessorState = "none" | "attached" | "unavailable";
+
+function editLifecycleReceipt(state: EditSuccessorState): string {
+  return state === "attached"
+    ? "@hashline-edit previous=consumed successor=attached"
+    : `@hashline-edit previous=consumed successor=${state} next=hashline_read`;
+}
+
+function editResultOutput(success: string, state: EditSuccessorState): string {
+  return `${success}\n${editLifecycleReceipt(state)}`;
+}
+
 function unavailableEditReadback(output: string): string {
   const firstLine = output.split("\n", 1)[0] ?? "";
   const success = /^Applied \d+ operations?\.$/u.test(firstLine)
     ? firstLine
     : "The edit was applied.";
-  return `${success} Post-edit snapshot unavailable; run hashline_read before the next edit.`;
+  return editResultOutput(success, "unavailable");
 }
 
 export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
@@ -513,12 +522,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     return { identity: aliasIdentity, fingerprint: aliasFingerprint };
   }
 
-  async function assertAliasSession(
-    sessionId: string,
+  async function resolveAliasSessionBinding(
     directory: string,
     worktree: string,
-    currentCall?: { id: string; tool: "edit" | "apply_patch"; input?: unknown },
-  ): Promise<string> {
+  ): Promise<{
+    canonicalWorktree: string;
+    identity: NativeAliasProtocolIdentity;
+    fingerprint: string;
+  }> {
     const alias = assertAliasAvailable();
     let canonicalWorktree: string;
     try {
@@ -538,11 +549,38 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       );
     }
     const identity = { ...alias.identity, worktree: canonicalWorktree };
-    const fingerprint = jsonSha256({
-      protocol: alias.fingerprint,
-      worktree: identity.worktree,
-    });
-    if (sessions.isBound(sessionId, fingerprint)) return canonicalWorktree;
+    return {
+      canonicalWorktree,
+      identity,
+      fingerprint: jsonSha256({ protocol: alias.fingerprint, worktree: identity.worktree }),
+    };
+  }
+
+  async function aliasSessionStatus(
+    sessionId: string | undefined,
+  ): Promise<NativeAliasBindingStatus> {
+    if (!sessionId) return "unbound";
+    try {
+      const binding = await resolveAliasSessionBinding(input.directory, input.worktree);
+      return sessions.status(sessionId, binding.fingerprint);
+    } catch {
+      return "mismatch";
+    }
+  }
+
+  async function assertAliasSession(
+    sessionId: string,
+    directory: string,
+    worktree: string,
+    currentCall?: { id: string; tool: "edit" | "apply_patch"; input?: unknown },
+  ): Promise<{
+    canonicalWorktree: string;
+    identity: NativeAliasProtocolIdentity;
+    fingerprint: string;
+  }> {
+    const binding = await resolveAliasSessionBinding(directory, worktree);
+    const { identity, fingerprint } = binding;
+    if (sessions.isBound(sessionId, fingerprint)) return binding;
 
     const historyOptions =
       currentCall === undefined ? { sessionId, directory } : { currentCall, sessionId, directory };
@@ -585,7 +623,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
     }
     sessions.bind(sessionId, fingerprint);
-    return canonicalWorktree;
+    return binding;
   }
 
   function rememberPending(pendingId: string, pending: PendingSnapshot): void {
@@ -657,19 +695,38 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     throwIfAborted(context.abort);
     const parsed = hashlineEditArgumentsSchema.safeParse(rawArgs);
     if (!parsed.success) invalidArguments(toolName);
-    const aliasWorktree =
+    const args = parsed.data;
+    const aliasBinding =
       toolName === "hashline_edit"
         ? undefined
         : await assertAliasSession(context.sessionID, context.directory, context.worktree);
-    const args = parsed.data;
     const operations = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
     const rebase = args.rebase ?? "none";
     if (rebase !== "none" && rebase !== "unique") {
       fail("INVALID_ARGUMENT", "rebase must be none or unique.");
     }
-    if (!args.allowHashlinePrefixes) assertNoDisplayPrefixes(operations);
+    const displayPrefix = args.allowHashlinePrefixes
+      ? undefined
+      : findHashlineDisplayPrefix(operations);
+    if (displayPrefix) {
+      if (toolName === "hashline_edit" || !aliasBinding) rejectDisplayPrefix(displayPrefix);
+      const metadata = buildNativeAliasDisplayPrefixRejectionMetadata(
+        toolName,
+        args,
+        aliasBinding.identity,
+        displayPrefix,
+      );
+      return {
+        title: args.filePath,
+        output: `DISPLAY_PREFIX_REJECTED: ${displayPrefixRejectionMessage(displayPrefix)}`,
+        metadata,
+      };
+    }
     const resolved = await resolveExistingFile(args.filePath, context.directory);
-    const shownPath = displayPath(aliasWorktree ?? context.worktree, resolved.canonicalPath);
+    const shownPath = displayPath(
+      aliasBinding?.canonicalWorktree ?? context.worktree,
+      resolved.canonicalPath,
+    );
     const aliasPath = shownPath.replaceAll("\\", "/");
     if (
       toolName !== "hashline_edit" &&
@@ -745,14 +802,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
         });
         const successOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
-        let output = `${successOutput} Reread before the next edit.`;
+        let output = editResultOutput(successOutput, "none");
         let resultMetadata = metadata;
         if (args.readback) {
-          const fallbackOutput = `${successOutput} Post-edit snapshot unavailable; run hashline_read before the next edit.`;
+          const fallbackOutput = editResultOutput(successOutput, "unavailable");
           try {
             const document = decodeTextDocument(verified.bytes, options.maxLines);
             const successor = snapshots.remember(scope, resolved.canonicalPath, document);
-            const prefix = `${successOutput}\n`;
+            const prefix = `${editResultOutput(successOutput, "attached")}\n`;
             const rendered = renderSnapshotPage({
               snapshot: successor,
               offset: firstNewFileHunkLine(diff),
@@ -910,6 +967,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       });
     },
     async "tool.execute.after"(input, output) {
+      if (
+        (input.tool === "edit" || input.tool === "apply_patch") &&
+        output.output.startsWith("DISPLAY_PREFIX_REJECTED:") &&
+        typeof output.metadata?.betterHashlineRejection === "object" &&
+        output.metadata.betterHashlineRejection !== null
+      ) {
+        return;
+      }
       const isRead = input.tool === "hashline_read";
       const isEditReadback =
         (input.tool === "hashline_edit" || input.tool === "edit" || input.tool === "apply_patch") &&
@@ -977,18 +1042,29 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         }
       }
     },
-    async "experimental.chat.system.transform"(_input, output) {
-      output.system.push(
-        initializationError
-          ? `Better Hashline configuration is invalid and file mutation is disabled: ${initializationError}`
-          : options.toolSurface === "native-aliases" && aliasAvailabilityError
-            ? `Better Hashline native aliases are unavailable and file mutation is disabled: ${aliasAvailabilityError}`
-            : options.toolSurface === "native-aliases"
-              ? "Better Hashline native aliases are active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then the available edit or apply_patch tool with the Better Hashline snapshot operation schema. Never issue edit or apply_patch calls concurrently or in the same assistant message; for multiple files, wait for each tool result before calling the next. Pass snapshotId as a top-level string and operations as a JSON array, never as encoded text or XML. hashline_write is CREATE ONLY: never call it after hashline_read or for an existing path. Native write and hashline_edit are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content. This experimental surface requires a compatible OpenCode host, a new session after configuration changes, and Better Hashline to be the last plugin defining edit or apply_patch."
-              : options.enforce
-                ? "Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. Use hashline_write only to create a new file. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content."
-                : "Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files. Native editing tools remain enabled by configuration.",
-      );
+    async "experimental.chat.system.transform"(hookInput, output) {
+      let guidance: string;
+      if (initializationError) {
+        guidance = `Better Hashline configuration is invalid and file mutation is disabled: ${initializationError}`;
+      } else if (options.toolSurface === "native-aliases" && aliasAvailabilityError) {
+        guidance = `Better Hashline native aliases are unavailable and file mutation is disabled: ${aliasAvailabilityError}`;
+      } else if (options.toolSurface === "native-aliases") {
+        const state = await aliasSessionStatus(hookInput.sessionID);
+        const concurrency =
+          state === "bound"
+            ? "native-alias-session=bound. Different paths may run concurrently; serialize the same path. Calls remain independently approved and non-transactional."
+            : state === "mismatch"
+              ? "native-alias-session=mismatch. Start a new session before editing."
+              : "native-alias-session=unbound. Never issue edit or apply_patch calls concurrently or in the same assistant message; wait for each result until one exact before-hook binds the session.";
+        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. Pass top-level snapshotId and operations JSON. hashline_write is create-only; native write and hashline_edit are disabled. Do not edit via shell. Hashline line/control prefixes are annotations; set allowHashlinePrefixes:true in the initial call only for literal source text. Restart into a new session after configuration changes; Better Hashline must be the last plugin defining these aliases.`;
+      } else if (options.enforce) {
+        guidance =
+          "Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. Use hashline_write only to create a new file. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.";
+      } else {
+        guidance =
+          "Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files. Native editing tools remain enabled by configuration.";
+      }
+      output.system.push(guidance);
     },
     async "tool.definition"(input, output) {
       if (input.toolID === "read") {

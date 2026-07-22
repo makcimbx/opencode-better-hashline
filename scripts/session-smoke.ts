@@ -13,15 +13,21 @@ type ResponsePlan =
 
 type HookRecord = {
   hook?: string;
+  sessionID?: string;
   tool?: string;
   output?: string;
   metadataKeys?: string[];
 };
 
-const [opencodeArgument, pluginArgument, sandboxArgument] = process.argv.slice(2);
+const [opencodeArgument, pluginArgument, sandboxArgument, modeArgument] = process.argv.slice(2);
 if (!opencodeArgument || !pluginArgument || !sandboxArgument) {
-  throw new Error("Usage: bun session-smoke.ts <opencode> <plugin-directory> <sandbox>");
+  throw new Error(
+    "Usage: bun session-smoke.ts <opencode> <plugin-directory> <sandbox> [--native-alias-recovery]",
+  );
 }
+const nativeAliasRecovery = modeArgument === "--native-alias-recovery";
+if (modeArgument && !nativeAliasRecovery) throw new Error(`Unknown mode: ${modeArgument}`);
+const OPEN_CODE_TIMEOUT_MS = process.env.CI === "true" ? 180_000 : 60_000;
 
 const opencode = resolve(opencodeArgument);
 const pluginDirectory = resolve(pluginArgument);
@@ -56,13 +62,22 @@ async function record(value) {
 export default async function observer() {
   return {
     async "tool.execute.before"(input, output) {
-      if (!input.tool.startsWith("hashline_")) return;
-      await record({ hook: "before", tool: input.tool, args: output.args });
+      if (
+        !input.tool.startsWith("hashline_") &&
+        input.tool !== "edit" &&
+        input.tool !== "apply_patch"
+      ) return;
+      await record({ hook: "before", sessionID: input.sessionID, tool: input.tool, args: output.args });
     },
     async "tool.execute.after"(input, output) {
-      if (!input.tool.startsWith("hashline_")) return;
+      if (
+        !input.tool.startsWith("hashline_") &&
+        input.tool !== "edit" &&
+        input.tool !== "apply_patch"
+      ) return;
       await record({
         hook: "after",
+        sessionID: input.sessionID,
         tool: input.tool,
         output: output.output,
         metadataKeys: Object.keys(output.metadata ?? {}).sort(),
@@ -157,7 +172,41 @@ const server = Bun.serve({
       if (entry.function?.name) exposedTools.add(entry.function.name);
     }
     const serialized = JSON.stringify(body.messages ?? []);
-    const snapshotId = serialized.match(/s_[A-Za-z0-9_-]{22}/u)?.[0];
+    const snapshotIds = serialized.match(/s_[A-Za-z0-9_-]{22}/gu) ?? [];
+    const snapshotId = snapshotIds.at(-1);
+    if (nativeAliasRecovery) {
+      if (requestCount === 1 || requestCount === 4) {
+        return streamResponse({
+          kind: "tool",
+          id: `call_hashline_read_${requestCount}`,
+          name: "hashline_read",
+          args: { filePath: "probe.txt", limit: 6 },
+        });
+      }
+      if ((requestCount === 2 || requestCount === 5) && snapshotId) {
+        return streamResponse({
+          kind: "tool",
+          id: requestCount === 2 ? "call_rejected_edit" : "call_retried_edit",
+          name: "edit",
+          args: {
+            filePath: "probe.txt",
+            snapshotId,
+            operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["1|alpha"] }],
+            ...(requestCount === 2 ? { readback: true } : { allowHashlinePrefixes: true }),
+          },
+        });
+      }
+      if (requestCount === 3 && serialized.includes("DISPLAY_PREFIX_REJECTED")) {
+        return streamResponse({ kind: "text", text: "Scripted rejection phase complete." });
+      }
+      if (requestCount === 6 && serialized.includes("Applied 1 operation")) {
+        return streamResponse({ kind: "text", text: "Scripted recovery phase complete." });
+      }
+      return Response.json(
+        { error: { message: "Unexpected native-alias phase" } },
+        { status: 500 },
+      );
+    }
     if (serialized.includes("Applied 2 operations")) {
       return streamResponse({ kind: "text", text: "Scripted read/edit sequence complete." });
     }
@@ -204,7 +253,12 @@ const config = {
       },
     },
   },
-  plugin: [pathToFileURL(pluginDirectory).href, pathToFileURL(observer).href],
+  plugin: nativeAliasRecovery
+    ? [
+        [pathToFileURL(pluginDirectory).href, { toolSurface: "native-aliases", enforce: true }],
+        pathToFileURL(observer).href,
+      ]
+    : [pathToFileURL(pluginDirectory).href, pathToFileURL(observer).href],
   permission: {
     read: "allow",
     edit: "allow",
@@ -253,7 +307,7 @@ Object.assign(environment, {
   NO_COLOR: "1",
 });
 
-try {
+async function runOpenCode(continuation: boolean): Promise<void> {
   const child = Bun.spawn(
     [
       opencode,
@@ -264,9 +318,10 @@ try {
       "build",
       "--format",
       "json",
+      ...(continuation ? ["--continue"] : []),
       "--title",
       "Better Hashline package smoke",
-      "Follow the scripted tool calls.",
+      continuation ? "Continue the scripted tool calls." : "Follow the scripted tool calls.",
     ],
     { cwd: sandbox, env: environment, stdout: "pipe", stderr: "pipe" },
   );
@@ -274,24 +329,52 @@ try {
   const timeout = setTimeout(() => {
     timedOut = true;
     child.kill();
-  }, 60_000);
+  }, OPEN_CODE_TIMEOUT_MS);
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ]);
   clearTimeout(timeout);
-
-  if (timedOut) throw new Error("OpenCode session smoke timed out");
+  if (timedOut) {
+    const phase = continuation ? "continuation" : "initial";
+    throw new Error(
+      `OpenCode ${phase} session smoke timed out after ${OPEN_CODE_TIMEOUT_MS} ms:\n${stderr || stdout}`,
+    );
+  }
   if (exitCode !== 0) {
     throw new Error(`OpenCode session smoke exited with ${exitCode}:\n${stderr || stdout}`);
   }
-  if (requestCount !== 3) throw new Error(`Expected three provider requests, got ${requestCount}`);
-  if (!exposedTools.has("hashline_read") || !exposedTools.has("hashline_edit")) {
-    throw new Error("OpenCode did not expose both hashline session tools");
+}
+
+try {
+  await runOpenCode(false);
+  if (nativeAliasRecovery) {
+    const rejectedBytes = await readFile(fixture, "utf8");
+    if (rejectedBytes !== "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n") {
+      throw new Error(`Rejected native alias changed bytes: ${JSON.stringify(rejectedBytes)}`);
+    }
+    await runOpenCode(true);
+  }
+
+  const expectedRequests = nativeAliasRecovery ? 6 : 3;
+  if (requestCount !== expectedRequests) {
+    throw new Error(`Expected ${expectedRequests} provider requests, got ${requestCount}`);
+  }
+  const requiredTools = nativeAliasRecovery
+    ? ["hashline_read", "edit"]
+    : ["hashline_read", "hashline_edit"];
+  if (requiredTools.some((tool) => !exposedTools.has(tool))) {
+    throw new Error(`OpenCode did not expose required session tools: ${requiredTools.join(", ")}`);
+  }
+  if (nativeAliasRecovery && exposedTools.has("hashline_edit")) {
+    throw new Error("Native alias session unexpectedly exposed hashline_edit");
   }
   const finalBytes = await readFile(fixture, "utf8");
-  if (finalBytes !== "alpha\nbeta\nalpha\ngamma\nepsilon\ndelta\nzeta\n") {
+  const expectedBytes = nativeAliasRecovery
+    ? "1|alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n"
+    : "alpha\nbeta\nalpha\ngamma\nepsilon\ndelta\nzeta\n";
+  if (finalBytes !== expectedBytes) {
     throw new Error(`Session smoke produced unexpected bytes: ${JSON.stringify(finalBytes)}`);
   }
 
@@ -301,12 +384,23 @@ try {
     .filter(Boolean)
     .map((line) => JSON.parse(line) as HookRecord);
   const sequence = hooks.map(({ hook, tool }) => `${hook}:${tool}`);
-  const expectedSequence = [
-    "before:hashline_read",
-    "after:hashline_read",
-    "before:hashline_edit",
-    "after:hashline_edit",
-  ];
+  const expectedSequence = nativeAliasRecovery
+    ? [
+        "before:hashline_read",
+        "after:hashline_read",
+        "before:edit",
+        "after:edit",
+        "before:hashline_read",
+        "after:hashline_read",
+        "before:edit",
+        "after:edit",
+      ]
+    : [
+        "before:hashline_read",
+        "after:hashline_read",
+        "before:hashline_edit",
+        "after:hashline_edit",
+      ];
   if (JSON.stringify(sequence) !== JSON.stringify(expectedSequence)) {
     throw new Error(`Unexpected hook sequence: ${JSON.stringify(sequence)}`);
   }
@@ -317,6 +411,29 @@ try {
     readAfter.metadataKeys.includes("hashlinePending")
   ) {
     throw new Error("hashline_read refs were not activated by the real after-hook pipeline");
+  }
+  if (nativeAliasRecovery) {
+    const sessions = new Set(hooks.map(({ sessionID }) => sessionID));
+    const rejectionAfter = hooks[3];
+    const secondReadAfter = hooks[5];
+    const recoveryAfter = hooks[7];
+    if (sessions.size !== 1 || sessions.has(undefined)) {
+      throw new Error(`Continuation changed session identity: ${JSON.stringify([...sessions])}`);
+    }
+    if (
+      !rejectionAfter?.output?.startsWith("DISPLAY_PREFIX_REJECTED:") ||
+      !rejectionAfter.metadataKeys?.includes("betterHashlineRejection") ||
+      !rejectionAfter.metadataKeys.includes("truncated")
+    ) {
+      throw new Error("Pinned OpenCode did not persist the native rejection result metadata");
+    }
+    if (
+      !secondReadAfter?.output?.startsWith("@hashline snapshot=") ||
+      !secondReadAfter.metadataKeys?.includes("snapshotId") ||
+      !recoveryAfter?.output?.startsWith("Applied 1 operation.")
+    ) {
+      throw new Error("Restarted native-alias recovery did not complete through real hooks");
+    }
   }
 } finally {
   server.stop(true);
