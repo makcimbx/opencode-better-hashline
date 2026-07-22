@@ -14,13 +14,19 @@ Better Hashline separates mechanical protocol evidence from model-quality eviden
 
 ## Recorded Deterministic Run
 
-Latest raw result: [`benchmarks/results/2026-07-19-transfer-windows-x64.json`](../benchmarks/results/2026-07-19-transfer-windows-x64.json)
+Latest raw result: [`benchmarks/results/2026-07-22-file-lifecycle-windows-x64.json`](../benchmarks/results/2026-07-22-file-lifecycle-windows-x64.json)
 
 The 15-scenario and 21-scenario results remain available as immutable historical evidence in
 [`2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json) and
-[`2026-07-19-windows-x64.json`](../benchmarks/results/2026-07-19-windows-x64.json). The latest
+[`2026-07-19-windows-x64.json`](../benchmarks/results/2026-07-19-windows-x64.json). The frozen
+[`2026-07-19-transfer-windows-x64.json`](../benchmarks/results/2026-07-19-transfer-windows-x64.json)
 schema-v5 record adds transfer safety, provider-schema, call-payload, and move-corridor evidence
 without rewriting either earlier result.
+
+The schema-v5 evidence is frozen. It predates `delete_file`, `move_file`, `file-ops-v1`, and
+`native-aliases/v2`; it must not be relabeled as lifecycle-operation evidence. The current
+schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtures. It is mechanical
+fixture evidence, not paid model-quality evidence.
 
 Environment: Windows x64, Bun 1.3.14, AMD64 Family 25 Model 97. Five microbenchmark warmups; 100 measured runs below 10,000 lines and 30 runs at or above it.
 
@@ -31,12 +37,12 @@ replace-write conflict.
 
 | Adapter | Exact applies | Safe rejects | False rejects | Unsafe accepts |
 | --- | ---: | ---: | ---: | ---: |
-| Better Hashline strict | 4 | 19 | 5 | 0 |
-| Better Hashline unique | 9 | 19 | 0 | 0 |
-| Target-only exact search/replace | 8 | 14 | 1 | 5 |
-| Original line numbers | 5 | 2 | 0 | 21 |
-| 8-bit endpoint hashes | 5 | 13 | 4 | 6 |
-| 16-bit endpoint hashes | 5 | 14 | 4 | 5 |
+| Better Hashline strict | 5 | 18 | 5 | 0 |
+| Better Hashline unique | 10 | 18 | 0 | 0 |
+| Target-only exact search/replace | 9 | 13 | 1 | 5 |
+| Original line numbers | 6 | 1 | 0 | 21 |
+| 8-bit endpoint hashes | 6 | 12 | 4 | 6 |
+| 16-bit endpoint hashes | 6 | 13 | 4 | 5 |
 
 The expected outcomes encode this project's conservative relocation contract. This is useful for finding violations of that contract, not ranking arbitrary production tools. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The row does not establish an advantage for line-number addressing.
 
@@ -92,9 +98,30 @@ These values measure serialized call bytes, not tokens. A one-line copy is one b
 equivalent payload insert; savings begin in this fixture between one and ten source lines.
 
 Move additionally requires issued provenance for its complete source-to-destination corridor. A
-20-line corridor required one page and 611 rendered bytes. A 5,000-line corridor required five pages
-and 142,126 rendered bytes under the 1,000-line and 40-KB page limits. Copy and move therefore have
+20-line corridor required one page and 624 rendered bytes. A 5,000-line corridor required five pages
+and 142,191 rendered bytes under the 1,000-line and 40-KB page limits. Copy and move therefore have
 different read-economics and should be evaluated independently.
+
+## File Lifecycle Wire Size
+
+The schema-v6 runner compares the current flat description and provider schema with its
+pre-transfer/lifecycle baseline:
+
+| Fixture | Baseline bytes | Current bytes | Change |
+| --- | ---: | ---: | ---: |
+| `hashline_edit` description plus JSON Schema | 3,095 | 4,125 | +1,030 (+33.28%) |
+
+It also compares compact valid lifecycle calls with equivalent native `apply_patch` calls:
+
+| Operation | Better Hashline bytes | Native `apply_patch` bytes | Difference |
+| --- | ---: | ---: | ---: |
+| `delete_file` | 121 | 79 | +42 |
+| `move_file` | 154 | 108 | +46 |
+
+These are exact compact UTF-8 JSON fixture sizes, not token, safety, or model-quality measurements.
+The Better Hashline calls include source path, snapshot, and strict rebase evidence; the native
+fixture contains patch text only, so the delta is not a semantic-equivalence or protocol-advantage
+claim. The retained schema-v6 JSON records these values without expanding their claim scope.
 
 ## Core Timings
 
@@ -110,8 +137,8 @@ bun run bench --output=benchmarks/results/local/my-run.json
 ```
 
 The runner prints summary tables and optionally writes the complete corpus, classifications,
-environment, static/rendering sizes, provider-schema and transfer-call sizes, corridor-read evidence,
-and microbenchmark distributions.
+environment, static/rendering sizes, provider-schema, lifecycle-call, transfer-call, corridor-read
+evidence, and microbenchmark distributions.
 
 Result paths are write-once by default. Use `--force` only when deliberately regenerating an unpublished checked result from its final source revision.
 
@@ -124,21 +151,26 @@ model quality has improved.
 The default `baseline-v1` model harness has 12 exact-output tasks across mechanical, ambiguous,
 batch, boundary, range, encoding, structured, creation, whole-file, and multi-file categories. The
 separate eight-task `transfer-v1` development manifest covers copy, upward/downward move, multiple
-transfers, a long corridor, conflict recovery, duplicate source content, and a legacy control. Neither
-set is confirmatory evidence. The harness pairs native OpenCode editing against Better Hashline in
-fresh temporary directories and alternates adapter order.
+transfers, a long corridor, conflict recovery, duplicate source content, and a legacy control. The
+two-task `file-ops-v1` development manifest covers exact source deletion and no-clobber movement
+from a source to an absent destination. These identities are independent; none is confirmatory
+evidence. The harness pairs native OpenCode editing against Better Hashline in fresh temporary
+directories and alternates adapter order.
 
-Adapter sets are independently versioned. `native-vs-unique-v1` remains the default. The experimental
-`native-aliases-v1` set pairs unique Better Hashline with `better-hashline-native-aliases`; it does
-not compare aliases against native OpenCode. Alias traces classify Better-shaped versus native-shaped
-arguments, stable error codes, active alias, and `native-aliases/v1` marker validity.
+Adapter sets are independently versioned. `native-vs-unique-v1` remains the default.
+`native-aliases-v1` is retained only as the frozen identity used by pilot v7. The current
+`native-aliases-v2` set pairs unique Better Hashline with `better-hashline-native-aliases`; it does
+not compare aliases against native OpenCode. V2 alias traces classify Better-shaped versus
+native-shaped arguments, stable error codes, `update`/`delete_file`/`move_file` operation identity,
+source and move destination correlation, active alias, and `native-aliases/v2` marker validity. V1
+results cannot validate this contract.
 
 Dry run, no model calls:
 
 ```sh
 bun run bench:model
 bun run bench:model --task-set=transfer-v1
-bun run bench:model --adapter-set=native-aliases-v1 --repeats=1
+bun run bench:model --task-set=file-ops-v1 --adapter-set=native-aliases-v2 --repeats=1
 bun run bench:model --native-alias-pilot
 ```
 
@@ -146,10 +178,16 @@ Model-free adapter preflight:
 
 ```sh
 bun run bench:model --preflight --output=benchmarks/results/local/preflight
+bun run bench:model --preflight --task-set=file-ops-v1 --adapter-set=native-aliases-v2 \
+  --output=benchmarks/results/local/file-ops-preflight
 ```
 
-Preflight makes no model requests, but it builds, packs, installs dependencies with lifecycle scripts disabled, invokes the pinned OpenCode CLI, and writes evidence. It may access the npm registry when dependencies are not cached. The output directory must not already exist.
-It also runs the packed credential-free verifier for unique, non-GPT alias, and GPT-like alias routes.
+Preflight makes no model requests, but it builds, packs, installs dependencies with lifecycle
+scripts disabled, invokes the pinned OpenCode CLI, and writes evidence. Every output directory must
+be new. It may access the npm registry when dependencies are not cached. It also runs the packed
+credential-free verifier for unique, non-GPT alias, and GPT-like alias routes, including the
+deterministic lifecycle checks. Verifier evidence remains model-free and does not substitute for a
+paid paired run.
 
 Paid execution:
 
@@ -179,19 +217,30 @@ The harness:
 - records process/timeout/transport status, exact token categories, retries, OpenCode-reported parent-session cost, JSONL, stderr, and sanitized exports;
 - ignores raw model traces in Git by default.
 
-The harness reports requested and observed identities separately. Reported usage covers the validated parent session and is not asserted to equal a provider invoice. Before publishing model claims, inspect all traces, redact secrets, report malformed calls/retries/tokens/cost with their stated scope, run enough paired tasks for the intended claim, and preregister the primary metric. The default 48-session pilot is useful for harness debugging, not a universal superiority claim.
+The harness reports requested and observed identities separately. Reported usage covers the
+validated parent session and is not asserted to equal a provider invoice. Before publishing model
+claims, inspect all traces, redact secrets, report malformed calls/retries/tokens/cost with their
+stated scope, run enough paired tasks for the intended claim, and preregister the primary metric.
+The default 48-session pilot is useful for harness debugging, not a universal superiority claim.
 
-The retained native-alias model result is pilot v7. Its frozen schedule used the 12 baseline tasks,
-the unique and native-alias surfaces, and Luna/Sol medium. All 48 sessions passed in 181 observed
-requests with complete accounting, zero retries/failures/timeouts, and USD 0 reported cost. The
-[privacy-safe summary](../benchmarks/results/2026-07-21-native-alias-pilot-v7.json) is technical
-transport evidence, not a model-superiority claim. The maintainer approved only an opt-in
-experimental release; `hashline` remains the default.
+The retained native-alias model result is pilot v7. Its frozen schedule used the 12 `baseline-v1`
+tasks, the unique and `native-aliases-v1` surfaces, and Luna/Sol medium. All 48 sessions passed in
+181 observed requests with complete accounting, zero retries/failures/timeouts, and USD 0 reported
+cost. The [privacy-safe summary](../benchmarks/results/2026-07-21-native-alias-pilot-v7.json) is
+technical transport evidence, not a model-superiority claim. It covered the earlier text-operation
+contract only and provides no evidence for `delete_file`, `move_file`, `file-ops-v1`,
+`native-aliases/v2`, or lifecycle metadata. The maintainer approved only an opt-in experimental
+release; `hashline` remains the default.
+
+There is no paid model run or model-quality result for `file-ops-v1` or `native-aliases-v2`. Dry
+runs, model-free preflight, deterministic tests, and packed verifier checks must not be described as
+paid lifecycle evidence or used to claim model accuracy, cost, or superiority.
 
 Model-free preflight still exercises the fail-closed oracle against normalized worktree/fixture
-topology, forged and outside-fixture paths, and a one-request retry abort. Trace and export terminal
-records must match exactly, complete history must validate, and the per-file mutation ledger must
-bind each expected change to the required executor. Unsanitized exports remain memory-only.
+topology, forged and outside-fixture paths, lifecycle source/destination correlation, and a
+one-request retry abort. Trace and export terminal records must match exactly, complete history must
+validate, and the per-file mutation ledger must bind each expected change to the required executor.
+Unsanitized exports remain memory-only.
 
 Earlier pilot IDs v1-v6 are retired or consumed and remain permanently closed. Their superseded
 incident records remain available in Git history rather than the current benchmark result set.
@@ -214,12 +263,16 @@ Future concurrent harnesses should distinguish stale clobber, wrong-target accep
 
 ## Claims Policy
 
-Until paired results exist, this project claims only:
+Until paired results exist for the exact task and adapter identities being discussed, this project
+claims only:
 
-- deterministic invariants covered by tests;
+- deterministic invariants covered by tests and the model-free packed verifier;
 - exact collision mathematics;
 - exact serialized bytes for declared fixtures;
 - named-machine non-gating timings;
 - outcomes on the checked-in deterministic corpus.
 
-It does not claim universal model accuracy, token savings, lower cost, semantic conflict detection, filesystem CAS, transactionality, or superiority over OpenCode's actual current tools.
+It does not claim lifecycle-operation model accuracy from schema-v5 or pilot-v7, and it makes no paid
+model claim for `file-ops-v1` or `native-aliases-v2`. More generally, it does not claim universal
+model accuracy, token savings, lower cost, semantic conflict detection, filesystem CAS,
+transactionality, or superiority over OpenCode's actual current tools.

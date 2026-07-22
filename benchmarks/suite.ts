@@ -669,6 +669,45 @@ export function runTransferCallWireSuite() {
   });
 }
 
+export function runFileLifecycleCallWireSuite() {
+  const serialized = (value: unknown) => encoder.encode(JSON.stringify(value)).byteLength;
+  const hashlineBase = {
+    filePath: "src/example.ts",
+    snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
+    rebase: "none",
+  };
+  const calls = [
+    {
+      operation: "delete_file",
+      hashline: { ...hashlineBase, operations: [{ op: "delete_file" }] },
+      nativeApplyPatch: {
+        patchText: "*** Begin Patch\n*** Delete File: src/example.ts\n*** End Patch",
+      },
+    },
+    {
+      operation: "move_file",
+      hashline: {
+        ...hashlineBase,
+        operations: [{ op: "move_file", destinationPath: "src/renamed.ts" }],
+      },
+      nativeApplyPatch: {
+        patchText:
+          "*** Begin Patch\n*** Update File: src/example.ts\n*** Move to: src/renamed.ts\n*** End Patch",
+      },
+    },
+  ];
+  return calls.map(({ operation, hashline, nativeApplyPatch }) => {
+    const hashlineBytes = serialized(hashline);
+    const nativeApplyPatchBytes = serialized(nativeApplyPatch);
+    return {
+      operation,
+      hashlineBytes,
+      nativeApplyPatchBytes,
+      deltaBytes: hashlineBytes - nativeApplyPatchBytes,
+    };
+  });
+}
+
 export function runMoveCorridorWireSuite() {
   const lineCount = 5000;
   const lines = Array.from(

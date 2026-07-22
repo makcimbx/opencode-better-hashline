@@ -48,7 +48,7 @@ describe("model benchmark paid gates", () => {
       "--native-alias-probe",
       "--model=openai/gpt-5.6-luna",
       "--variant=medium",
-      "--adapter-set=native-aliases-v1",
+      "--adapter-set=native-aliases-v2",
     ]);
     expect(paired.exitCode).toBe(0);
     expect(paired.stdout.toString()).toContain("= 2 sessions");
@@ -59,7 +59,7 @@ describe("model benchmark paid gates", () => {
       "--model=openai/gpt-5.6-luna",
       "--variant=medium",
       "--task-set=create-file-probe-v1",
-      "--adapter-set=native-aliases-v1",
+      "--adapter-set=native-aliases-v2",
     ]);
     expect(createFile.exitCode).toBe(0);
     expect(createFile.stdout.toString()).toContain("= 2 sessions");
@@ -70,11 +70,26 @@ describe("model benchmark paid gates", () => {
       "--model=openai/gpt-5.6-luna",
       "--variant=medium",
       "--task-set=baseline-v1",
-      "--adapter-set=native-aliases-v1",
+      "--adapter-set=native-aliases-v2",
     ]);
     expect(fullRehearsal.exitCode).toBe(0);
     expect(fullRehearsal.stdout.toString()).toContain("= 24 sessions");
     expect(fullRehearsal.stdout.toString()).toContain("288 total");
+
+    const historicalProbe = runRunner([
+      "--native-alias-probe",
+      "--model=openai/gpt-5.6-luna",
+      "--variant=medium",
+      "--adapter-set=native-aliases-v1",
+    ]);
+    expect(historicalProbe.exitCode).not.toBe(0);
+    expect(historicalProbe.stderr.toString()).toContain(
+      "native-aliases-v1 is retained only for frozen historical verification",
+    );
+
+    const historicalOrdinaryRun = runRunner(["--adapter-set=native-aliases-v1"]);
+    expect(historicalOrdinaryRun.exitCode).not.toBe(0);
+    expect(historicalOrdinaryRun.stderr.toString()).toContain("use native-aliases-v2");
 
     const removedNano = runRunner([
       "--native-alias-probe",

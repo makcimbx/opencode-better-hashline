@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse, relative, resolve } from "node:path";
+import { createTwoFilesPatch } from "diff";
 import {
   inspectJsonlTrace,
   inspectNativeAliasTrace,
@@ -243,7 +244,11 @@ describe("model benchmark trace inspection", () => {
             callID: "hashline-call",
             state: {
               status: "completed",
-              input: { filePath: "a.ts", snapshotId: "s_123", operations: [] },
+              input: {
+                filePath: "package.json",
+                snapshotId: "s_1234567890123456789012",
+                operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["b"] }],
+              },
               metadata,
             },
           },
@@ -295,7 +300,7 @@ describe("model benchmark trace inspection", () => {
         protocolMarker: "valid",
         protocolReason: "valid",
         targetPath: "package.json",
-        snapshotId: "s_123",
+        snapshotId: "s_1234567890123456789012",
         rebase: "none",
       },
       {
@@ -314,6 +319,75 @@ describe("model benchmark trace inspection", () => {
         rebase: "none",
       },
     ]);
+  });
+
+  test("records exact source and destination evidence for a completed move", async () => {
+    const allowedPathRoot = await mkdtemp(join(tmpdir(), "better-hashline-trace-move-"));
+    try {
+      const identity = {
+        packageVersion: "0.3.0",
+        schemaSha256: "a".repeat(64),
+        hostVersion: "1.18.3",
+      };
+      const source = join(allowedPathRoot, "old.ts");
+      const destination = join(allowedPathRoot, "new.ts");
+      await writeFile(destination, "same\n");
+      const unifiedDiff = createTwoFilesPatch(
+        "old.ts",
+        "new.ts",
+        "same\n",
+        "same\n",
+        "before",
+        "after",
+        { context: 3 },
+      );
+      const metadata = buildNativeAliasMetadata({
+        ...identity,
+        surface: "apply_patch",
+        operation: "move_file",
+        canonicalPath: source,
+        relativePath: "old.ts",
+        destinationCanonicalPath: destination,
+        destinationRelativePath: "new.ts",
+        unifiedDiff,
+        additions: 0,
+        deletions: 0,
+      });
+      const output = boundToolTrace(
+        JSON.stringify({
+          type: "tool_use",
+          sessionID: "session",
+          part: {
+            sessionID: "session",
+            tool: "apply_patch",
+            callID: "move-call",
+            state: {
+              status: "completed",
+              input: {
+                filePath: "old.ts",
+                snapshotId: "s_1234567890123456789012",
+                operations: [{ op: "move_file", destinationPath: "new.ts" }],
+              },
+              metadata,
+            },
+          },
+        }),
+      );
+
+      expect(
+        inspectJsonlTrace(output, {
+          nativeAlias: { ...identity, allowedPathRoot, worktree: allowedPathRoot },
+        }).toolEvents[0],
+      ).toMatchObject({
+        protocolMarker: "valid",
+        protocolReason: "valid",
+        targetPath: "old.ts",
+        operation: "move_file",
+        destinationPath: "new.ts",
+      });
+    } finally {
+      await rm(allowedPathRoot, { recursive: true, force: true });
+    }
   });
 
   test("requires alias display paths to be relative to the exact fixture root", () => {

@@ -24,12 +24,14 @@ describe("model benchmark adapters", () => {
     });
   });
 
-  test("defines an explicit unique-versus-native-alias pilot pair", () => {
-    expect(modelAdapterSets["native-aliases-v1"]).toEqual([
-      "better-hashline",
-      "better-hashline-native-aliases",
-    ]);
-    expect(verificationSurfaceForAdapterSet("native-aliases-v1")).toBe("all");
+  test("defines versioned unique-versus-native-alias pairs", () => {
+    for (const adapterSet of ["native-aliases-v1", "native-aliases-v2"] as const) {
+      expect(modelAdapterSets[adapterSet]).toEqual([
+        "better-hashline",
+        "better-hashline-native-aliases",
+      ]);
+      expect(verificationSurfaceForAdapterSet(adapterSet)).toBe("all");
+    }
     expect(adapterPluginConfig("better-hashline-native-aliases", "file:///package")).toEqual({
       plugin: [["file:///package", { enforce: true, toolSurface: "native-aliases" }]],
     });

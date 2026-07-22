@@ -117,9 +117,18 @@ Retained source ranges can also be transferred without echoing their contents:
 
 All coordinates describe the original snapshot, never an intermediate edit. Copy always reads pre-edit source and uses destination-local delimiters like `insert`, so its source may overlap another operation's write. Move preserves the positional EOL layout and requires the complete source-to-destination corridor to have been issued. If empty texts and adjacent CR/LF bytes cannot be serialized without changing that logical layout, the move fails closed instead of normalizing delimiters. Destructive write spans may be adjacent but not overlap; insertion-like destinations may touch their endpoints but may not lie strictly inside them or share one boundary.
 
+Whole-file deletion and rename/move use the same issued snapshot without echoing file contents:
+
+```json
+{ "operations": [{ "op": "delete_file" }] }
+{ "operations": [{ "op": "move_file", "destinationPath": "src/renamed.ts" }] }
+```
+
+A lifecycle operation must be the sole operation, uses `rebase: "none"`, requires complete BOF-to-EOF issued coverage, and rejects `readback: true`. The source must be a direct regular single-link file. `move_file` requires an absent destination under an existing stable parent on the same filesystem; it never overwrites or creates directories. After a move, read the destination before editing it. Move publication uses an exclusive hard link followed by source unlink, so an unlink failure can leave both exact names and returns `PARTIAL_PUBLICATION` instead of risking an automatic rollback.
+
 ### 3. Validate and publish
 
-The plugin resolves the canonical path, checks snapshot scope and issued ranges, rereads the file, plans every operation in memory, rejects overlap, asks OpenCode to approve the exact unified diff, rereads again, stages a same-directory temporary file, consumes the snapshot, and attempts one rename.
+The plugin resolves and authorizes every canonical source and destination path, checks snapshot scope and issued provenance, acquires deterministic path locks, rereads the file, and plans the exact mutation before approval. Text edits stage a same-directory temporary file and attempt one rename. Lifecycle deletion unlinks only after a final direct-entry check; move publishes without overwrite and verifies the exact destination before unlinking the source. No operation is replanned after approval.
 
 <p align="center">
   <img src="docs/assets/protocol.svg" alt="Better Hashline protocol lifecycle" width="100%" />
@@ -201,8 +210,13 @@ session:
 The mode still exposes unique `hashline_read` and create-only `hashline_write`; it never aliases
 native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Transport, schema, or
 session incompatibility fails closed without falling back to a builtin or to `hashline_edit`.
+Session-history fetches retry only bounded transient timeout, network, and selected HTTP failures,
+with at most four attempts under one 2-second total deadline. Exhaustion reports a safe category and
+can be retried in the same session after restoring the host; diagnostics never include request or
+response secrets. Oversized persisted history cannot be repaired by restarting or resuming the same
+task ID and requires a genuinely new session.
 
-Before exact process-local session binding, native-alias edits must be serialized because the preview cannot safely attest multiple unfinished native-looking calls. After system guidance explicitly reports `native-alias-session=bound`, independent single-file calls for different paths may run concurrently; calls for the same path remain serialized and every file has an independent approval/publication outcome. A restart or protocol mismatch removes that permission. This restriction is specific to the experimental alias surface; the default `hashline` surface does not need native session attestation.
+Before exact process-local session binding, native-alias edits must be serialized because the preview cannot safely attest multiple unfinished native-looking calls. After system guidance explicitly reports `native-alias-session=bound`, calls whose source and destination path sets are disjoint may run concurrently; overlapping paths remain serialized and every call has an independent approval/publication outcome. A restart, protocol mismatch, or partial move publication removes that permission. This restriction is specific to the experimental alias surface; the default `hashline` surface does not need native session attestation.
 
 Run the credential-free clean-room verifier after installation and after every plugin-order or
 configuration change:
@@ -211,10 +225,10 @@ configuration change:
 bunx opencode-better-hashline verify --surface all
 ```
 
-The verifier checks both model routes, schemas, malformed-call confinement, hooks, exact bytes,
-resumed, forked, and imported edits, sanitized export behavior, stock terminal rendering, pinned
-GPT-4/GPT-OSS/GPT-5 routing, wildcard/path edit permissions, protocol fingerprints, and rollback to
-unique IDs in an isolated configuration. It is a package self-test, not
+The verifier checks both model routes, schemas, malformed-call confinement, hooks, exact text edits,
+strict file deletion and no-overwrite moves, resumed, forked, and imported edits, sanitized export
+behavior, stock terminal rendering, pinned GPT-4/GPT-OSS/GPT-5 routing, wildcard/path edit permissions,
+protocol fingerprints, and rollback to unique IDs in an isolated configuration. It is a package self-test, not
 an audit of your merged
 OpenCode configuration. It cannot prove continuous executor ownership: a later plugin or MCP tool can
 replace an alias, and a later after-hook can mutate persisted output. Keep Better Hashline last among
@@ -232,8 +246,9 @@ production default and recommendation.
 The retained [privacy-safe pilot v7 summary](benchmarks/results/2026-07-21-native-alias-pilot-v7.json)
 records 48/48 passing Luna/Sol sessions across the unique and native-alias surfaces, complete
 accounting, zero retries/failures/timeouts, and USD 0 reported cost. It is technical transport
-evidence, not a model-superiority claim. The maintainer approved only an opt-in experimental
-release; all pilot IDs through v7 are closed and may not be resumed or retried.
+evidence for the earlier text-operation surface, not lifecycle-operation evidence or a
+model-superiority claim. The maintainer approved only an opt-in experimental release; all pilot IDs
+through v7 are closed and may not be resumed or retried.
 
 ## Why No Per-Line Hash?
 

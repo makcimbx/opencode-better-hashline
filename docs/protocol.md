@@ -117,20 +117,40 @@ runtime validation accepts only these exact combinations and rejects every unlis
 
 | `op` | Required fields | Optional fields | Forbidden fields |
 | --- | --- | --- | --- |
-| `replace` | `startLine`, `endLine`, `lines` | none | `afterLine`, `finalNewline` |
-| `insert` | `afterLine`, `lines` (non-empty) | none | `startLine`, `endLine`, `finalNewline` |
-| `replace_file` | `lines` | `finalNewline` | `startLine`, `endLine`, `afterLine` |
-| `copy_range` | `startLine`, `endLine`, `afterLine` | none | `lines`, `finalNewline` |
-| `move_range` | `startLine`, `endLine`, `afterLine` | none | `lines`, `finalNewline` |
+| `replace` | `startLine`, `endLine`, `lines` | none | `afterLine`, `finalNewline`, `destinationPath` |
+| `insert` | `afterLine`, `lines` (non-empty) | none | `startLine`, `endLine`, `finalNewline`, `destinationPath` |
+| `replace_file` | `lines` | `finalNewline` | `startLine`, `endLine`, `afterLine`, `destinationPath` |
+| `copy_range` | `startLine`, `endLine`, `afterLine` | none | `lines`, `finalNewline`, `destinationPath` |
+| `move_range` | `startLine`, `endLine`, `afterLine` | none | `lines`, `finalNewline`, `destinationPath` |
+| `delete_file` | none | none | `startLine`, `endLine`, `afterLine`, `lines`, `finalNewline`, `destinationPath` |
+| `move_file` | `destinationPath` | none | `startLine`, `endLine`, `afterLine`, `lines`, `finalNewline` |
 
-`replace_file` must also be the sole operation and use `rebase: "none"`. Unknown operation fields
-are rejected rather than ignored.
+`replace_file`, `delete_file`, and `move_file` must each be the sole operation and use
+`rebase: "none"`. Unknown operation fields are rejected rather than ignored.
 
-At the top level, `rebase` is optional and defaults to `"none"`. `allowHashlinePrefixes` is optional and defaults to `false`. Before any path lookup or permission, the executor rejects literal `replace`, `insert`, and `replace_file` lines beginning in column zero with a positive non-zero decimal annotation (`17|` or `17!|`) or the exact markers `@hashline`, `@hashline-edit`, `@more`, `@eof`, and `@note`. Zero, zero-padded numbers, leading whitespace, and names such as `@hashline-style` are not renderer annotations. Set the top-level flag in the initial call only when the matched prefix is intentional file content; it applies to the whole batch and never strips or rewrites bytes.
+At the top level, the source remains `filePath` plus `snapshotId`; `destinationPath` belongs only to
+the sole `move_file` operation. `rebase` is optional and defaults to `"none"`.
+`allowHashlinePrefixes` is optional and defaults to `false`. Before any path lookup or permission,
+the executor rejects literal `replace`, `insert`, and `replace_file` lines beginning in column zero
+with a positive non-zero decimal annotation (`17|` or `17!|`) or the exact markers `@hashline`,
+`@hashline-edit`, `@more`, `@eof`, and `@note`. Zero, zero-padded numbers, leading whitespace, and
+names such as `@hashline-style` are not renderer annotations. Set the top-level flag in the initial
+call only when the matched prefix is intentional file content; it applies to the whole batch and
+never strips or rewrites bytes.
 
-A rejection identifies the exact `operations[i].lines[j]` coordinate and a bounded prefix kind. On the default surface, no snapshot is consumed and the call throws normally. Native aliases instead return a completed non-mutating terminal result so supported OpenCode hosts persist its exact protocol/package/schema/host/worktree/surface/input marker. The same process can continue from its binding; after restart, continuation requires that exact unsanitized result. Text matching alone never makes a rejected native-looking call compatible.
+A rejection identifies the exact `operations[i].lines[j]` coordinate and a bounded prefix kind. On
+the default surface, no snapshot is consumed and the call throws normally. Native aliases instead
+return a completed non-mutating terminal result so supported OpenCode hosts persist its exact
+protocol/package/schema/host/worktree/surface/input marker. The same process can continue from its
+binding; after restart, continuation requires that exact unsanitized result. Text matching alone
+never makes a rejected native-looking call compatible.
 
-`readback` is optional and defaults to `false`. Use it for structural verification or a dependent follow-up edit; the attached page begins with unified-diff context near the first changed hunk. Every successful edit begins with `Applied N operations.` followed by one lifecycle line:
+`readback` is optional and defaults to `false` for text edits. Use it for structural verification or
+a dependent follow-up edit; the attached page begins with unified-diff context near the first
+changed hunk. File lifecycle operations reject `readback: true` and never attach a successor. A
+successful text edit begins with `Applied N operations.`; lifecycle success begins with `Deleted
+<source>.` or `Moved <source> to <destination>.`. Every successful mutation then includes one
+snapshot lifecycle receipt:
 
 ```text
 @hashline-edit previous=consumed successor=none next=hashline_read
@@ -138,9 +158,16 @@ A rejection identifies the exact `operations[i].lines[j]` coordinate and a bound
 @hashline-edit previous=consumed successor=unavailable next=hashline_read
 ```
 
-`none` means no successor was requested. `attached` is immediately followed by a bounded page from a new snapshot near the first changed hunk. The old snapshot remains invalid, and successor refs become editable only after the same output-digest, marker, and truncation checks used by `hashline_read`. If those checks fail, the write remains successful but the after-hook replaces the result with `unavailable`.
+`none` means no successor was requested or the operation does not support one. `attached` is
+immediately followed by a bounded page from a new snapshot near the first changed hunk. The old
+snapshot remains invalid, and successor refs become editable only after the same output-digest,
+marker, and truncation checks used by `hashline_read`. If those checks fail, the write remains
+successful but the after-hook replaces the result with `unavailable`.
 
-A bounded readback that starts after line 1, stops before EOF, or contains a preview-only line is explicitly marked `partial=true` in its header. Its displayed `N|` refs remain usable. Whole-file replacement still requires cumulative issued coverage of all lines plus BOF and EOF; read missing pages for the same unchanged snapshot or perform a fresh complete read.
+A bounded readback that starts after line 1, stops before EOF, or contains a preview-only line is
+explicitly marked `partial=true` in its header. Its displayed `N|` refs remain usable. Whole-file
+replacement still requires cumulative issued coverage of all lines plus BOF and EOF; read missing
+pages for the same unchanged snapshot or perform a fresh complete read.
 
 ### Replace
 
@@ -192,6 +219,54 @@ Transfer operations never accept `lines` or `finalNewline`; their source is exac
 
 `replace_file` must be the sole operation, requires `rebase: "none"`, exact current bytes, and a completely issued snapshot including BOF and EOF. `finalNewline` is optional only for `replace_file`; omitting it preserves the snapshot's final-newline state. To write an empty file regardless of that state, pass `lines: []` and `finalNewline: false`. An empty array with inherited or explicit `true` is invalid; use `lines: [""]` to represent a file containing one newline.
 
+### Delete File
+
+```json
+{
+  "filePath": "src/obsolete.ts",
+  "snapshotId": "s_J7yi7wDyv3j9xQ2zP5kL8A",
+  "rebase": "none",
+  "operations": [{ "op": "delete_file" }]
+}
+```
+
+`delete_file` is the sole operation. It accepts no line coordinates, `lines`, `finalNewline`, or
+`destinationPath`; it requires strict mode, complete issued BOF-to-EOF coverage, and no readback.
+The source named by top-level `filePath` must be a direct terminal directory entry, not a terminal
+symlink, and must still identify the exact regular, single-link UTF-8 file retained by the snapshot.
+After approval, the executor revalidates the source parent and direct terminal binding, invalidates
+the source snapshots at publication, unlinks that exact entry, and verifies that the name is absent.
+
+### Move File
+
+```json
+{
+  "filePath": "src/old-name.ts",
+  "snapshotId": "s_J7yi7wDyv3j9xQ2zP5kL8A",
+  "rebase": "none",
+  "operations": [{ "op": "move_file", "destinationPath": "src/new-name.ts" }]
+}
+```
+
+`move_file` has the same strict source and issued-coverage requirements as `delete_file`. Its sole
+operation requires only `destinationPath`; line coordinates, `lines`, and `finalNewline` are
+forbidden, and `readback: true` rejects. Relative destinations resolve from
+`ToolContext.directory`; absolute destinations require external-directory authorization. The destination
+must differ from the source and must be absent even when the terminal entry is a symlink. Its
+existing parent must remain the same directory; the tool neither overwrites nor creates parents.
+Source and destination must be on one filesystem, and external-directory plus edit authorization
+covers both canonical paths.
+Lifecycle source and destination renderer paths containing CR or LF are rejected before
+authorization or publication so unified-diff history remains unambiguous.
+
+Publication creates an exclusive no-clobber hard link at the destination, verifies exact inode,
+bytes, and a link count of two, then unlinks the source and verifies the destination with a link
+count of one. This is intentionally nontransactional. Once the destination link exists, any source
+unlink or final-verification failure returns `PARTIAL_PUBLICATION`; both exact names may remain.
+The plugin invalidates source and destination snapshots, does not attempt an unsafe rollback, and
+poisons the bound native-alias session. Inspect both paths and begin a new session before any retry.
+After a successful move, read the destination to obtain a snapshot for that path.
+
 ## Rebase Modes
 
 ### None
@@ -221,53 +296,139 @@ For example, suppose a retained snapshot contains `alpha`, `target`, `omega`, an
 
 ## Native-Alias Session and Metadata Contract
 
-Native aliases use protocol marker `native-aliases/v1`. Completed `edit` metadata contains the exact unified diff in `diff` and `filediff.patch`; completed `apply_patch` metadata contains one update in `files[]`. Both include additions/deletions, empty `diagnostics`, and `betterHashline` fields for the protocol, package version, canonical schema SHA-256, exact host version, active alias, and canonical path SHA-256. Serialized metadata is measured before permission and publication and may not exceed 1 MiB.
+Native aliases use protocol marker `native-aliases/v2`. The marker records `operation` as `update`,
+`delete_file`, or `move_file`; a move also records the destination canonical-path SHA-256. Exact
+persisted `native-aliases/v1` history is deliberately incompatible and fails closed with
+`SESSION_PROTOCOL_MISMATCH` rather than being interpreted under v2.
 
-On native aliases, `DISPLAY_PREFIX_REJECTED` is a completed non-mutating terminal result because supported OpenCode hosts persist returned result metadata, but do not persist a lazy metadata update discarded before a throw. Its separate `betterHashlineRejection` marker contains exact protocol/package/schema/host/worktree/surface identity, canonical input SHA-256, payload coordinate, and bounded prefix kind. It attests only that this exact input stopped before path access, permission, and mutation; it is never successful provenance.
+Completed `edit` metadata contains the exact unified diff in both `diff` and `filediff.patch`.
+Completed `apply_patch` metadata contains exactly one source-correlated entry whose type is
+`update`, `delete`, or `move`; move metadata also carries the exact destination and destination
+relative path. Both forms include additions/deletions, empty `diagnostics`, and `betterHashline`
+fields for the protocol, package version, canonical schema SHA-256, exact host version, active
+alias, operation, source canonical-path SHA-256, and, for moves, destination canonical-path SHA-256.
+The patch validator accepts the exact zero-hunk lifecycle forms needed for an empty-file delete or a
+path-only move while still correlating source and destination headers. Serialized metadata is
+measured before permission and publication and may not exceed 1 MiB.
 
-Each plugin instance binds a session to one protocol fingerprint. Before the first edit it reads a bounded history of at most 200 messages, 2,000 parts, and 1 MiB, then validates every historical mutator. Message, part, call, session, input path, metadata keys, single-file unified-diff hunks, counts, and renderer path must agree exactly. Native `write`, `hashline_edit`, unknown fields, malformed hunks, and any terminal rejection except exact native-shaped `INVALID_ARGUMENT` errors or an exact completed `DISPLAY_PREFIX_REJECTED` result are incompatible. Unmarked, malformed, sanitized, conflicting, unreadable, cross-worktree, or cross-surface history returns `SESSION_PROTOCOL_MISMATCH`.
+On native aliases, `DISPLAY_PREFIX_REJECTED` is a completed non-mutating terminal result because
+supported OpenCode hosts persist returned result metadata, but do not persist a lazy metadata update
+discarded before a throw. Its separate `betterHashlineRejection` marker contains exact
+protocol/package/schema/host/worktree/surface identity, canonical input SHA-256, payload coordinate,
+and bounded prefix kind. It attests only that this exact input stopped before path access,
+permission, and mutation; it is never successful provenance.
 
-Only the exact current running call is excluded. OpenCode can expose that call before its persisted input has caught up with parsed before-hook arguments. For the same exact call ID and tool, the plugin may reread bounded local history five times under one 160 ms stabilization deadline after the initial bounded read; exclusion still requires exact input equality. A different call ID, tool, path, snapshot, operation, permanently different input, or more than one active alias remains incompatible before binding.
+Each plugin instance binds a session to one v2 protocol fingerprint. Before the first edit it reads
+a bounded history of at most 200 messages, 2,000 parts, and 1 MiB, then validates every historical
+mutator. Message, part, call, session, input path, lifecycle operation, move destination, metadata
+keys, unified-diff path headers and hunks, counts, renderer path, and source/destination digests must
+agree exactly. Native `write`, `hashline_edit`, unknown fields, malformed or v1 markers, and any
+terminal rejection except exact native-shaped `INVALID_ARGUMENT` errors or an exact completed
+`DISPLAY_PREFIX_REJECTED` result are incompatible. Unmarked, sanitized, conflicting, unreadable,
+cross-worktree, or cross-surface history returns `SESSION_PROTOCOL_MISMATCH`.
 
-System guidance reports the process-local state as `native-alias-session=unbound`, `bound`, or `mismatch`. Unbound sessions must serialize calls until one exact before-hook attestation binds the session. Once bound to the current package/schema/host/worktree fingerprint, independent single-file calls for different canonical paths may run concurrently. The filesystem still serializes calls targeting one canonical path, and each file retains a separate plan, approval, reread, rename, verification, and success/failure outcome. This is not a multi-file transaction.
+The history transport admits at most 1,114,112 response bytes so the protocol validator can enforce
+the stricter 1 MiB persisted-history limit without accepting an unbounded envelope. The initial
+history read has one 2,000 ms total deadline, at most four attempts, a 500 ms per-attempt cap, and
+10/25/50 ms backoff. Only timeout/network failures and HTTP 408, 425, 429, 500, 502, 503, or 504 are
+retried. Unavailable or unexpected transport, other HTTP statuses, an oversized response, invalid
+JSON, and an invalid top-level shape fail immediately. Diagnostics retain only that safe category,
+HTTP status/class, and bounded attempt/deadline facts; they never include the request URL, headers,
+response body, credentials, private paths, or raw transport error text. Exhausted transient failures
+can be retried in the same session after restoring the host. History beyond either bounded inspection
+window requires a genuinely new session; resuming the same task ID cannot reduce persisted history.
 
-A restart clears snapshots and process bindings. Resume requires compatible unsanitized history plus a fresh `hashline_read`, and calls remain serialized until the new process binds. Binding eviction has the same effect. A mismatched binding fails closed and requires a new session. Changing surfaces or configuration requires a restart and a new session.
+Only the exact current running call is excluded. OpenCode can expose that call before its persisted
+input has caught up with parsed before-hook arguments. For the same exact call ID and tool, the
+plugin may reread bounded local history five times under one 160 ms stabilization deadline after
+the initial bounded read. Each reread gives transport retries only the time remaining on that same
+160 ms deadline; it does not receive another 2 seconds. Exclusion still requires exact input
+equality. A different call ID, tool, path, snapshot, operation, destination, permanently different
+input, or more than one active alias remains incompatible before binding.
+
+System guidance reports the process-local state as `native-alias-session=unbound`, `bound`, or
+`mismatch`. Unbound sessions must serialize calls until one exact before-hook attestation binds the
+session. Once bound to the current package/schema/host/worktree fingerprint, calls may overlap only
+when their complete canonical source/destination path sets are disjoint. Any shared source or
+destination path serializes through deterministic path locks; each call still has an independent
+approval/publication outcome. This is not a multi-file transaction. A `PARTIAL_PUBLICATION` move
+poisons that binding and reports `mismatch` for the rest of the session.
+
+A restart clears snapshots and process bindings. Resume requires compatible unsanitized v2 history
+plus a fresh `hashline_read`, and calls remain serialized until the new process binds. Binding
+eviction has the same effect. A mismatched or poisoned binding fails closed and requires a new
+session. Changing surfaces or configuration requires a restart and a new session.
 
 ## Permission and Publication Order
 
-For an existing file:
+Text edits and file lifecycle operations share strict snapshot authority but use separate planners.
+`planEdits` remains the pure text planner; it does not plan deletion or movement of filesystem
+entries.
+
+For a text edit:
 
 1. Resolve the lexical path and canonical target.
-2. Pin and validate snapshot scope, path, and issued provenance.
+2. Pin and validate snapshot scope, path, and operation-specific issued provenance.
 3. Request `external_directory` when the canonical target is outside the allowed roots. On POSIX, parents containing literal `*` or `?` can be approved once but are not persisted as wildcard rules; Windows rejects those invalid filename characters before permission.
 4. Acquire the process-global canonical-path lock.
 5. Reread bytes and file identity; revalidate symlink target and supported metadata.
-6. Plan every operation against one immutable current document.
-7. Build the exact unified diff.
-8. Request standard `edit` permission with `{ filepath, diff }` metadata.
+6. Plan every text operation against one immutable current document.
+7. Build the exact unified diff and native-alias metadata, if applicable.
+8. Request standard `edit` permission with that exact approved patch.
 9. Create an exclusive same-directory temporary file, write, flush, and preserve supported metadata.
-10. Reread the destination and recheck exact bytes, identity, and alias target after permission wait.
+10. Reread the destination and recheck exact bytes, identity, and alias target after the permission wait.
 11. Invalidate all snapshots for this session/path immediately before publication.
 12. Attempt one rename over the canonical target.
 13. Reread and verify the resulting bytes.
 14. When `readback: true`, retain those verified bytes as a new snapshot and render a bounded page.
 15. Issue the successor refs only after `tool.execute.after` attests the delivered output.
 
-No rebase or diff change occurs after permission approval. If state changed while approval was pending, publication rejects.
+For a file lifecycle operation:
 
-For a new file, `hashline_write` requests the same path permissions, writes and flushes an exclusive same-directory temporary file, then publishes it with a no-replace hard link. It verifies staged and published identity, link count, exact bytes, and parent identity before returning success. It never overwrites a file, directory, or symlink. Filesystems that cannot provide these local hard-link semantics reject the operation. A failure after the hard link succeeds can leave the new file committed; the plugin reports `RACE_AFTER_WRITE` and does not risk deleting a newer writer's file.
+1. Validate the sole operation, strict rebase, no-readback shape, snapshot scope, canonical source path, and complete issued BOF-to-EOF provenance.
+2. Resolve a direct mutable source and, for move, an absent destination under an existing canonical parent; authorize every external source or destination path.
+3. Acquire deterministic process-global locks sequentially for the sorted canonical source/destination path set; cancellation while queued releases acquired locks before later paths are reserved.
+4. Reread the source as the exact regular, single-link UTF-8 snapshot file; revalidate direct terminal and parent identity, and for move verify destination absence and same-filesystem identity.
+5. Freeze one immutable lifecycle plan containing the operation, canonical paths, stable source and parent identities, and exact delete/move patch and metadata.
+6. Request standard `edit` permission for the complete source/destination path set and that exact patch.
+7. Reread and revalidate the approved source, terminal binding, parent identities, destination absence, and same-filesystem constraint without replanning or changing metadata.
+8. Invalidate relevant snapshots immediately before publication.
+9. Delete revalidates the direct terminal binding, unlinks the exact source, and verifies absence.
+10. Move publishes a no-clobber destination hard link, verifies exact inode/bytes/link count, unlinks the source, and verifies the final destination.
+
+No rebase, destination substitution, patch change, metadata change, or lifecycle replan occurs after
+permission approval. If approved state changed while permission was pending, publication rejects.
+Lifecycle operations never create a readback successor.
+
+For a new file, `hashline_write` requests the same path permissions, writes and flushes an exclusive
+same-directory temporary file, then publishes it with a no-replace hard link. It verifies staged
+and published identity, link count, exact bytes, and parent identity before returning success. It
+never overwrites a file, directory, or symlink. Filesystems that cannot provide these local
+hard-link semantics reject the operation. A failure after the hard link succeeds can leave the new
+file committed; the plugin reports `RACE_AFTER_WRITE` and does not risk deleting a newer writer's
+file.
 
 ## Batch Semantics
 
-A one-file operation array is validation-atomic: all operations are parsed, issued-provenance checked, mapped against one immutable current document, and overlap/order checked before mutation. Operations are then composed in memory and at most one destination replacement is attempted. In a transfer-containing batch, required ranges are deduplicated and checked in coordinate order before deduplicated destination boundaries are checked in coordinate order, so request-array order cannot change the provenance error class. Transfer-free batches retain their existing request-order provenance behavior.
+A text operation array is validation-atomic: all operations are parsed, issued-provenance checked,
+mapped against one immutable current document, and overlap/order checked before mutation.
+Operations are composed in memory and at most one destination replacement is attempted. In a
+transfer-containing batch, required ranges are deduplicated and checked in coordinate order before
+deduplicated destination boundaries are checked in coordinate order, so request-array order cannot
+change the provenance error class. Transfer-free batches retain their existing request-order
+provenance behavior.
 
-The array is declarative, not a sequential program, and array order cannot resolve conflicts. Every source is read from the immutable pre-batch document. The batch rejects:
+The text array is declarative, not a sequential program, and array order cannot resolve conflicts.
+Every source is read from the immutable pre-batch document. The batch rejects:
 
 - overlapping destructive spans;
 - insertions or copy destinations sharing a boundary;
 - any insertion or copy destination strictly inside a destructive span.
 
-Immediately adjacent, non-intersecting destructive spans are valid. An insertion-like destination may touch either destructive endpoint. Copy sources may overlap other reads or writes because they always read the immutable pre-batch document. Conflict rules are checked both before and after unique relocation.
+Immediately adjacent, non-intersecting destructive spans are valid. An insertion-like destination
+may touch either destructive endpoint. Copy sources may overlap other reads or writes because they
+always read the immutable pre-batch document. Conflict rules are checked both before and after
+unique relocation.
 
 If a transfer-containing batch has several conflict classes, diagnostics use one global precedence:
 destructive intersection, insertion strictly inside a destructive span, then duplicate insertion
@@ -275,11 +436,23 @@ boundary. Request-array order therefore changes neither the error code nor its d
 Diagnostics include a repair hint to merge overlapping destructive payloads, fold an internal
 insertion into its replacement, or combine same-boundary insertions in the intended order.
 
-An individually byte-identical `move_range` rejects the entire batch with `NO_CHANGE`, including when another member would change the file. This intentionally treats an identity move as a model-addressing error. Legacy no-op `replace` or `insert` members retain aggregate behavior: they are accepted when the final batch changes bytes.
+An individually byte-identical `move_range` rejects the entire batch with `NO_CHANGE`, including
+when another member would change the file. This intentionally treats an identity move as a
+model-addressing error. Legacy no-op `replace` or `insert` members retain aggregate behavior: they
+are accepted when the final batch changes bytes.
 
-The provider accepts 1 to 100 operations. Each `replace` accepts 0 to 20,000 payload lines; `insert` accepts 1 to 20,000. Each payload item is one logical line and must not contain CR, LF, NUL, or invalid Unicode. Aggregate payload and projected final output must remain within configured byte and logical-line limits. Transfer projection is bounded before final materialization, including copy amplification.
+The provider accepts 1 to 100 operations, but `replace_file`, `delete_file`, and `move_file` require
+an array of exactly one. Each `replace` accepts 0 to 20,000 payload lines; `insert` accepts 1 to
+20,000. Each payload item is one logical line and must not contain CR, LF, NUL, or invalid Unicode.
+Aggregate payload and projected final output must remain within configured byte and logical-line
+limits. Transfer projection is bounded before final materialization, including copy amplification.
 
-This is not a filesystem transaction. Post-rename verification can detect an immediate overwrite but cannot safely roll it back without risking a newer writer. Multi-file tool calls are independent and can leave an earlier file committed if a later file fails.
+A lifecycle operation bypasses text batch composition and `planEdits`; its immutable filesystem plan
+is approved and published separately. This is not a filesystem transaction. Post-rename text
+verification can detect an immediate overwrite but cannot safely roll it back over a newer writer.
+A move can leave both exact names after destination-link publication, as reported by
+`PARTIAL_PUBLICATION`. Independent tool calls can leave an earlier mutation committed if a later
+call fails.
 
 ## Stable Errors
 
@@ -293,14 +466,14 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `NATIVE_TOOL_DISABLED` | Enforcement rejected a hidden native mutator |
 | `TOOL_SURFACE_UNAVAILABLE` | The requested alias surface cannot be safely activated on this host |
 | `SESSION_PROTOCOL_MISMATCH` | Session history or its bound protocol is missing, unreadable, or incompatible |
-| `PATH_NOT_FOUND` | Requested source path does not exist |
-| `TARGET_EXISTS` | Create-only publication found an existing path |
+| `PATH_NOT_FOUND` | Requested source path or required destination parent does not exist |
+| `TARGET_EXISTS` | Create-only or move publication found an existing destination, including a symlink |
 | `SNAPSHOT_REQUIRED` | No valid issued snapshot is available |
 | `SNAPSHOT_UNKNOWN` | ID was not retained for this scope |
 | `SNAPSHOT_EXPIRED` | Snapshot exceeded its configured TTL |
-| `PATH_MISMATCH` | Snapshot and requested canonical paths differ |
+| `PATH_MISMATCH` | Snapshot/request paths differ, or a direct terminal/parent binding changed |
 | `REF_NOT_ISSUED` | Required BOF or EOF boundary was not issued |
-| `RANGE_NOT_FULLY_ISSUED` | A required range line or internal boundary neighbor was not issued |
+| `RANGE_NOT_FULLY_ISSUED` | A required range, internal boundary neighbor, or complete lifecycle source was not issued |
 | `TARGET_CHANGED` | Strict bytes or exact relocation target changed |
 | `BOUNDARY_CHANGED` | Required insertion neighbors no longer match |
 | `AMBIGUOUS_RELOCATION` | Exact target/context is ambiguous or reordered, or relocation makes a move EOL layout unrepresentable |
@@ -308,11 +481,25 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `INSERTION_BOUNDARY_CONFLICT` | Multiple insertion-like effects share one destination boundary |
 | `DISPLAY_PREFIX_REJECTED` | A payload begins with a model-facing annotation; native aliases persist this failure as a completed non-mutating terminal result |
 | `PERMISSION_DENIED` | OpenCode rejected a required permission |
-| `RACE_BEFORE_WRITE` | Identity or bytes changed before publication |
-| `RACE_AFTER_WRITE` | Published bytes, identity, link count, or parent did not remain equal to the plan |
-| `UNSUPPORTED_FILE` | File type, metadata, encoding, size, or policy is unsupported |
+| `RACE_BEFORE_WRITE` | Approved identity, bytes, direct binding, parent, or destination state changed before publication |
+| `RACE_AFTER_WRITE` | Published bytes, identity, link count, parent, or final path state did not remain equal to the plan |
+| `PARTIAL_PUBLICATION` | A move created the destination link but could not safely complete or verify source removal |
+| `UNSUPPORTED_FILE` | File type, metadata, encoding, size, filesystem relation, or policy is unsupported |
 
 Consumers must treat every `CODE: message` as failure. The native-alias `DISPLAY_PREFIX_REJECTED` result is completed only at the host transport layer so its attestation persists; it never reports `Applied`, requests permission, or changes a file.
+
+## Migration From 0.5.0
+
+The flat operation enum adds `delete_file` and `move_file`, and the shared operation object adds the
+schema-optional `destinationPath` field. Runtime validation still requires the exact sole shapes
+documented above; generated clients must not populate line fields for lifecycle operations. Older
+plugin versions reject the new enum values and must not receive these calls.
+
+Native-alias protocol identity changes from `native-aliases/v1` to `native-aliases/v2`. The v2
+marker adds operation identity and, for moves, a destination-path digest; renderer metadata also
+adds exact delete/move source and destination correlation. Existing v1 history is not migrated or
+silently accepted. Restart the plugin and begin a new session with a fresh `hashline_read` after
+upgrading.
 
 ## Migration From 0.4.0
 

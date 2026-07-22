@@ -201,15 +201,17 @@ export function assertNativeAliasPreflightReceipt(
   sha256(artifact.sha256, "artifact SHA-256");
   sha256(artifact.installedLockfileSha256, "installed lockfile SHA-256");
   sha256(artifact.packageTreeSha256, "installed package-tree SHA-256");
+  const verifierReport = receipt.verifierReport as VerificationReport;
   assertFullVerificationReport(
-    receipt.verifierReport as unknown as VerificationReport,
+    verifierReport,
     expected.artifact.packageVersion,
     expected.toolchain.opencode.packageVersion,
   );
   if (
     canonicalJson(receipt.oracleFixture) !==
     canonicalJson({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      hostVersion: verifierReport.hostVersion,
       legacyDecision: "invalid",
       correctedDecision: "valid",
       correctedReason: "valid",

@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { modelTaskSets } from "../benchmarks/model/tasks.js";
 
 describe("model task manifests", () => {
-  test("keeps the baseline frozen and transfer tasks separately versioned", () => {
+  test("keeps frozen task suites separate from lifecycle evidence", () => {
     expect(modelTaskSets["baseline-v1"]).toHaveLength(12);
     expect(modelTaskSets["transfer-v1"]).toHaveLength(8);
+    expect(modelTaskSets["file-ops-v1"].map((task) => task.id)).toEqual([
+      "delete-file",
+      "move-file",
+    ]);
+    expect(
+      createHash("sha256").update(JSON.stringify(modelTaskSets["file-ops-v1"])).digest("hex"),
+    ).toBe("c2bd30cdf8c93c9d06436f2a66c568f3a675d6aa2e72109d13fb5f58894f1930");
     expect(modelTaskSets["baseline-v1"].map((task) => task.id)).toEqual([
       "single-constant",
       "duplicate-block-target",
@@ -30,9 +38,20 @@ describe("model task manifests", () => {
         expect(task.prompt.length).toBeGreaterThan(0);
         expect(Object.keys(task.files).length).toBeGreaterThan(0);
         expect(Object.keys(task.expectedFiles).length).toBeGreaterThan(0);
+        const absent = new Set(task.absentFiles ?? []);
         for (const path of Object.keys(task.files)) {
-          expect(task.expectedFiles[path]).toBeDefined();
-          expect(task.absentFiles ?? []).not.toContain(path);
+          if (absent.has(path)) expect(task.expectedFiles[path]).toBeUndefined();
+          else expect(task.expectedFiles[path]).toBeDefined();
+        }
+        for (const operation of task.fileOperations ?? []) {
+          expect(task.files[operation.filePath]).toBeDefined();
+          expect(absent.has(operation.filePath)).toBe(true);
+          if (operation.op === "move_file") {
+            expect(task.files[operation.destinationPath]).toBeUndefined();
+            expect(task.expectedFiles[operation.destinationPath]).toBe(
+              task.files[operation.filePath],
+            );
+          }
         }
       }
     }

@@ -10,6 +10,7 @@ import {
 import {
   buildNativeAliasMetadata,
   canonicalJson,
+  isRendererPathSafe,
   jsonSha256,
   measureNativeAliasMetadata,
   type NativeAliasMetadataInput,
@@ -50,17 +51,17 @@ describe("native alias presentation contracts", () => {
       providerSchemaSha256: schemaSha256,
       protocolFingerprint: nativeAliasProtocolFingerprint(commonInput),
     }).toEqual({
-      hashlineBytes: 3_326,
-      hashlineSerializedSha256: "327d4573cf53a6fbdc9874881c6421b386fce2d4e0c2aa7904058fac9fa56df3",
-      hashlineCanonicalSha256: "27a0a53e36b2bc821d4ea8160380953c915c19447739400518a8c98a2bf44d75",
-      nativeAliasBytes: 3_496,
+      hashlineBytes: 4_039,
+      hashlineSerializedSha256: "5899d1c43c65d3522a810453e67427b021769f6ed3b5f3bc5794503b71b21db9",
+      hashlineCanonicalSha256: "78d95580c8135ba1557edd2cd71f724e9c9e41793e18079e82b1f5f049dcdbc4",
+      nativeAliasBytes: 4_256,
       nativeAliasSerializedSha256:
-        "615808e9af1ff15b7795849fd4aa8ba13ae99dedabe1f1017c287a1ceafb9929",
+        "ad353dfed6410139f0573d1cc7b63268470dcaaab1fefaa8cb4d4ebf442926b4",
       nativeAliasCanonicalSha256:
-        "d1e331aaed3c389bdbd8cecb2ede10fd41af7ac61669124050fb571bf64d5317",
-      rawSchemaSha256: "70d2ded38049d1ea851b01a7b3236a5099c79a9b2dea31fc7b5c377266b6f73f",
-      providerSchemaSha256: "8422dfe1152e229c8eefdbc2b3bca488ada671c99115340252f2102b2b1905b1",
-      protocolFingerprint: "4767648d213a21cf5dbd45f9b6fd282c6f5212390f66e922111b41a6f2f75bae",
+        "843b00be572949ed123e618d5eb01685b2066420e4392dd2171e1baa2ed5deb6",
+      rawSchemaSha256: "62b2f9d2b85272bdd3a45f969cb6b0b42c7ef7d3d0114d3078249a510f52288a",
+      providerSchemaSha256: "52a90bf4a1f8096ccc49d6e7728c073de45847d2583852506ce2d14644ef9f74",
+      protocolFingerprint: "0b1192d9b1bc118aa37a845bbaa257b6d5b63e45060bc42a135b5e9002aa8476",
     });
   });
 
@@ -75,11 +76,12 @@ describe("native alias presentation contracts", () => {
       },
       diagnostics: {},
       betterHashline: {
-        protocol: "native-aliases/v1",
+        protocol: "native-aliases/v2",
         packageVersion: "0.2.1",
         schemaSha256,
         hostVersion: "1.18.3",
         surface: "edit",
+        operation: "update",
         canonicalPathSha256: "cb601cffb9332c620c54a6f1662af02110336fbe6fc466ded35ec8601b9d7b2b",
       },
     });
@@ -99,27 +101,75 @@ describe("native alias presentation contracts", () => {
       ],
       diagnostics: {},
       betterHashline: {
-        protocol: "native-aliases/v1",
+        protocol: "native-aliases/v2",
         packageVersion: "0.2.1",
         schemaSha256,
         hostVersion: "1.18.3",
         surface: "apply_patch",
+        operation: "update",
         canonicalPathSha256: "cb601cffb9332c620c54a6f1662af02110336fbe6fc466ded35ec8601b9d7b2b",
       },
     });
   });
 
+  test("builds delete and move renderer metadata", () => {
+    const deleted = buildNativeAliasMetadata({
+      ...commonInput,
+      surface: "apply_patch",
+      operation: "delete_file",
+      unifiedDiff: "",
+      additions: 0,
+      deletions: 0,
+    });
+    expect(deleted).toMatchObject({
+      files: [{ filePath: "/repo/src/a.ts", relativePath: "src/a.ts", type: "delete" }],
+      betterHashline: { operation: "delete_file" },
+    });
+
+    const moved = buildNativeAliasMetadata({
+      ...commonInput,
+      surface: "apply_patch",
+      operation: "move_file",
+      destinationCanonicalPath: "/repo/src/b.ts",
+      destinationRelativePath: "src\\b.ts",
+      unifiedDiff: "",
+      additions: 0,
+      deletions: 0,
+    });
+    expect(moved).toMatchObject({
+      files: [
+        {
+          filePath: "/repo/src/a.ts",
+          relativePath: "src/b.ts",
+          type: "move",
+          movePath: "/repo/src/b.ts",
+        },
+      ],
+      betterHashline: {
+        operation: "move_file",
+        destinationPathSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+  });
+
+  test("rejects line breaks in renderer paths only", () => {
+    expect(isRendererPathSafe("src/a.ts")).toBeTrue();
+    expect(isRendererPathSafe("src/a\tb.ts")).toBeTrue();
+    expect(isRendererPathSafe("src/a\nb.ts")).toBeFalse();
+    expect(isRendererPathSafe("src/a\rb.ts")).toBeFalse();
+  });
+
   test("measures compact metadata and escaped diff copies deterministically", () => {
     expect(measureNativeAliasMetadata({ ...commonInput, surface: "edit" })).toEqual({
-      compactJsonBytes: 532,
-      compactJsonBytesWithoutDiff: 390,
+      compactJsonBytes: 553,
+      compactJsonBytesWithoutDiff: 411,
       serializedDiffBytes: 142,
       diffUtf8Bytes: 64,
       diffCopies: 2,
     });
     expect(measureNativeAliasMetadata({ ...commonInput, surface: "apply_patch" })).toEqual({
-      compactJsonBytes: 503,
-      compactJsonBytesWithoutDiff: 432,
+      compactJsonBytes: 524,
+      compactJsonBytesWithoutDiff: 453,
       serializedDiffBytes: 71,
       diffUtf8Bytes: 64,
       diffCopies: 1,

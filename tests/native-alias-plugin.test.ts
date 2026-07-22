@@ -1,11 +1,17 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import * as fsPromises from "node:fs/promises";
 import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hooks, ToolContext } from "@opencode-ai/plugin";
 import { z } from "zod";
-import { openCodeProviderSchema } from "../src/native-alias.js";
+import {
+  openCodeProviderSchema,
+  SESSION_HISTORY_MAX_ATTEMPTS,
+  SESSION_HISTORY_TIMEOUT_MS,
+  SESSION_HISTORY_TRANSPORT_MAX_BYTES,
+} from "../src/native-alias.js";
 import {
   betterHashlinePlugin,
   hashlineEditArgumentsSchema,
@@ -37,6 +43,7 @@ type AliasHarnessOptions = {
   healthStatus?: number;
   history?: unknown | ((sessionId: string) => unknown);
   historyError?: boolean;
+  historyFetch?: (sessionId: string, attempt: number) => Response | Promise<Response>;
   pluginOptions?: Record<string, unknown>;
   worktree?: string;
 };
@@ -69,6 +76,16 @@ function structured(result: unknown): StructuredResult {
     metadata:
       "metadata" in result && result.metadata ? (result.metadata as Record<string, unknown>) : {},
   };
+}
+
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof Error) return error.message;
+    throw error;
+  }
+  throw new Error("Expected operation to reject");
 }
 
 function context(
@@ -117,6 +134,8 @@ async function aliasHarness(options: AliasHarnessOptions = {}) {
       if (!match?.[1]) return new Response("not found", { status: 404 });
       const sessionId = decodeURIComponent(match[1]);
       historyCalls.push(sessionId);
+      const attempt = historyCalls.filter((value) => value === sessionId).length;
+      if (options.historyFetch) return options.historyFetch(sessionId, attempt);
       if (options.historyError) return new Response("unavailable", { status: 500 });
       const history =
         typeof options.history === "function"
@@ -692,7 +711,7 @@ describe("native alias argument and mutation contract", () => {
     );
     const guidance = await systemGuidance(value, sessionID);
     expect(guidance).toContain("native-alias-session=bound");
-    expect(guidance).toContain("Different paths may run concurrently");
+    expect(guidance).toContain("disjoint source and destination paths may run concurrently");
     expect(guidance).not.toContain("Never issue edit or apply_patch calls concurrently");
 
     const leftSnapshot = await issueSnapshot(value, toolContext, "left.txt");
@@ -863,6 +882,135 @@ describe("native alias argument and mutation contract", () => {
     }
   });
 
+  test("publishes lifecycle operations through both renderer surfaces", async () => {
+    const { value } = await aliasHarness();
+    const tools = aliasRegistry(value);
+
+    await writeFile(join(root, "delete.txt"), "delete\n");
+    const editContext = context();
+    const deleteSnapshot = await issueSnapshot(value, editContext, "delete.txt");
+    const deleted = structured(
+      await tools.edit.execute(
+        {
+          filePath: "delete.txt",
+          snapshotId: String(deleteSnapshot.metadata.snapshotId),
+          operations: [{ op: "delete_file" }],
+        },
+        editContext,
+      ),
+    );
+    expect(deleted.output).toContain("Deleted delete.txt.");
+    expect(deleted.metadata).toMatchObject({
+      diff: expect.stringContaining("-delete"),
+      betterHashline: { operation: "delete_file" },
+    });
+    await expect(readFile(join(root, "delete.txt"))).rejects.toThrow();
+
+    await writeFile(join(root, "move.txt"), "move\n");
+    const patchContext = context();
+    const moveSnapshot = await issueSnapshot(value, patchContext, "move.txt");
+    const moved = structured(
+      await tools.applyPatch.execute(
+        {
+          filePath: "move.txt",
+          snapshotId: String(moveSnapshot.metadata.snapshotId),
+          operations: [{ op: "move_file", destinationPath: "moved.txt" }],
+        },
+        patchContext,
+      ),
+    );
+    expect(moved.output).toContain("Moved move.txt to moved.txt.");
+    expect(moved.metadata).toMatchObject({
+      files: [
+        {
+          filePath: join(root, "move.txt"),
+          relativePath: "moved.txt",
+          type: "move",
+          movePath: join(root, "moved.txt"),
+          additions: 0,
+          deletions: 0,
+        },
+      ],
+      betterHashline: {
+        operation: "move_file",
+        destinationPathSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    await expect(readFile(join(root, "move.txt"))).rejects.toThrow();
+    expect(await readFile(join(root, "moved.txt"), "utf8")).toBe("move\n");
+  });
+
+  test("rejects move destination renderer line breaks before permission or publication", async () => {
+    if (process.platform === "win32") return;
+    const { value } = await aliasHarness();
+    const { applyPatch } = aliasRegistry(value);
+
+    for (const [index, separator] of ["\n", "\r"].entries()) {
+      const sourceName = `safe-source-${index}.txt`;
+      const destinationName = `unsafe-${index}${separator}destination.txt`;
+      const sourcePath = join(root, sourceName);
+      const destinationPath = join(root, destinationName);
+      await writeFile(sourcePath, "preserved\n");
+      const asks: AskRecord[] = [];
+      const metadata: Array<Record<string, unknown>> = [];
+      const toolContext = context({ asks, metadata });
+      const snapshot = await issueSnapshot(value, toolContext, sourceName);
+      asks.length = 0;
+      metadata.length = 0;
+
+      await expect(
+        applyPatch.execute(
+          {
+            filePath: sourceName,
+            snapshotId: String(snapshot.metadata.snapshotId),
+            operations: [{ op: "move_file", destinationPath: destinationName }],
+          },
+          toolContext,
+        ),
+      ).rejects.toThrow("UNSUPPORTED_FILE: Renderer paths cannot contain CR or LF");
+      expect(asks).toEqual([]);
+      expect(metadata).toEqual([]);
+      expect(await readFile(sourcePath, "utf8")).toBe("preserved\n");
+      await expect(readFile(destinationPath)).rejects.toThrow();
+    }
+  });
+
+  test("poisons a bound alias session after partial move publication", async () => {
+    const { value } = await aliasHarness();
+    const tools = aliasRegistry(value);
+    const sourcePath = join(root, "partial-source.txt");
+    const destinationPath = join(root, "partial-destination.txt");
+    await writeFile(sourcePath, "preserved\n");
+    const toolContext = context();
+    const snapshot = await issueSnapshot(value, toolContext, "partial-source.txt");
+    const args = {
+      filePath: "partial-source.txt",
+      snapshotId: String(snapshot.metadata.snapshotId),
+      operations: [{ op: "move_file" as const, destinationPath: "partial-destination.txt" }],
+    };
+    const realUnlink = fsPromises.unlink;
+    const unlinkMock = spyOn(fsPromises, "unlink").mockImplementation(async (path) => {
+      if (String(path) === sourcePath) throw new Error("simulated unlink failure");
+      return realUnlink(path);
+    });
+    try {
+      await expect(tools.applyPatch.execute(args, toolContext)).rejects.toThrow(
+        "PARTIAL_PUBLICATION:",
+      );
+    } finally {
+      unlinkMock.mockRestore();
+    }
+
+    expect(await readFile(sourcePath, "utf8")).toBe("preserved\n");
+    expect(await readFile(destinationPath, "utf8")).toBe("preserved\n");
+    expect(await systemGuidance(value, toolContext.sessionID)).toContain(
+      "native-alias-session=mismatch",
+    );
+    await expect(tools.edit.execute(args, toolContext)).rejects.toThrow(
+      "SESSION_PROTOCOL_MISMATCH:",
+    );
+  });
+
   test("keeps snapshots session-scoped and permission denial side-effect free", async () => {
     await writeFile(join(root, "file.txt"), "one\ntwo\n");
     const owner = context();
@@ -907,6 +1055,103 @@ describe("native alias argument and mutation contract", () => {
 });
 
 describe("native alias continuation safety", () => {
+  test("recovers a transient history fetch and binds the same session normally", async () => {
+    const sessionID = "transient-history";
+    const { value, historyCalls } = await aliasHarness({
+      historyFetch: async (_sessionId, attempt) =>
+        attempt === 1 ? new Response("private transient body", { status: 503 }) : Response.json([]),
+    });
+    const toolContext = context({ sessionID });
+    await writeFile(join(root, "transient.txt"), "one\ntwo\n");
+    const snapshot = await issueSnapshot(value, toolContext, "transient.txt");
+
+    await aliasRegistry(value).edit.execute(
+      replaceArgs("transient.txt", String(snapshot.metadata.snapshotId), "RECOVERED"),
+      toolContext,
+    );
+
+    expect(historyCalls).toEqual([sessionID, sessionID]);
+    expect(await systemGuidance(value, sessionID)).toContain("native-alias-session=bound");
+    expect(await readFile(join(root, "transient.txt"), "utf8")).toBe("one\nRECOVERED\n");
+  });
+
+  test("retains the safe HTTP category after bounded retry exhaustion", async () => {
+    const sessionID = "exhausted-history";
+    const { value, historyCalls } = await aliasHarness({
+      historyFetch: async () =>
+        new Response("Bearer private-token at http://private.invalid", { status: 503 }),
+    });
+    const message = await rejectionMessage(
+      aliasRegistry(value).edit.execute(
+        replaceArgs("missing.txt", "s_AAAAAAAAAAAAAAAAAAAAAA"),
+        context({ sessionID }),
+      ),
+    );
+
+    expect(message).toContain("SESSION_PROTOCOL_MISMATCH:");
+    expect(message).toContain("retryable HTTP 503 (5xx status class)");
+    expect(message).toContain(
+      `after ${SESSION_HISTORY_MAX_ATTEMPTS} attempts within the ${SESSION_HISTORY_TIMEOUT_MS} ms total deadline`,
+    );
+    expect(message).toContain("Retry this edit");
+    expect(message).not.toContain("could not be inspected");
+    expect(message).not.toContain("private-token");
+    expect(message).not.toContain("Start a new session");
+    expect(historyCalls).toEqual(Array(SESSION_HISTORY_MAX_ATTEMPTS).fill(sessionID));
+  });
+
+  test("requires a genuinely new task ID for an oversized persisted history", async () => {
+    const sessionID = "oversized-history";
+    const { value, historyCalls } = await aliasHarness({
+      historyFetch: async () => new Response("x".repeat(SESSION_HISTORY_TRANSPORT_MAX_BYTES + 1)),
+    });
+    const message = await rejectionMessage(
+      aliasRegistry(value).edit.execute(
+        replaceArgs("missing.txt", "s_AAAAAAAAAAAAAAAAAAAAAA"),
+        context({ sessionID }),
+      ),
+    );
+
+    expect(message).toContain("exceeds the bounded inspection window");
+    expect(message).toContain("Start a genuinely new session");
+    expect(message).toContain("do not resume the same task ID");
+    expect(message).not.toContain("private oversized body");
+    expect(historyCalls).toEqual([sessionID]);
+  });
+
+  test("keeps a failed session independent from another session binding", async () => {
+    const failingSession = "failing-subagent";
+    const healthySession = "healthy-subagent";
+    const { value, historyCalls } = await aliasHarness({
+      historyFetch: async (sessionId) =>
+        sessionId === failingSession
+          ? new Response("private missing session", { status: 400 })
+          : Response.json([]),
+    });
+    const tools = aliasRegistry(value);
+    const failure = await rejectionMessage(
+      tools.edit.execute(
+        replaceArgs("missing.txt", "s_AAAAAAAAAAAAAAAAAAAAAA"),
+        context({ sessionID: failingSession }),
+      ),
+    );
+    expect(failure).toContain("non-retryable HTTP 400 (4xx status class)");
+    expect(failure).not.toContain("private missing session");
+
+    await writeFile(join(root, "healthy.txt"), "one\ntwo\n");
+    const healthyContext = context({ sessionID: healthySession });
+    const snapshot = await issueSnapshot(value, healthyContext, "healthy.txt");
+    await tools.edit.execute(
+      replaceArgs("healthy.txt", String(snapshot.metadata.snapshotId), "BOUND"),
+      healthyContext,
+    );
+
+    expect(historyCalls).toEqual([failingSession, healthySession]);
+    expect(await systemGuidance(value, failingSession)).toContain("native-alias-session=unbound");
+    expect(await systemGuidance(value, healthySession)).toContain("native-alias-session=bound");
+    expect(await readFile(join(root, "healthy.txt"), "utf8")).toBe("one\nBOUND\n");
+  });
+
   test("binds parent, child, and synthetic continuation sessions independently", async () => {
     const { value, historyCalls } = await aliasHarness();
     const { edit } = aliasRegistry(value);
@@ -952,6 +1197,9 @@ describe("native alias continuation safety", () => {
       await expect(
         edit.execute(replaceArgs("missing.txt", "s_AAAAAAAAAAAAAAAAAAAAAA"), context()),
       ).rejects.toThrow("SESSION_PROTOCOL_MISMATCH:");
+      expect(harness.historyCalls).toHaveLength(
+        history instanceof Error ? SESSION_HISTORY_MAX_ATTEMPTS : 1,
+      );
     }
     expect(await readdir(root)).toEqual([]);
   });

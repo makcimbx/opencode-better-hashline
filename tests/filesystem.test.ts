@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
@@ -21,13 +22,18 @@ import {
   authorizeEdit,
   authorizeExternal,
   authorizeRead,
+  pathsAlias,
+  publishDeletedFile,
+  publishMovedFile,
   publishNewFile,
   publishReplacement,
   readStableFile,
   resolveExistingFile,
+  resolveMutableFile,
   resolveNewFile,
   throwIfAborted,
   withPathLock,
+  withPathLocks,
 } from "../src/filesystem.js";
 
 const encoder = new TextEncoder();
@@ -57,6 +63,13 @@ function fakeContext(asks: unknown[]): ToolContext {
 }
 
 describe("filesystem resolution and permissions", () => {
+  test("uses platform path identity for lifecycle locks and alias rejection", () => {
+    const upper = join(root, "Case.txt");
+    const lower = join(root, "case.txt");
+    expect(pathsAlias(upper, lower)).toBe(process.platform === "win32");
+    expect(pathsAlias(upper, upper)).toBe(true);
+  });
+
   test("resolves existing files, new-file parents, and stable bytes", async () => {
     await mkdir(join(root, "src"));
     await writeFile(join(root, "src", "file.txt"), "content");
@@ -69,6 +82,19 @@ describe("filesystem resolution and permissions", () => {
     const created = await resolveNewFile("src/new.txt", root);
     expect(created.canonicalPath).toEndWith(join("src", "new.txt"));
     await expect(assertTargetAbsent(created)).resolves.toBeUndefined();
+  });
+
+  test("resolves mutable entries and rejects terminal symlinks", async () => {
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src", "file.txt"), "content");
+    const resolved = await resolveMutableFile("src/file.txt", root);
+    expect(resolved.canonicalPath).toEndWith(join("src", "file.txt"));
+    expect(resolved.canonicalParent).toEndWith("src");
+
+    if (process.platform !== "win32") {
+      await symlink("file.txt", join(root, "src", "alias.txt"));
+      await expect(resolveMutableFile("src/alias.txt", root)).rejects.toThrow("UNSUPPORTED_FILE:");
+    }
   });
 
   test("rejects missing paths, directories, missing parents, and oversized files", async () => {
@@ -227,6 +253,302 @@ describe("filesystem publication", () => {
     releaseFirst();
     await Promise.all([first, second]);
     expect(events).toEqual(["first:start", "first:end", "second:start"]);
+  });
+
+  test("serializes overlapping multi-path operations", async () => {
+    const events: string[] = [];
+    let releaseFirst = () => {};
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withPathLocks([join(root, "a"), join(root, "b")], async () => {
+      events.push("first:start");
+      markStarted();
+      await gate;
+      events.push("first:end");
+    });
+    await started;
+    const second = withPathLocks([join(root, "c"), join(root, "b")], async () => {
+      events.push("second:start");
+    });
+    await Promise.resolve();
+    expect(events).toEqual(["first:start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first:start", "first:end", "second:start"]);
+  });
+
+  test("releases acquired locks when a queued multi-path operation is canceled", async () => {
+    const firstPath = join(root, "a");
+    const independentPath = join(root, "b");
+    let releaseFirst = () => {};
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withPathLock(firstPath, async () => {
+      markStarted();
+      await gate;
+    });
+    await started;
+
+    const controller = new AbortController();
+    const canceled = withPathLocks(
+      [firstPath, independentPath],
+      async () => {
+        throw new Error("Canceled lock action must not run.");
+      },
+      controller.signal,
+    );
+    controller.abort(new Error("cancel queued move"));
+    await expect(canceled).rejects.toThrow("cancel queued move");
+
+    let independentRan = false;
+    await withPathLock(independentPath, async () => {
+      independentRan = true;
+    });
+    expect(independentRan).toBe(true);
+    releaseFirst();
+    await first;
+  });
+
+  test("deletes one exact regular file and rejects stale publication", async () => {
+    const path = join(root, "delete.txt");
+    await writeFile(path, "content");
+    const resolved = await resolveMutableFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    let consumed = false;
+    await publishDeletedFile({
+      resolved,
+      expected,
+      maxBytes: 1024,
+      signal: new AbortController().signal,
+      consume() {
+        consumed = true;
+      },
+    });
+    expect(consumed).toBe(true);
+    await expect(readFile(path)).rejects.toThrow();
+
+    await writeFile(path, "old");
+    const staleResolved = await resolveMutableFile(path, root);
+    const stale = await readStableFile(staleResolved, 1024, true);
+    await writeFile(path, "changed");
+    consumed = false;
+    await expect(
+      publishDeletedFile({
+        resolved: staleResolved,
+        expected: stale,
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        consume() {
+          consumed = true;
+        },
+      }),
+    ).rejects.toThrow("RACE_BEFORE_WRITE:");
+    expect(consumed).toBe(false);
+    expect(await readFile(path, "utf8")).toBe("changed");
+  });
+
+  test("consumes delete provenance after a failed publication attempt", async () => {
+    const path = join(root, "blocked-delete.txt");
+    await writeFile(path, "content");
+    const resolved = await resolveMutableFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    const unlinkMock = spyOn(fsPromises, "unlink").mockImplementation(async () => {
+      throw Object.assign(new Error("raw EPERM"), { code: "EPERM" });
+    });
+    let consumed = false;
+    try {
+      await expect(
+        publishDeletedFile({
+          resolved,
+          expected,
+          maxBytes: 1024,
+          signal: new AbortController().signal,
+          consume() {
+            consumed = true;
+          },
+        }),
+      ).rejects.toThrow("UNSUPPORTED_FILE: The filesystem could not delete the file.");
+    } finally {
+      unlinkMock.mockRestore();
+    }
+    expect(consumed).toBe(true);
+    expect(await readFile(path, "utf8")).toBe("content");
+  });
+
+  test("rejects a terminal symlink introduced after lifecycle resolution", async () => {
+    if (process.platform === "win32") return;
+    const sourcePath = join(root, "mutable-source.txt");
+    const displacedPath = join(root, "displaced-source.txt");
+    await writeFile(sourcePath, "content");
+    const resolved = await resolveMutableFile(sourcePath, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    await rename(sourcePath, displacedPath);
+    await symlink("displaced-source.txt", sourcePath);
+
+    let consumed = false;
+    await expect(
+      publishDeletedFile({
+        resolved,
+        expected,
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        consume() {
+          consumed = true;
+        },
+      }),
+    ).rejects.toThrow("PATH_MISMATCH:");
+    expect(consumed).toBe(false);
+    expect(await readFile(displacedPath, "utf8")).toBe("content");
+    expect(await readFile(sourcePath, "utf8")).toBe("content");
+  });
+
+  test("moves one exact file without overwriting the destination", async () => {
+    await mkdir(join(root, "target"));
+    const sourcePath = join(root, "source.txt");
+    const destinationPath = join(root, "target", "moved.txt");
+    await writeFile(sourcePath, "content");
+    const source = await resolveMutableFile(sourcePath, root);
+    const destination = await resolveNewFile(destinationPath, root);
+    const expected = await readStableFile(source, 1024, true);
+    let consumed = false;
+    const verified = await publishMovedFile({
+      source,
+      destination,
+      expected,
+      maxBytes: 1024,
+      signal: new AbortController().signal,
+      consume() {
+        consumed = true;
+      },
+    });
+    expect(consumed).toBe(true);
+    expect(new TextDecoder().decode(verified.bytes)).toBe("content");
+    await expect(readFile(sourcePath)).rejects.toThrow();
+    expect(await readFile(destinationPath, "utf8")).toBe("content");
+    expect((await stat(destinationPath)).ino).toBe(expected.stats.ino);
+
+    await writeFile(sourcePath, "new source");
+    await writeFile(destinationPath, "existing");
+    const blockedSource = await resolveMutableFile(sourcePath, root);
+    const blockedDestination = await resolveNewFile(destinationPath, root);
+    const blockedExpected = await readStableFile(blockedSource, 1024, true);
+    consumed = false;
+    await expect(
+      publishMovedFile({
+        source: blockedSource,
+        destination: blockedDestination,
+        expected: blockedExpected,
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        consume() {
+          consumed = true;
+        },
+      }),
+    ).rejects.toThrow("TARGET_EXISTS:");
+    expect(consumed).toBe(false);
+    expect(await readFile(sourcePath, "utf8")).toBe("new source");
+    expect(await readFile(destinationPath, "utf8")).toBe("existing");
+  });
+
+  test("rejects cross-filesystem moves before publication", async () => {
+    const sourcePath = join(root, "cross-device-source.txt");
+    const destinationPath = join(root, "cross-device-destination.txt");
+    await writeFile(sourcePath, "content");
+    const source = await resolveMutableFile(sourcePath, root);
+    const destination = await resolveNewFile(destinationPath, root);
+    const expected = await readStableFile(source, 1024, true);
+    destination.parentStats.dev = expected.stats.dev + 1;
+    let consumed = false;
+
+    await expect(
+      publishMovedFile({
+        source,
+        destination,
+        expected,
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        consume() {
+          consumed = true;
+        },
+      }),
+    ).rejects.toThrow("UNSUPPORTED_FILE: Moving files across filesystems is not supported.");
+    expect(consumed).toBe(false);
+    expect(await readFile(sourcePath, "utf8")).toBe("content");
+    await expect(readFile(destinationPath)).rejects.toThrow();
+  });
+
+  test("consumes move provenance after a link-time destination race", async () => {
+    const sourcePath = join(root, "link-race-source.txt");
+    const destinationPath = join(root, "link-race-destination.txt");
+    await writeFile(sourcePath, "content");
+    const source = await resolveMutableFile(sourcePath, root);
+    const destination = await resolveNewFile(destinationPath, root);
+    const expected = await readStableFile(source, 1024, true);
+    const linkMock = spyOn(fsPromises, "link").mockImplementation(async () => {
+      throw Object.assign(new Error("raw EEXIST"), { code: "EEXIST" });
+    });
+    let consumed = false;
+    try {
+      await expect(
+        publishMovedFile({
+          source,
+          destination,
+          expected,
+          maxBytes: 1024,
+          signal: new AbortController().signal,
+          consume() {
+            consumed = true;
+          },
+        }),
+      ).rejects.toThrow("TARGET_EXISTS: The move destination already exists.");
+    } finally {
+      linkMock.mockRestore();
+    }
+    expect(consumed).toBe(true);
+    expect(await readFile(sourcePath, "utf8")).toBe("content");
+    await expect(readFile(destinationPath)).rejects.toThrow();
+  });
+
+  test("reports a partial move when source unlink fails", async () => {
+    const sourcePath = join(root, "partial-source.txt");
+    const destinationPath = join(root, "partial-destination.txt");
+    await writeFile(sourcePath, "content");
+    const source = await resolveMutableFile(sourcePath, root);
+    const destination = await resolveNewFile(destinationPath, root);
+    const expected = await readStableFile(source, 1024, true);
+    const realUnlink = fsPromises.unlink;
+    const unlinkMock = spyOn(fsPromises, "unlink").mockImplementation(async (path) => {
+      if (String(path) === source.canonicalPath) {
+        throw Object.assign(new Error("raw EBUSY"), { code: "EBUSY" });
+      }
+      return realUnlink(path);
+    });
+    try {
+      await expect(
+        publishMovedFile({
+          source,
+          destination,
+          expected,
+          maxBytes: 1024,
+          signal: new AbortController().signal,
+          consume() {},
+        }),
+      ).rejects.toThrow("PARTIAL_PUBLICATION:");
+    } finally {
+      unlinkMock.mockRestore();
+    }
+    expect(await readFile(sourcePath, "utf8")).toBe("content");
+    expect(await readFile(destinationPath, "utf8")).toBe("content");
   });
 
   test("publishes one replacement, preserves mode, and consumes at commit", async () => {

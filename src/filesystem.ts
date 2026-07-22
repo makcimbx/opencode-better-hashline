@@ -2,10 +2,10 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { constants } from "node:fs";
-import { access, link, lstat, open, realpath, rename, rm, stat } from "node:fs/promises";
+import { access, link, lstat, open, realpath, rename, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { fail } from "./errors.js";
+import { fail, HashlineError } from "./errors.js";
 import { exactRelativePath, isInsideCanonicalPath } from "./path-identity.js";
 import { bytesEqual } from "./text.js";
 
@@ -20,6 +20,8 @@ export type ResolvedNewFile = ResolvedFile & {
   canonicalParent: string;
   parentStats: Stats;
 };
+
+export type ResolvedMutableFile = ResolvedNewFile;
 
 export type StableFile = {
   bytes: Uint8Array;
@@ -98,7 +100,11 @@ function sameMetadata(left: Stats, right: Stats): boolean {
 }
 
 function lockKey(canonicalPath: string): string {
-  return canonicalPath;
+  return process.platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath;
+}
+
+export function pathsAlias(left: string, right: string): boolean {
+  return lockKey(left) === lockKey(right);
 }
 
 async function syncDirectory(directory: string): Promise<void> {
@@ -166,6 +172,57 @@ export async function resolveNewFile(
   };
 }
 
+export async function resolveMutableFile(
+  filePath: string,
+  directory: string,
+): Promise<ResolvedMutableFile> {
+  const requestedAbsolute = absoluteFrom(filePath, directory);
+  let terminalStats: Stats;
+  try {
+    terminalStats = await lstat(requestedAbsolute);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") fail("PATH_NOT_FOUND", `File not found: ${filePath}`);
+    throw error;
+  }
+  if (terminalStats.isSymbolicLink()) {
+    fail("UNSUPPORTED_FILE", "Deleting or moving terminal symbolic links is not supported.");
+  }
+  assertRegular(terminalStats);
+
+  const requestedParent = dirname(requestedAbsolute);
+  const [canonicalPath, canonicalParent] = await Promise.all([
+    realpath(requestedAbsolute),
+    realpath(requestedParent),
+  ]);
+  assertSafePath(canonicalPath, "canonical");
+  assertSafePath(canonicalParent, "canonical");
+  if (!pathsAlias(dirname(canonicalPath), canonicalParent)) {
+    fail("PATH_MISMATCH", "The source parent does not resolve to the file parent.");
+  }
+  const [parentStats, terminalAfter, canonicalStats] = await Promise.all([
+    stat(canonicalParent),
+    lstat(requestedAbsolute),
+    stat(canonicalPath),
+  ]);
+  if (!parentStats.isDirectory()) fail("UNSUPPORTED_FILE", "The source parent is not a directory.");
+  if (
+    terminalAfter.isSymbolicLink() ||
+    !terminalAfter.isFile() ||
+    !sameIdentity(terminalStats, terminalAfter) ||
+    !sameIdentity(terminalAfter, canonicalStats)
+  ) {
+    fail("PATH_MISMATCH", "The source path changed while it was being resolved.");
+  }
+  return {
+    requestedPath: filePath,
+    requestedAbsolute,
+    requestedParent,
+    canonicalParent,
+    parentStats,
+    canonicalPath,
+  };
+}
+
 export async function authorizeExternal(
   context: ToolContext,
   resolved: ResolvedFile,
@@ -221,11 +278,26 @@ export async function authorizeEdit(
   resolved: ResolvedFile,
   diff: string,
 ): Promise<void> {
+  await authorizeEdits(context, [resolved], diff);
+}
+
+export async function authorizeEdits(
+  context: ToolContext,
+  resolved: readonly ResolvedFile[],
+  diff: string,
+): Promise<void> {
+  const patterns = [
+    ...new Set(resolved.map((entry) => permissionPath(context, entry.canonicalPath))),
+  ];
   await ask(context, {
     permission: "edit",
-    patterns: [permissionPath(context, resolved.canonicalPath)],
+    patterns,
     always: ["*"],
-    metadata: { filepath: resolved.canonicalPath, diff },
+    metadata: {
+      filepath: resolved[0]?.canonicalPath,
+      filepaths: resolved.map((entry) => entry.canonicalPath),
+      diff,
+    },
   });
 }
 
@@ -252,6 +324,30 @@ export async function assertAliasStable(resolved: ResolvedFile): Promise<void> {
   assertSafePath(current, "canonical");
   if (!samePath(current, resolved.canonicalPath)) {
     fail("PATH_MISMATCH", "The requested path was retargeted during the operation.");
+  }
+}
+
+async function assertMutableStable(
+  resolved: ResolvedMutableFile,
+  error: "PATH_MISMATCH" | "RACE_AFTER_WRITE",
+): Promise<void> {
+  await assertAliasStable(resolved);
+  let terminalStats: Stats;
+  let canonicalStats: Stats;
+  try {
+    [terminalStats, canonicalStats] = await Promise.all([
+      lstat(resolved.requestedAbsolute),
+      stat(resolved.canonicalPath),
+    ]);
+  } catch {
+    fail(error, "The source path could not be verified.");
+  }
+  if (
+    terminalStats.isSymbolicLink() ||
+    !terminalStats.isFile() ||
+    !sameIdentity(terminalStats, canonicalStats)
+  ) {
+    fail(error, "The source path was retargeted.");
   }
 }
 
@@ -300,24 +396,74 @@ export async function readStableFile(
   }
 }
 
+async function waitForPathLock(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await previous;
+    return;
+  }
+  throwIfAborted(signal);
+  await new Promise<void>((resolveWait, rejectWait) => {
+    const abort = () => rejectWait(signal.reason ?? new Error("The operation was aborted."));
+    signal.addEventListener("abort", abort, { once: true });
+    void previous.then(
+      () => {
+        signal.removeEventListener("abort", abort);
+        resolveWait();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        rejectWait(error);
+      },
+    );
+  });
+}
+
 export async function withPathLock<T>(
   canonicalPath: string,
   operation: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const key = lockKey(canonicalPath);
-  const previous = pathLocks.get(key) ?? Promise.resolve();
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolveGate) => {
-    release = resolveGate;
-  });
-  const tail = previous.then(() => gate);
-  pathLocks.set(key, tail);
-  await previous;
+  return withPathLocks([canonicalPath], operation, signal);
+}
+
+export async function withPathLocks<T>(
+  canonicalPaths: readonly string[],
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const keys = [...new Set(canonicalPaths.map(lockKey))].sort();
+  const reservations: Array<{ key: string; release: () => void; tail: Promise<void> }> = [];
   try {
+    for (const key of keys) {
+      const previous = pathLocks.get(key) ?? Promise.resolve();
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolveGate) => {
+        release = resolveGate;
+      });
+      const tail = previous.then(() => gate);
+      pathLocks.set(key, tail);
+      try {
+        await waitForPathLock(previous, signal);
+      } catch (error) {
+        release();
+        void tail.then(() => {
+          if (pathLocks.get(key) === tail) pathLocks.delete(key);
+        });
+        throw error;
+      }
+      reservations.push({ key, release, tail });
+    }
+    if (signal) throwIfAborted(signal);
     return await operation();
   } finally {
-    release();
-    if (pathLocks.get(key) === tail) pathLocks.delete(key);
+    for (const reservation of reservations.toReversed()) {
+      reservation.release();
+      void reservation.tail.then(() => {
+        if (pathLocks.get(reservation.key) === reservation.tail) {
+          pathLocks.delete(reservation.key);
+        }
+      });
+    }
   }
 }
 
@@ -498,6 +644,158 @@ export async function publishNewFile(input: {
   } finally {
     await handle?.close().catch(() => {});
     await rm(temporaryPath, { force: true }).catch(() => {});
+  }
+}
+
+export async function publishDeletedFile(input: {
+  resolved: ResolvedMutableFile;
+  expected: StableFile;
+  maxBytes: number;
+  signal: AbortSignal;
+  consume: () => void;
+}): Promise<void> {
+  const { resolved, expected, maxBytes, signal, consume } = input;
+  throwIfAborted(signal);
+  await assertNewParentStable(resolved, "PATH_MISMATCH");
+  await assertMutableStable(resolved, "PATH_MISMATCH");
+  const current = await readStableFile(resolved, maxBytes, true, signal);
+  if (!sameMetadata(expected.stats, current.stats) || !bytesEqual(expected.bytes, current.bytes)) {
+    fail("RACE_BEFORE_WRITE", "The file changed while delete permission was pending.");
+  }
+  await assertNewParentStable(resolved, "PATH_MISMATCH");
+  await assertMutableStable(resolved, "PATH_MISMATCH");
+  throwIfAborted(signal);
+  consume();
+  try {
+    await unlink(resolved.canonicalPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") {
+      fail("RACE_BEFORE_WRITE", "The file disappeared during delete publication.");
+    }
+    if (
+      ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBUSY"].includes(
+        errorCode(error) ?? "",
+      )
+    ) {
+      fail("UNSUPPORTED_FILE", "The filesystem could not delete the file.");
+    }
+    throw error;
+  }
+  await syncDirectory(resolved.canonicalParent);
+  try {
+    await lstat(resolved.canonicalPath);
+    fail("RACE_AFTER_WRITE", "The deleted path exists after publication.");
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+  await assertNewParentStable(resolved, "RACE_AFTER_WRITE");
+}
+
+export async function publishMovedFile(input: {
+  source: ResolvedMutableFile;
+  destination: ResolvedNewFile;
+  expected: StableFile;
+  maxBytes: number;
+  signal: AbortSignal;
+  consume: () => void;
+}): Promise<StableFile> {
+  const { source, destination, expected, maxBytes, signal, consume } = input;
+  if (pathsAlias(source.canonicalPath, destination.canonicalPath)) {
+    fail("INVALID_ARGUMENT", "The move destination must differ from the source path.");
+  }
+  if (expected.stats.dev !== destination.parentStats.dev) {
+    fail("UNSUPPORTED_FILE", "Moving files across filesystems is not supported.");
+  }
+  throwIfAborted(signal);
+  await Promise.all([
+    assertNewParentStable(source, "PATH_MISMATCH"),
+    assertNewParentStable(destination, "PATH_MISMATCH"),
+  ]);
+  await assertMutableStable(source, "PATH_MISMATCH");
+  const current = await readStableFile(source, maxBytes, true, signal);
+  if (!sameMetadata(expected.stats, current.stats) || !bytesEqual(expected.bytes, current.bytes)) {
+    fail("RACE_BEFORE_WRITE", "The file changed while move permission was pending.");
+  }
+  await assertTargetAbsent(destination);
+  await Promise.all([
+    assertNewParentStable(source, "PATH_MISMATCH"),
+    assertNewParentStable(destination, "PATH_MISMATCH"),
+  ]);
+  await assertMutableStable(source, "PATH_MISMATCH");
+  throwIfAborted(signal);
+  consume();
+
+  let linked = false;
+  try {
+    try {
+      await link(source.canonicalPath, destination.canonicalPath);
+      linked = true;
+    } catch (error) {
+      if (errorCode(error) === "EEXIST")
+        fail("TARGET_EXISTS", "The move destination already exists.");
+      if (
+        ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EXDEV", "EMLINK"].includes(
+          errorCode(error) ?? "",
+        )
+      ) {
+        fail("UNSUPPORTED_FILE", "The filesystem cannot publish a no-replace file move.");
+      }
+      throw error;
+    }
+
+    const [linkedSource, linkedDestination] = await Promise.all([
+      readStableFile(source, maxBytes, false),
+      lstat(destination.canonicalPath),
+    ]);
+    if (
+      !sameIdentity(expected.stats, linkedSource.stats) ||
+      !sameIdentity(expected.stats, linkedDestination) ||
+      linkedSource.stats.nlink !== 2 ||
+      linkedDestination.nlink !== 2 ||
+      !bytesEqual(expected.bytes, linkedSource.bytes)
+    ) {
+      fail("PARTIAL_PUBLICATION", "The linked move state changed before source removal.");
+    }
+    await assertMutableStable(source, "RACE_AFTER_WRITE");
+
+    try {
+      await unlink(source.canonicalPath);
+    } catch {
+      fail(
+        "PARTIAL_PUBLICATION",
+        "The destination was linked, but the source could not be removed. Inspect both paths before retrying in a new session.",
+      );
+    }
+    const directories = [...new Set([source.canonicalParent, destination.canonicalParent])];
+    await Promise.all(directories.map(syncDirectory));
+
+    try {
+      await lstat(source.canonicalPath);
+      fail("PARTIAL_PUBLICATION", "The source still exists after move publication.");
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+    const verified = await readStableFile(destination, maxBytes, false);
+    if (
+      !sameIdentity(expected.stats, verified.stats) ||
+      verified.stats.nlink !== 1 ||
+      !bytesEqual(expected.bytes, verified.bytes)
+    ) {
+      fail("PARTIAL_PUBLICATION", "The destination changed after move publication.");
+    }
+    await Promise.all([
+      assertNewParentStable(source, "RACE_AFTER_WRITE"),
+      assertNewParentStable(destination, "RACE_AFTER_WRITE"),
+    ]);
+    return verified;
+  } catch (error) {
+    if (!linked || (error instanceof HashlineError && error.code === "PARTIAL_PUBLICATION")) {
+      throw error;
+    }
+    fail(
+      "PARTIAL_PUBLICATION",
+      "Move publication started but could not be verified. Inspect both paths before retrying in a new session.",
+    );
   }
 }
 

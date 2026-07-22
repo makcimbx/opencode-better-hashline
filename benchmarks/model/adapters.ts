@@ -3,6 +3,7 @@ export type AdapterId = "native" | "better-hashline" | "better-hashline-native-a
 export const modelAdapterSets = {
   "native-vs-unique-v1": ["native", "better-hashline"],
   "native-aliases-v1": ["better-hashline", "better-hashline-native-aliases"],
+  "native-aliases-v2": ["better-hashline", "better-hashline-native-aliases"],
   "native-alias-probe-v1": ["better-hashline-native-aliases"],
 } as const satisfies Record<string, readonly AdapterId[]>;
 
@@ -47,7 +48,7 @@ export function adapterSetManifest(adapterSet: AdapterSetId) {
 }
 
 export function verificationSurfaceForAdapterSet(adapterSet: AdapterSetId) {
-  return adapterSet === "native-aliases-v1" ? "all" : "hashline";
+  return adapterSet.startsWith("native-aliases-") ? "all" : "hashline";
 }
 
 export function adapterPluginConfig(

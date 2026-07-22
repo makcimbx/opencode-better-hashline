@@ -5,6 +5,7 @@ import { z } from "zod";
 import { hashlineEditArgumentsSchema, hashlineEditDescription } from "../src/plugin.js";
 import {
   runDeterministicSuite,
+  runFileLifecycleCallWireSuite,
   runMicroSuite,
   runMoveCorridorWireSuite,
   runRenderingWireSuite,
@@ -80,8 +81,11 @@ const implementationSources = await Promise.all(
     "benchmarks/suite.ts",
     "src/edits.ts",
     "src/errors.ts",
+    "src/filesystem.ts",
     "src/plugin.ts",
+    "src/presentation.ts",
     "src/rebase.ts",
+    "src/session-protocol.ts",
     "src/render.ts",
     "src/snapshots.ts",
     "src/text.ts",
@@ -92,6 +96,7 @@ const deterministic = runDeterministicSuite();
 const staticSize = runStaticSizeSuite();
 const renderingWireSize = runRenderingWireSuite();
 const operationSchemaWireSize = providerSchemaWireSize();
+const fileLifecycleCallWireSize = runFileLifecycleCallWireSuite();
 const transferCallWireSize = runTransferCallWireSuite();
 const moveCorridorWireSize = runMoveCorridorWireSuite();
 const micro = runMicroSuite();
@@ -109,7 +114,7 @@ if (
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -134,7 +139,9 @@ const result = {
     renderingWireSize:
       "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",
     operationSchemaWireSize:
-      "Exact compact UTF-8 JSON bytes for the hashline_edit description and provider schema before and after transfer operations.",
+      "Exact compact UTF-8 JSON bytes for the hashline_edit description and provider schema before and after transfer and lifecycle operations.",
+    fileLifecycleCallWireSize:
+      "Exact compact UTF-8 JSON bytes for valid Better Hashline lifecycle calls and equivalent native apply_patch calls; no semantic or safety advantage is inferred from size.",
     transferCallWireSize:
       "Exact compact UTF-8 JSON bytes for copy/move calls versus equivalent model-supplied insert/replace payloads.",
     moveCorridorWireSize:
@@ -146,6 +153,7 @@ const result = {
   staticSize,
   renderingWireSize,
   operationSchemaWireSize,
+  fileLifecycleCallWireSize,
   transferCallWireSize,
   moveCorridorWireSize,
   micro,
@@ -159,6 +167,8 @@ console.log("\nLong-line rendering wire-size change\n");
 console.table([renderingWireSize]);
 console.log("\nOperation-schema wire-size change\n");
 console.table([operationSchemaWireSize]);
+console.log("\nFile-lifecycle call wire size\n");
+console.table(fileLifecycleCallWireSize);
 console.log("\nTransfer call wire-size change\n");
 console.table(transferCallWireSize);
 console.log("\nMove-corridor read wire size\n");

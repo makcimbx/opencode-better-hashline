@@ -18,11 +18,36 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 const schemaSha256 = jsonSha256(
   openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema)),
 );
+const hostVersion = "1.18.3";
 const protocolFingerprint = nativeAliasProtocolFingerprint({
   packageVersion: PACKAGE_VERSION,
   schemaSha256,
-  hostVersion: "1.18.3",
+  hostVersion,
 });
+const privateCanary = "BH_PRIVATE_CANARY_8f149f0a";
+const fixturePath = (path: string) => `<fixture>/${path}`;
+const lifecycleDeleteBytes = "delete exact bytes\n";
+const lifecycleMoveBytes = "move exact bytes\n";
+const lifecycleNoClobberBytes = "source remains exact\n";
+const initialBytes = "alpha\nbeta\ngamma\n";
+const patchSeparator = "===================================================================";
+const patchHeader = (sourcePath: string, destinationPath: string, move = false) =>
+  `${move ? "" : `Index: ${sourcePath}\n`}${patchSeparator}\n--- ${sourcePath}\tbefore\n+++ ${destinationPath}\tafter\n`;
+const deletePath = fixturePath("lifecycle-delete.txt");
+const movePath = fixturePath("lifecycle-move.txt");
+const movedPath = fixturePath("lifecycle-moved.txt");
+const probePath = fixturePath("probe.txt");
+const deletePatch = `${patchHeader(deletePath, deletePath)}@@ -1,1 +0,0 @@\n-delete exact bytes\n`;
+const movePatch = patchHeader(movePath, movedPath, true);
+const probePatch = `${patchHeader(probePath, probePath)}@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n`;
+const readOutput = (bytes: string) => {
+  const lines = bytes.replace(/\n$/u, "").split("\n");
+  return [
+    `@hashline snapshot=<snapshot> sha256=${digest(bytes).slice(0, 12)} lines=${lines.length}`,
+    ...lines.map((line, index) => `${index + 1}|${line}`),
+    "@eof",
+  ].join("\n");
+};
 const schedule = [{ index: 1, model: "provider/model", adapter: "better-hashline" }];
 const limits = {
   timeoutMs: 300_000,
@@ -95,19 +120,172 @@ const caseReport = (
   routing: boolean,
   permissions: boolean,
 ) => {
-  const metadataSnapshot = canonicalJson([
-    { state: { input: {}, status: "error" }, tool: editTool, type: "tool_use" },
-    {
-      state: { input: {}, metadata: {}, output: "read", status: "completed" },
-      tool: "hashline_read",
-      type: "tool_use",
+  const marker = (operation: "update" | "delete_file" | "move_file") => {
+    const sourcePath =
+      operation === "delete_file" ? deletePath : operation === "move_file" ? movePath : probePath;
+    return {
+      canonicalPathSha256: digest(sourcePath),
+      hostVersion,
+      operation,
+      packageVersion: PACKAGE_VERSION,
+      protocol: "native-aliases/v2",
+      schemaSha256,
+      surface: editTool,
+      ...(operation === "move_file" ? { destinationPathSha256: digest(movedPath) } : {}),
+    };
+  };
+  const lifecycleMetadata = (operation: "delete_file" | "move_file") => {
+    const sourcePath = operation === "delete_file" ? deletePath : movePath;
+    const patch = operation === "delete_file" ? deletePatch : movePatch;
+    const additions = 0;
+    const deletions = operation === "delete_file" ? 1 : 0;
+    if (route === "hashline") {
+      return {
+        ...(operation === "move_file" ? { destinationPath: movedPath } : {}),
+        diff: patch,
+        operation,
+        truncated: false,
+      };
+    }
+    if (editTool === "apply_patch") {
+      return {
+        betterHashline: marker(operation),
+        diagnostics: {},
+        files: [
+          {
+            additions,
+            deletions,
+            filePath: sourcePath,
+            ...(operation === "move_file" ? { movePath: movedPath } : {}),
+            patch,
+            relativePath: operation === "move_file" ? movedPath : sourcePath,
+            type: operation === "move_file" ? "move" : "delete",
+          },
+        ],
+        truncated: false,
+      };
+    }
+    return {
+      betterHashline: marker(operation),
+      diagnostics: {},
+      diff: patch,
+      filediff: { additions, deletions, file: sourcePath, patch },
+      truncated: false,
+    };
+  };
+  const updateMetadata = () => {
+    if (route === "hashline") {
+      return { diff: probePatch, operationCount: 1, rebased: false, truncated: false };
+    }
+    if (editTool === "apply_patch") {
+      return {
+        betterHashline: marker("update"),
+        diagnostics: {},
+        files: [
+          {
+            additions: 1,
+            deletions: 1,
+            filePath: probePath,
+            patch: probePatch,
+            relativePath: probePath,
+            type: "update",
+          },
+        ],
+        truncated: false,
+      };
+    }
+    return {
+      betterHashline: marker("update"),
+      diagnostics: {},
+      diff: probePatch,
+      filediff: { additions: 1, deletions: 1, file: probePath, patch: probePatch },
+      truncated: false,
+    };
+  };
+  const readEvent = (filePath: string, bytes: string, limit?: number) => ({
+    state: {
+      input: { filePath, ...(limit === undefined ? {} : { limit }) },
+      metadata: {
+        displayedLines: bytes.replace(/\n$/u, "").split("\n").length,
+        snapshotId: "<snapshot>",
+        truncated: false,
+      },
+      output: readOutput(bytes),
+      status: "completed",
     },
+    tool: "hashline_read",
+    type: "tool_use",
+  });
+  const operationInput = (
+    filePath: string,
+    operation: "delete_file" | "move_file",
+    destinationPath?: string,
+  ) => ({
+    filePath,
+    operations: [
+      operation === "delete_file" ? { op: operation } : { destinationPath, op: operation },
+    ],
+    snapshotId: "<snapshot>",
+  });
+  const lifecycleReceipt = "\n@hashline-edit previous=consumed successor=none next=hashline_read";
+  const malformedInput =
+    editTool === "apply_patch"
+      ? {
+          patchText: `*** Begin Patch\n*** Update File: malformed.txt\n@@\n-${privateCanary}\n+changed\n*** End Patch`,
+        }
+      : { filePath: "malformed.txt", newString: "changed", oldString: privateCanary };
+  const metadataSnapshot = canonicalJson([
     {
       state: {
-        input: {},
-        metadata:
-          route === "hashline" ? { operationCount: 1 } : { betterHashline: { surface: editTool } },
-        output: "edit",
+        error: `INVALID_ARGUMENT: Invalid ${editTool} arguments.`,
+        input: malformedInput,
+        status: "error",
+      },
+      tool: editTool,
+      type: "tool_use",
+    },
+    readEvent("lifecycle-delete.txt", lifecycleDeleteBytes),
+    {
+      state: {
+        input: operationInput("lifecycle-delete.txt", "delete_file"),
+        metadata: lifecycleMetadata("delete_file"),
+        output: `Deleted ${deletePath}.${lifecycleReceipt}`,
+        status: "completed",
+      },
+      tool: editTool,
+      type: "tool_use",
+    },
+    readEvent("lifecycle-move.txt", lifecycleMoveBytes),
+    {
+      state: {
+        input: operationInput("lifecycle-move.txt", "move_file", "lifecycle-moved.txt"),
+        metadata: lifecycleMetadata("move_file"),
+        output: `Moved ${movePath} to ${movedPath}.${lifecycleReceipt}`,
+        status: "completed",
+      },
+      tool: editTool,
+      type: "tool_use",
+    },
+    readEvent("lifecycle-no-clobber.txt", lifecycleNoClobberBytes),
+    {
+      state: {
+        error: "TARGET_EXISTS: The target already exists.",
+        input: operationInput("lifecycle-no-clobber.txt", "move_file", "lifecycle-occupied.txt"),
+        status: "error",
+      },
+      tool: editTool,
+      type: "tool_use",
+    },
+    readEvent("probe.txt", initialBytes, 3),
+    {
+      state: {
+        input: {
+          filePath: "probe.txt",
+          operations: [{ endLine: 2, lines: ["BETA"], op: "replace", startLine: 2 }],
+          snapshotId: "<snapshot>",
+        },
+        metadata: updateMetadata(),
+        output: `Applied 1 operation.${lifecycleReceipt}`,
         status: "completed",
       },
       tool: editTool,
@@ -131,8 +309,9 @@ const caseReport = (
           protocolFingerprint,
         }),
     finalBytesSha256: "8b1f3c90fab7f353b4a997497392fa025ea08f0b023c2f5f4ab9ec0993494293",
-    providerRequests: route === "native-edit" ? 24 : route === "native-apply-patch" ? 21 : 17,
+    providerRequests: route === "native-edit" ? 32 : route === "native-apply-patch" ? 29 : 25,
     malformedRejected: true as const,
+    fileOperationsVerified: true as const,
     continuationVerified: true as const,
     forkVerified: true as const,
     exportVerified: true as const,
@@ -180,8 +359,9 @@ const receipt: NativeAliasPreflightReceipt = {
     ok: true,
     packageVersion: PACKAGE_VERSION,
     hostVersion: "1.18.3",
-    protocol: "native-aliases/v1",
+    protocol: "native-aliases/v2",
     rollbackVerified: true,
+    fileOperationsVerified: true,
     modelRoutingVerified: true,
     editPermissionMatrixVerified: true,
     benchmarkOracleVerified: true,
@@ -194,7 +374,8 @@ const receipt: NativeAliasPreflightReceipt = {
     ],
   },
   oracleFixture: {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    hostVersion: "1.18.3",
     legacyDecision: "invalid",
     correctedDecision: "valid",
     correctedReason: "valid",
@@ -215,6 +396,11 @@ describe("native alias preflight receipt", () => {
       { ...receipt, sourceDirty: true },
       { ...receipt, sourceEligibleForApproval: false },
       { ...receipt, verifierReport: { ...receipt.verifierReport, retryAbortVerified: false } },
+      { ...receipt, verifierReport: { ...receipt.verifierReport, fileOperationsVerified: false } },
+      {
+        ...receipt,
+        oracleFixture: { ...receipt.oracleFixture, hostVersion: "1.18.4" },
+      },
       {
         ...receipt,
         artifact: { ...receipt.artifact, relativePath: "../replacement.tgz" },
@@ -245,6 +431,9 @@ describe("native alias preflight receipt", () => {
         reportCase(report).providerRequests = 999;
       }),
       mutated((report) => {
+        Object.assign(reportCase(report), { fileOperationsVerified: false });
+      }),
+      mutated((report) => {
         reportCase(report).rendererSnapshot += "forged";
       }),
       mutated((report) => {
@@ -257,6 +446,210 @@ describe("native alias preflight receipt", () => {
         Object.assign(reportCase(report), { unknownEvidence: true });
       }),
     ]) {
+      expect(() => assertNativeAliasPreflightReceipt(invalid, expected)).toThrow();
+    }
+  });
+
+  test("rejects self-hashed forged lifecycle evidence", () => {
+    type SnapshotEvent = { state: Record<string, unknown>; tool: string; type: string };
+    type SnapshotMutation = (events: SnapshotEvent[]) => void;
+    const forged = (caseIndex: number, mutate: SnapshotMutation) => {
+      const invalid = structuredClone(receipt);
+      const verificationCase = invalid.verifierReport.cases[caseIndex];
+      if (!verificationCase) throw new Error(`Missing verifier case ${caseIndex}.`);
+      const events = JSON.parse(verificationCase.metadataSnapshot) as SnapshotEvent[];
+      mutate(events);
+      verificationCase.metadataSnapshot = canonicalJson(events);
+      verificationCase.metadataSnapshotSha256 = digest(verificationCase.metadataSnapshot);
+      return invalid;
+    };
+    const state = (events: SnapshotEvent[], index: number) => {
+      const value = events[index]?.state;
+      if (!value) throw new Error(`Missing event state ${index}.`);
+      return value;
+    };
+    const metadata = (events: SnapshotEvent[], index: number) => {
+      const value = state(events, index).metadata;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`Missing event metadata ${index}.`);
+      }
+      return value as Record<string, unknown>;
+    };
+    const marker = (events: SnapshotEvent[], index: number) => {
+      const value = metadata(events, index).betterHashline;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`Missing native marker ${index}.`);
+      }
+      return value as Record<string, unknown>;
+    };
+    const filediff = (events: SnapshotEvent[], index: number) => {
+      const value = metadata(events, index).filediff;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`Missing edit filediff ${index}.`);
+      }
+      return value as Record<string, unknown>;
+    };
+    const patchFile = (events: SnapshotEvent[], index: number) => {
+      const files = metadata(events, index).files;
+      if (!Array.isArray(files) || !files[0] || typeof files[0] !== "object") {
+        throw new Error(`Missing apply_patch file ${index}.`);
+      }
+      return files[0] as Record<string, unknown>;
+    };
+
+    const mutations: Array<[number, SnapshotMutation]> = [
+      [0, (events) => Object.assign(marker(events, 2), { protocol: "native-aliases/v1" })],
+      [0, (events) => Object.assign(marker(events, 2), { packageVersion: "9.9.9" })],
+      [0, (events) => Object.assign(marker(events, 2), { hostVersion: "1.18.4" })],
+      [0, (events) => Object.assign(marker(events, 2), { schemaSha256: "f".repeat(64) })],
+      [0, (events) => Object.assign(marker(events, 2), { surface: "apply_patch" })],
+      [0, (events) => Object.assign(marker(events, 2), { operation: "move_file" })],
+      [0, (events) => Object.assign(marker(events, 2), { canonicalPathSha256: "f".repeat(64) })],
+      [0, (events) => Object.assign(marker(events, 4), { destinationPathSha256: "f".repeat(64) })],
+      [0, (events) => Object.assign(marker(events, 2), { forged: true })],
+      [0, (events) => Object.assign(state(events, 1), { forged: true })],
+      [0, (events) => delete (metadata(events, 1) as Record<string, unknown>).snapshotId],
+      [
+        0,
+        (events) => {
+          const input = state(events, 2).input as Record<string, unknown>;
+          input.filePath = "forged.txt";
+        },
+      ],
+      [0, (events) => Object.assign(state(events, 2), { output: "Deleted forged.txt." })],
+      [0, (events) => Object.assign(metadata(events, 2).diagnostics as object, { forged: true })],
+      [0, (events) => delete metadata(events, 2).diagnostics],
+      [0, (events) => delete filediff(events, 2).deletions],
+      [0, (events) => Object.assign(filediff(events, 2), { file: movedPath })],
+      [
+        0,
+        (events) => {
+          const value = String(metadata(events, 2).diff).replace(
+            "-delete exact bytes",
+            "-forged exact bytes",
+          );
+          metadata(events, 2).diff = value;
+          filediff(events, 2).patch = value;
+        },
+      ],
+      [
+        0,
+        (events) => {
+          const value = String(metadata(events, 2).diff).replace("@@ -1,1", "@@ -2,1");
+          metadata(events, 2).diff = value;
+          filediff(events, 2).patch = value;
+        },
+      ],
+      [
+        0,
+        (events) => {
+          const value = String(metadata(events, 2).diff).split("@@ ")[0];
+          metadata(events, 2).diff = value;
+          const diff = filediff(events, 2);
+          diff.patch = value;
+          diff.deletions = 0;
+        },
+      ],
+      [0, (events) => Object.assign(filediff(events, 2), { additions: 1 })],
+      [
+        0,
+        (events) => {
+          const value = `${String(metadata(events, 4).diff)}@@ -1,1 +1,1 @@\n-move exact bytes\n+forged\n`;
+          metadata(events, 4).diff = value;
+          filediff(events, 4).patch = value;
+        },
+      ],
+      [1, (events) => Object.assign(patchFile(events, 2), { deletions: 0 })],
+      [1, (events) => Object.assign(patchFile(events, 2), { filePath: movePath })],
+      [1, (events) => Object.assign(patchFile(events, 4), { relativePath: movePath })],
+      [1, (events) => delete patchFile(events, 4).movePath],
+      [1, (events) => Object.assign(patchFile(events, 4), { forged: true })],
+      [
+        1,
+        (events) => {
+          patchFile(events, 4).patch = String(patchFile(events, 4).patch).replace(
+            `+++ ${movedPath}`,
+            `+++ ${deletePath}`,
+          );
+        },
+      ],
+      [2, (events) => Object.assign(metadata(events, 2), { forged: true })],
+      [2, (events) => Object.assign(metadata(events, 4), { destinationPath: deletePath })],
+      [2, (events) => Object.assign(metadata(events, 4), { operation: "delete_file" })],
+      [2, (events) => delete metadata(events, 8).rebased],
+      [2, (events) => Object.assign(metadata(events, 8), { operationCount: 2 })],
+      [
+        2,
+        (events) => {
+          metadata(events, 8).diff = String(metadata(events, 8).diff).replace("+BETA", "+FORGED");
+        },
+      ],
+      [0, (events) => Object.assign(metadata(events, 1), { displayedLines: 2 })],
+      [0, (events) => Object.assign(metadata(events, 1), { truncated: true })],
+      [0, (events) => Object.assign(metadata(events, 1), { forged: true })],
+      [
+        0,
+        (events) => {
+          state(events, 1).output = String(state(events, 1).output).replace(
+            digest(lifecycleDeleteBytes).slice(0, 12),
+            "0".repeat(12),
+          );
+        },
+      ],
+      [
+        0,
+        (events) => {
+          state(events, 7).output = String(state(events, 7).output).replace("2|beta", "2|forged");
+        },
+      ],
+      [
+        0,
+        (events) => {
+          const input = state(events, 7).input as Record<string, unknown>;
+          delete input.limit;
+        },
+      ],
+      [
+        0,
+        (events) => {
+          const input = state(events, 6).input as Record<string, unknown>;
+          const operations = input.operations as Array<Record<string, unknown>>;
+          if (!operations[0]) throw new Error("Missing no-clobber operation.");
+          operations[0].destinationPath = "forged.txt";
+        },
+      ],
+      [0, (events) => Object.assign(state(events, 6), { error: "TARGET_EXISTS: forged" })],
+      [0, (events) => Object.assign(state(events, 0), { error: "INVALID_ARGUMENT: forged" })],
+      [
+        0,
+        (events) => {
+          const input = state(events, 0).input as Record<string, unknown>;
+          input.oldString = "forged";
+        },
+      ],
+      [
+        0,
+        (events) => {
+          const input = state(events, 8).input as Record<string, unknown>;
+          Object.assign(input, { forged: true });
+        },
+      ],
+      [0, (events) => Object.assign(state(events, 8), { output: "Applied 1 operation." })],
+      [0, (events) => Object.assign(state(events, 4), { status: "error" })],
+      [
+        0,
+        (events) => {
+          const first = events[2];
+          const second = events[4];
+          if (!first || !second) throw new Error("Missing lifecycle events.");
+          events[2] = second;
+          events[4] = first;
+        },
+      ],
+    ];
+
+    for (const [caseIndex, mutate] of mutations) {
+      const invalid = forged(caseIndex, mutate);
       expect(() => assertNativeAliasPreflightReceipt(invalid, expected)).toThrow();
     }
   });

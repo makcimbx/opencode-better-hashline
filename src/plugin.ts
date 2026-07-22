@@ -10,26 +10,36 @@ import { fail, HashlineError } from "./errors.js";
 import {
   assertTargetAbsent,
   authorizeEdit,
+  authorizeEdits,
   authorizeExternal,
   authorizeRead,
+  pathsAlias,
+  publishDeletedFile,
+  publishMovedFile,
   publishNewFile,
   publishReplacement,
   readStableFile,
   resolveExistingFile,
+  resolveMutableFile,
   resolveNewFile,
   throwIfAborted,
   withPathLock,
+  withPathLocks,
 } from "./filesystem.js";
 import {
   detectOpenCodeVersion,
+  OpenCodeSessionHistoryError,
   openCodeProviderSchema,
   readOpenCodeSessionHistory,
+  SESSION_HISTORY_TIMEOUT_MS,
+  SESSION_HISTORY_TRANSPORT_MAX_BYTES,
 } from "./native-alias.js";
 import { type ResolvedOptions, resolveOptions } from "./options.js";
 import { exactRelativePath, sameFilesystemRoot } from "./path-identity.js";
 import {
   buildNativeAliasMetadata,
   countUnifiedDiffChanges,
+  isRendererPathSafe,
   jsonSha256,
   NATIVE_ALIAS_METADATA_MAX_BYTES,
   nativeAliasProtocolFingerprint,
@@ -54,7 +64,7 @@ import {
   SnapshotStore,
   sha256,
 } from "./snapshots.js";
-import { assertLineLimit, decodeTextDocument, encodeNewText } from "./text.js";
+import { assertLineLimit, bytesEqual, decodeTextDocument, encodeNewText } from "./text.js";
 import { PACKAGE_VERSION } from "./version.js";
 
 const NATIVE_MUTATORS = new Set(["edit", "write", "apply_patch"]);
@@ -76,9 +86,17 @@ function createEditSchema() {
   const editOperation = tool.schema
     .object({
       op: tool.schema
-        .enum(["replace", "insert", "replace_file", "copy_range", "move_range"])
+        .enum([
+          "replace",
+          "insert",
+          "replace_file",
+          "copy_range",
+          "move_range",
+          "delete_file",
+          "move_file",
+        ])
         .describe(
-          "Required: replace(startLine,endLine,lines); insert(afterLine,lines); replace_file(lines); copy_range/move_range(startLine,endLine,afterLine). Optional only: replace_file(finalNewline). All other fields are forbidden.",
+          "Required: replace(startLine,endLine,lines); insert(afterLine,lines); replace_file(lines); copy_range/move_range(startLine,endLine,afterLine); delete_file; move_file(destinationPath). Optional only: replace_file(finalNewline). All other fields are forbidden.",
         ),
       startLine: tool.schema
         .number()
@@ -113,9 +131,18 @@ function createEditSchema() {
         .describe(
           "Only for replace_file; omit to preserve snapshot state. true requires non-empty lines; an empty file requires false.",
         ),
+      destinationPath: tool.schema
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Only for move_file; relative paths resolve from the session directory, while absolute paths require external-directory authorization. Its parent must exist and the destination must be absent.",
+        ),
     })
     .strict()
-    .describe("Fields not listed for the selected op are invalid; replace_file must be sole.");
+    .describe(
+      "Fields not listed for the selected op are invalid; replace_file and file lifecycle operations must be sole.",
+    );
   const argumentShape = {
     filePath: tool.schema.string().min(1),
     snapshotId: tool.schema.string().regex(/^s_[A-Za-z0-9_-]{22}$/),
@@ -123,7 +150,7 @@ function createEditSchema() {
       .enum(["none", "unique"])
       .optional()
       .describe(
-        "none is default; unique only relocates a still-retained snapshot after external changes, and replace_file forbids unique.",
+        "none is default; unique only relocates a still-retained snapshot after external changes. replace_file, delete_file, and move_file forbid unique.",
       ),
     allowHashlinePrefixes: tool.schema
       .boolean()
@@ -135,7 +162,7 @@ function createEditSchema() {
       .boolean()
       .optional()
       .describe(
-        "Use for structural verification or a follow-up edit; returns a bounded, potentially partial attested successor near the first hunk.",
+        "Use for structural verification or a follow-up edit; returns a bounded, potentially partial attested successor near the first hunk. File lifecycle operations reject readback.",
       ),
     operations: tool.schema.array(editOperation).min(1).max(100),
   };
@@ -150,9 +177,9 @@ const editArgumentShape = editSchema.argumentShape;
 export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 
 export const hashlineEditDescription =
-  'Atomically edit one exact hashline_read snapshot. Batch changes to this file. Pass top-level snapshotId and operations JSON; do not encode arguments as text. Operations use one immutable pre-batch snapshot: copy reads pre-edit source, and afterLine is never adjusted. replace_file must be sole and use rebase:none; finalNewline is replace_file-only. Destructive writes may be adjacent but not overlap. Insert/copy destinations may touch a destructive endpoint, but may not lie inside a destructive span or share a destination. replace lines:[] deletes; insert forbids []; an empty file uses replace_file with lines:[],finalNewline:false. lines:[""] is one empty logical line and may change only EOL bytes. readback:true returns a successor for verification/follow-up; partial pages say partial=true. unique exactly relocates a still-retained snapshot after external changes; it cannot revive a consumed or unknown snapshot.';
+  'Atomically mutate one exact hashline_read snapshot. Batch text changes to this file, or use one sole file lifecycle operation. Pass top-level snapshotId and operations JSON; do not encode arguments as text. Operations use one immutable pre-batch snapshot: copy reads pre-edit source, and afterLine is never adjusted. replace_file, delete_file, and move_file require rebase:none and complete issued coverage. delete_file removes the source; move_file requires destinationPath, an existing parent, and an absent same-filesystem destination. File lifecycle operations reject readback and never overwrite. Destructive writes may be adjacent but not overlap. Insert/copy destinations may touch a destructive endpoint, but may not lie inside a destructive span or share a destination. replace lines:[] deletes; insert forbids []; an empty file uses replace_file with lines:[],finalNewline:false. finalNewline is replace_file-only. lines:[""] is one empty logical line and may change only EOL bytes. Text readback:true returns a successor for verification/follow-up; partial pages say partial=true. unique exactly relocates a still-retained snapshot after external changes; it cannot revive a consumed or unknown snapshot.';
 
-export const nativeAliasEditDescription = `${hashlineEditDescription} Native aliases: serialize while system guidance says native-alias-session=unbound; when bound, different paths may run concurrently but the same path remains serialized.`;
+export const nativeAliasEditDescription = `${hashlineEditDescription} Native aliases: serialize while system guidance says native-alias-session=unbound; when bound, operations touching different source and destination paths may run concurrently, but overlapping paths remain serialized.`;
 
 type SnapshotEditToolName = "hashline_edit" | "edit" | "apply_patch";
 
@@ -196,13 +223,26 @@ type PendingSnapshot = {
 };
 
 type RawEditOperation = {
-  op: "replace" | "insert" | "replace_file" | "copy_range" | "move_range";
+  op:
+    | "replace"
+    | "insert"
+    | "replace_file"
+    | "copy_range"
+    | "move_range"
+    | "delete_file"
+    | "move_file";
   startLine?: number | undefined;
   endLine?: number | undefined;
   afterLine?: number | undefined;
   lines?: string[] | undefined;
   finalNewline?: boolean | undefined;
+  destinationPath?: string | undefined;
 };
+
+type ParsedEditBatch =
+  | { kind: "text"; operations: EditOperation[] }
+  | { kind: "delete_file" }
+  | { kind: "move_file"; destinationPath: string };
 
 function scopeFor(context: { sessionID: string; worktree: string }): SnapshotScope {
   return { sessionId: context.sessionID, worktree: context.worktree };
@@ -243,11 +283,20 @@ function rejectDisplayPrefix(match: HashlineDisplayPrefixMatch): never {
   fail("DISPLAY_PREFIX_REJECTED", displayPrefixRejectionMessage(match));
 }
 
-function parseOperations(
+function assertRendererPaths(paths: readonly string[]): void {
+  if (paths.some((path) => !isRendererPathSafe(path))) {
+    fail("UNSUPPORTED_FILE", "Renderer paths cannot contain CR or LF characters.");
+  }
+}
+
+function parseTextOperations(
   operations: readonly RawEditOperation[],
   maxFileBytes: number,
   maxLines: number,
 ): EditOperation[] {
+  if (operations.some((operation) => operation.destinationPath !== undefined)) {
+    fail("INVALID_ARGUMENT", "destinationPath is only accepted by move_file.");
+  }
   for (const operation of operations) {
     if (operation.op !== "copy_range" && operation.op !== "move_range") continue;
     if (
@@ -373,12 +422,52 @@ function parseOperations(
       );
     }
     return {
-      op: operation.op,
+      op: operation.op as "copy_range" | "move_range",
       startLine: operation.startLine,
       endLine: operation.endLine,
       afterLine: operation.afterLine,
     };
   });
+}
+
+function parseOperations(
+  operations: readonly RawEditOperation[],
+  maxFileBytes: number,
+  maxLines: number,
+): ParsedEditBatch {
+  const lifecycle = operations.filter(
+    (operation) => operation.op === "delete_file" || operation.op === "move_file",
+  );
+  if (lifecycle.length === 0) {
+    return { kind: "text", operations: parseTextOperations(operations, maxFileBytes, maxLines) };
+  }
+  if (operations.length !== 1 || lifecycle.length !== 1) {
+    fail("INVALID_ARGUMENT", "File lifecycle operations must be the only operation.");
+  }
+  const operation = lifecycle[0];
+  if (!operation) fail("INVALID_ARGUMENT", "A file lifecycle operation is required.");
+  if (
+    operation.startLine !== undefined ||
+    operation.endLine !== undefined ||
+    operation.afterLine !== undefined ||
+    operation.lines !== undefined ||
+    operation.finalNewline !== undefined
+  ) {
+    fail(
+      "INVALID_ARGUMENT",
+      `${operation.op} does not accept line coordinates, lines, or finalNewline.`,
+    );
+  }
+  if (operation.op === "delete_file") {
+    if (operation.destinationPath !== undefined) {
+      fail("INVALID_ARGUMENT", "delete_file does not accept destinationPath.");
+    }
+    return { kind: "delete_file" };
+  }
+  if (!operation.destinationPath) {
+    fail("INVALID_ARGUMENT", "move_file requires destinationPath.");
+  }
+  return { kind: "move_file", destinationPath: operation.destinationPath };
 }
 
 function assertIssued(
@@ -467,6 +556,52 @@ function unavailableEditReadback(output: string): string {
   return editResultOutput(success, "unavailable");
 }
 
+function historyRetrySummary(error: OpenCodeSessionHistoryError): string {
+  if (!error.exhaustion) return "";
+  const attempts = `${error.attempts} attempt${error.attempts === 1 ? "" : "s"}`;
+  const timeout = error.timeoutMs ?? SESSION_HISTORY_TIMEOUT_MS;
+  return ` after ${attempts} within the ${timeout} ms total deadline`;
+}
+
+function sessionHistoryFailureMessage(error: OpenCodeSessionHistoryError): string {
+  const retrySummary = historyRetrySummary(error);
+  switch (error.category) {
+    case "transport-unavailable":
+      return "OpenCode session history transport is unavailable. Restore the active OpenCode client connection, then retry this edit.";
+    case "transport-unexpected":
+      return "OpenCode session history transport has an unexpected shape. Verify OpenCode and plugin compatibility, then retry after restoring a compatible host.";
+    case "timeout":
+      return `OpenCode session history fetch timed out${retrySummary}. Retry this edit when the local OpenCode service is responsive.`;
+    case "network":
+      return `OpenCode session history fetch encountered a network failure${retrySummary}. Retry this edit when the local OpenCode service is reachable.`;
+    case "http-status": {
+      const status = error.status ?? "unknown";
+      const statusClass = error.statusClass ?? "other";
+      const retryability = error.retryable ? "retryable " : "non-retryable ";
+      const advice = error.retryable
+        ? "Retry this edit when the active OpenCode host is available."
+        : "Verify the active OpenCode session and host compatibility before retrying this edit.";
+      return `OpenCode session history returned ${retryability}HTTP ${status} (${statusClass} status class)${retrySummary}. ${advice}`;
+    }
+    case "response-too-large":
+      return `OpenCode persisted session history exceeds the bounded inspection window of ${SESSION_HISTORY_TRANSPORT_MAX_BYTES} transport bytes. Start a genuinely new session; do not resume the same task ID.`;
+    case "invalid-json":
+      return "OpenCode session history returned invalid JSON and was not retried. Verify OpenCode and plugin compatibility before retrying this edit.";
+    case "invalid-shape":
+      return "OpenCode session history returned an invalid top-level shape and was not retried. Verify OpenCode and plugin compatibility before retrying this edit.";
+  }
+}
+
+function failSessionHistoryRead(error: unknown): never {
+  if (error instanceof OpenCodeSessionHistoryError) {
+    fail("SESSION_PROTOCOL_MISMATCH", sessionHistoryFailureMessage(error));
+  }
+  fail(
+    "SESSION_PROTOCOL_MISMATCH",
+    "OpenCode session history transport failed with an unexpected internal category. Verify OpenCode and plugin compatibility before retrying this edit.",
+  );
+}
+
 export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const requestedToolSurface =
     rawOptions?.toolSurface === "native-aliases" ? "native-aliases" : "hashline";
@@ -502,6 +637,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const snapshots = new SnapshotStore(options);
   const pendingSnapshots = new Map<string, PendingSnapshot>();
   const sessions = new NativeAliasSessionRegistry();
+  const poisonedAliasSessions = new Set<string>();
 
   function assertConfigured(): void {
     if (initializationError) {
@@ -560,6 +696,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     sessionId: string | undefined,
   ): Promise<NativeAliasBindingStatus> {
     if (!sessionId) return "unbound";
+    if (poisonedAliasSessions.has(sessionId)) return "mismatch";
     try {
       const binding = await resolveAliasSessionBinding(input.directory, input.worktree);
       return sessions.status(sessionId, binding.fingerprint);
@@ -578,6 +715,12 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     identity: NativeAliasProtocolIdentity;
     fingerprint: string;
   }> {
+    if (poisonedAliasSessions.has(sessionId)) {
+      fail(
+        "SESSION_PROTOCOL_MISMATCH",
+        "A prior move_file call reached partial publication. Inspect both paths and start a new session before editing.",
+      );
+    }
     const binding = await resolveAliasSessionBinding(directory, worktree);
     const { identity, fingerprint } = binding;
     if (sessions.isBound(sessionId, fingerprint)) return binding;
@@ -591,8 +734,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       try {
         const remainingMs =
           settleDeadline === undefined
-            ? undefined
-            : Math.max(1, Math.floor(settleDeadline - performance.now()));
+            ? SESSION_HISTORY_TIMEOUT_MS
+            : Math.floor(settleDeadline - performance.now());
+        if (remainingMs <= 0) {
+          fail(
+            "SESSION_PROTOCOL_MISMATCH",
+            "OpenCode current alias input did not stabilize within the bounded inspection window. Start a new session before editing.",
+          );
+        }
         messages = await readOpenCodeSessionHistory(
           input.client,
           sessionId,
@@ -600,11 +749,9 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           SESSION_HISTORY_FETCH_LIMIT,
           remainingMs,
         );
-      } catch {
-        fail(
-          "SESSION_PROTOCOL_MISMATCH",
-          "OpenCode session history could not be inspected. Start a new session before editing.",
-        );
+      } catch (error) {
+        if (error instanceof HashlineError) throw error;
+        failSessionHistoryRead(error);
       }
       try {
         assertNativeAliasHistory(messages, identity, historyOptions);
@@ -696,18 +843,25 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     const parsed = hashlineEditArgumentsSchema.safeParse(rawArgs);
     if (!parsed.success) invalidArguments(toolName);
     const args = parsed.data;
-    const aliasBinding =
-      toolName === "hashline_edit"
-        ? undefined
-        : await assertAliasSession(context.sessionID, context.directory, context.worktree);
-    const operations = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
+    const batch = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
     const rebase = args.rebase ?? "none";
     if (rebase !== "none" && rebase !== "unique") {
       fail("INVALID_ARGUMENT", "rebase must be none or unique.");
     }
-    const displayPrefix = args.allowHashlinePrefixes
-      ? undefined
-      : findHashlineDisplayPrefix(operations);
+    if (batch.kind !== "text" && rebase !== "none") {
+      fail("INVALID_ARGUMENT", `${batch.kind} does not support unique rebase.`);
+    }
+    if (batch.kind !== "text" && args.readback) {
+      fail("INVALID_ARGUMENT", `${batch.kind} does not support readback.`);
+    }
+    const aliasBinding =
+      toolName === "hashline_edit"
+        ? undefined
+        : await assertAliasSession(context.sessionID, context.directory, context.worktree);
+    const displayPrefix =
+      batch.kind === "text" && !args.allowHashlinePrefixes
+        ? findHashlineDisplayPrefix(batch.operations)
+        : undefined;
     if (displayPrefix) {
       if (toolName === "hashline_edit" || !aliasBinding) rejectDisplayPrefix(displayPrefix);
       const metadata = buildNativeAliasDisplayPrefixRejectionMetadata(
@@ -722,6 +876,187 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         metadata,
       };
     }
+    if (batch.kind !== "text") {
+      const resolved = await resolveMutableFile(args.filePath, context.directory);
+      const worktree = aliasBinding?.canonicalWorktree ?? context.worktree;
+      const shownPath = displayPath(worktree, resolved.canonicalPath);
+      assertRendererPaths([resolved.canonicalPath, shownPath]);
+      const aliasPath = shownPath.replaceAll("\\", "/");
+      if (
+        toolName !== "hashline_edit" &&
+        (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
+      ) {
+        fail("UNSUPPORTED_FILE", "Native aliases cannot edit files outside the current worktree.");
+      }
+
+      const destination =
+        batch.kind === "move_file"
+          ? await resolveNewFile(batch.destinationPath, context.directory)
+          : undefined;
+      const destinationShown = destination
+        ? displayPath(worktree, destination.canonicalPath)
+        : undefined;
+      if (destination && destinationShown) {
+        assertRendererPaths([destination.canonicalPath, destinationShown]);
+      }
+      const destinationAlias = destinationShown?.replaceAll("\\", "/");
+      if (
+        destination &&
+        (pathsAlias(resolved.canonicalPath, destination.canonicalPath) ||
+          (toolName !== "hashline_edit" &&
+            (isAbsolute(destinationShown ?? "") ||
+              destinationAlias === ".." ||
+              destinationAlias?.startsWith("../"))))
+      ) {
+        fail(
+          pathsAlias(resolved.canonicalPath, destination.canonicalPath)
+            ? "INVALID_ARGUMENT"
+            : "UNSUPPORTED_FILE",
+          pathsAlias(resolved.canonicalPath, destination.canonicalPath)
+            ? "move_file source and destination must be different paths."
+            : "Native aliases cannot move files outside the current worktree.",
+        );
+      }
+
+      const scope = scopeFor(context);
+      const snapshot = snapshots.pin(scope, args.snapshotId);
+      try {
+        if (!sameCanonicalPath(snapshot.canonicalPath, resolved.canonicalPath)) {
+          fail("PATH_MISMATCH", "The snapshot belongs to a different canonical path.");
+        }
+        snapshots.assertComplete(snapshot, batch.kind);
+        await authorizeExternal(context, resolved);
+        if (destination) await authorizeExternal(context, destination);
+
+        const lockPaths = destination
+          ? [resolved.canonicalPath, destination.canonicalPath]
+          : [resolved.canonicalPath];
+        return await withPathLocks(
+          lockPaths,
+          async () => {
+            snapshots.peek(scope, snapshot.id);
+            const stable = await readStableFile(
+              resolved,
+              options.maxFileBytes,
+              true,
+              context.abort,
+            );
+            if (!bytesEqual(stable.bytes, snapshot.document.bytes)) {
+              fail("TARGET_CHANGED", "The file no longer matches the exact issued snapshot bytes.");
+            }
+            if (destination) {
+              if (stable.stats.dev !== destination.parentStats.dev) {
+                fail(
+                  "UNSUPPORTED_FILE",
+                  "move_file requires source and destination on one filesystem.",
+                );
+              }
+              await assertTargetAbsent(destination);
+            }
+
+            const diffPath = toolName === "hashline_edit" ? shownPath : aliasPath;
+            const nextDiffPath = destination
+              ? toolName === "hashline_edit"
+                ? (destinationShown ?? destination.canonicalPath)
+                : (destinationAlias ?? destination.canonicalPath)
+              : diffPath;
+            const diff = createTwoFilesPatch(
+              diffPath,
+              nextDiffPath,
+              snapshot.document.text,
+              batch.kind === "delete_file" ? "" : snapshot.document.text,
+              "before",
+              "after",
+              { context: 3 },
+            );
+            let metadata: Record<string, unknown>;
+            if (toolName === "hashline_edit") {
+              metadata = {
+                diff,
+                operation: batch.kind,
+                ...(destination ? { destinationPath: destination.canonicalPath } : {}),
+              };
+            } else {
+              metadata = buildNativeAliasMetadata({
+                surface: toolName,
+                operation: batch.kind,
+                canonicalPath: resolved.canonicalPath,
+                relativePath: shownPath,
+                ...(destination
+                  ? {
+                      destinationCanonicalPath: destination.canonicalPath,
+                      destinationRelativePath: destinationShown as string,
+                    }
+                  : {}),
+                unifiedDiff: diff,
+                ...countUnifiedDiffChanges(diff),
+                ...assertAliasAvailable().identity,
+              });
+              const persistedBytes = Buffer.byteLength(
+                JSON.stringify({ ...metadata, truncated: false }),
+                "utf8",
+              );
+              if (persistedBytes > NATIVE_ALIAS_METADATA_MAX_BYTES) {
+                fail(
+                  "UNSUPPORTED_FILE",
+                  `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes.`,
+                );
+              }
+            }
+
+            await authorizeEdits(context, destination ? [resolved, destination] : [resolved], diff);
+            if (batch.kind === "delete_file") {
+              await publishDeletedFile({
+                resolved,
+                expected: stable,
+                maxBytes: options.maxFileBytes,
+                signal: context.abort,
+                consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
+              });
+            } else if (destination) {
+              try {
+                await publishMovedFile({
+                  source: resolved,
+                  destination,
+                  expected: stable,
+                  maxBytes: options.maxFileBytes,
+                  signal: context.abort,
+                  consume: () => {
+                    snapshots.invalidatePath(scope, resolved.canonicalPath);
+                    snapshots.invalidatePath(scope, destination.canonicalPath);
+                  },
+                });
+              } catch (error) {
+                if (
+                  aliasBinding &&
+                  error instanceof HashlineError &&
+                  error.code === "PARTIAL_PUBLICATION"
+                ) {
+                  poisonedAliasSessions.add(context.sessionID);
+                }
+                throw error;
+              }
+            }
+            const title = destinationShown ? `${shownPath} -> ${destinationShown}` : shownPath;
+            const success =
+              batch.kind === "delete_file"
+                ? `Deleted ${shownPath}.`
+                : `Moved ${shownPath} to ${destinationShown}.`;
+            const output = editResultOutput(success, "none");
+            context.metadata({
+              title,
+              metadata,
+            });
+            return { title, output, metadata };
+          },
+          context.abort,
+        );
+      } finally {
+        snapshots.release(snapshot);
+      }
+    }
+
+    const operations = batch.operations;
     const resolved = await resolveExistingFile(args.filePath, context.directory);
     const shownPath = displayPath(
       aliasBinding?.canonicalWorktree ?? context.worktree,
@@ -744,104 +1079,109 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       assertIssued(snapshots, snapshot, operations, rebase);
       await authorizeExternal(context, resolved);
 
-      return await withPathLock(resolved.canonicalPath, async () => {
-        snapshots.peek(scope, snapshot.id);
-        const stable = await readStableFile(resolved, options.maxFileBytes, true, context.abort);
-        const current = decodeTextDocument(stable.bytes, options.maxLines);
-        const plan = planEdits({
-          base: snapshot.document,
-          current,
-          operations,
-          rebase,
-          maxContextLines: options.maxContextLines,
-          maxFileBytes: options.maxFileBytes,
-          maxLines: options.maxLines,
-        });
-        if (plan.bytes.byteLength > options.maxFileBytes) {
-          fail("UNSUPPORTED_FILE", "The edited file exceeds maxFileBytes.");
-        }
-        assertLineLimit(plan.bytes, options.maxLines);
+      return await withPathLock(
+        resolved.canonicalPath,
+        async () => {
+          snapshots.peek(scope, snapshot.id);
+          const stable = await readStableFile(resolved, options.maxFileBytes, true, context.abort);
+          const current = decodeTextDocument(stable.bytes, options.maxLines);
+          const plan = planEdits({
+            base: snapshot.document,
+            current,
+            operations,
+            rebase,
+            maxContextLines: options.maxContextLines,
+            maxFileBytes: options.maxFileBytes,
+            maxLines: options.maxLines,
+          });
+          if (plan.bytes.byteLength > options.maxFileBytes) {
+            fail("UNSUPPORTED_FILE", "The edited file exceeds maxFileBytes.");
+          }
+          assertLineLimit(plan.bytes, options.maxLines);
 
-        const diffPath = toolName === "hashline_edit" ? shownPath : shownPath.replaceAll("\\", "/");
-        const diff = unifiedDiff(diffPath, current.text, plan.text);
-        let metadata: Record<string, unknown>;
-        if (toolName === "hashline_edit") {
-          metadata = {
-            diff,
-            operationCount: plan.operationCount,
-            rebased: plan.rebased,
-          };
-        } else {
-          const metadataInput = {
-            surface: toolName,
-            canonicalPath: resolved.canonicalPath,
-            relativePath: shownPath,
-            unifiedDiff: diff,
-            ...countUnifiedDiffChanges(diff),
-            ...assertAliasAvailable().identity,
-          };
-          metadata = buildNativeAliasMetadata(metadataInput);
-          const persistedBytes = Buffer.byteLength(
-            JSON.stringify({ ...metadata, truncated: false }),
-            "utf8",
-          );
-          if (persistedBytes > NATIVE_ALIAS_METADATA_MAX_BYTES) {
-            fail(
-              "UNSUPPORTED_FILE",
-              `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes. Split the edit into smaller operations.`,
+          const diffPath =
+            toolName === "hashline_edit" ? shownPath : shownPath.replaceAll("\\", "/");
+          const diff = unifiedDiff(diffPath, current.text, plan.text);
+          let metadata: Record<string, unknown>;
+          if (toolName === "hashline_edit") {
+            metadata = {
+              diff,
+              operationCount: plan.operationCount,
+              rebased: plan.rebased,
+            };
+          } else {
+            const metadataInput = {
+              surface: toolName,
+              canonicalPath: resolved.canonicalPath,
+              relativePath: shownPath,
+              unifiedDiff: diff,
+              ...countUnifiedDiffChanges(diff),
+              ...assertAliasAvailable().identity,
+            };
+            metadata = buildNativeAliasMetadata(metadataInput);
+            const persistedBytes = Buffer.byteLength(
+              JSON.stringify({ ...metadata, truncated: false }),
+              "utf8",
             );
+            if (persistedBytes > NATIVE_ALIAS_METADATA_MAX_BYTES) {
+              fail(
+                "UNSUPPORTED_FILE",
+                `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes. Split the edit into smaller operations.`,
+              );
+            }
           }
-        }
-        await authorizeEdit(context, resolved, diff);
-        const verified = await publishReplacement({
-          resolved,
-          expected: stable,
-          replacement: plan.bytes,
-          maxBytes: options.maxFileBytes,
-          signal: context.abort,
-          consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
-        });
-        const successOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
-        let output = editResultOutput(successOutput, "none");
-        let resultMetadata = metadata;
-        if (args.readback) {
-          const fallbackOutput = editResultOutput(successOutput, "unavailable");
-          try {
-            const document = decodeTextDocument(verified.bytes, options.maxLines);
-            const successor = snapshots.remember(scope, resolved.canonicalPath, document);
-            const prefix = `${editResultOutput(successOutput, "attached")}\n`;
-            const rendered = renderSnapshotPage({
-              snapshot: successor,
-              offset: firstNewFileHunkLine(diff),
-              limit: 1000,
-              maxOutputBytes: options.maxOutputBytes - Buffer.byteLength(prefix, "utf8"),
-            });
-            output = `${prefix}${rendered.output}`;
-            const pendingId = randomUUID();
-            rememberPending(pendingId, {
-              kind: "edit",
-              snapshotId: successor.id,
-              scope: successor.scope,
-              page: rendered.page,
-              outputDigest: sha256(new TextEncoder().encode(output)),
-              createdAt: Date.now(),
-              fallbackOutput,
-            });
-            resultMetadata = { ...metadata, hashlinePending: pendingId };
-          } catch {
-            output = fallbackOutput;
+          await authorizeEdit(context, resolved, diff);
+          const verified = await publishReplacement({
+            resolved,
+            expected: stable,
+            replacement: plan.bytes,
+            maxBytes: options.maxFileBytes,
+            signal: context.abort,
+            consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
+          });
+          const successOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
+          let output = editResultOutput(successOutput, "none");
+          let resultMetadata = metadata;
+          if (args.readback) {
+            const fallbackOutput = editResultOutput(successOutput, "unavailable");
+            try {
+              const document = decodeTextDocument(verified.bytes, options.maxLines);
+              const successor = snapshots.remember(scope, resolved.canonicalPath, document);
+              const prefix = `${editResultOutput(successOutput, "attached")}\n`;
+              const rendered = renderSnapshotPage({
+                snapshot: successor,
+                offset: firstNewFileHunkLine(diff),
+                limit: 1000,
+                maxOutputBytes: options.maxOutputBytes - Buffer.byteLength(prefix, "utf8"),
+              });
+              output = `${prefix}${rendered.output}`;
+              const pendingId = randomUUID();
+              rememberPending(pendingId, {
+                kind: "edit",
+                snapshotId: successor.id,
+                scope: successor.scope,
+                page: rendered.page,
+                outputDigest: sha256(new TextEncoder().encode(output)),
+                createdAt: Date.now(),
+                fallbackOutput,
+              });
+              resultMetadata = { ...metadata, hashlinePending: pendingId };
+            } catch {
+              output = fallbackOutput;
+            }
           }
-        }
-        context.metadata({
-          title: shownPath,
-          metadata: toolName === "hashline_edit" ? { diff } : metadata,
-        });
-        return {
-          title: shownPath,
-          output,
-          metadata: resultMetadata,
-        };
-      });
+          context.metadata({
+            title: shownPath,
+            metadata: toolName === "hashline_edit" ? { diff } : metadata,
+          });
+          return {
+            title: shownPath,
+            output,
+            metadata: resultMetadata,
+          };
+        },
+        context.abort,
+      );
     } finally {
       snapshots.release(snapshot);
     }
@@ -882,17 +1222,21 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       const shownPath = displayPath(context.worktree, resolved.canonicalPath);
       const diff = unifiedDiff(shownPath, "", args.content);
 
-      return await withPathLock(resolved.canonicalPath, async () => {
-        await assertTargetAbsent(resolved);
-        await authorizeEdit(context, resolved, diff);
-        await publishNewFile({ resolved, bytes, signal: context.abort });
-        context.metadata({ title: shownPath, metadata: { diff } });
-        return {
-          title: shownPath,
-          output: "Created the file. Use hashline_read before editing it.",
-          metadata: { diff, created: true },
-        };
-      });
+      return await withPathLock(
+        resolved.canonicalPath,
+        async () => {
+          await assertTargetAbsent(resolved);
+          await authorizeEdit(context, resolved, diff);
+          await publishNewFile({ resolved, bytes, signal: context.abort });
+          context.metadata({ title: shownPath, metadata: { diff } });
+          return {
+            title: shownPath,
+            output: "Created the file. Use hashline_read before editing it.",
+            metadata: { diff, created: true },
+          };
+        },
+        context.abort,
+      );
     },
   });
 
@@ -1052,7 +1396,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         const state = await aliasSessionStatus(hookInput.sessionID);
         const concurrency =
           state === "bound"
-            ? "native-alias-session=bound. Different paths may run concurrently; serialize the same path. Calls remain independently approved and non-transactional."
+            ? "native-alias-session=bound. Operations touching disjoint source and destination paths may run concurrently; serialize overlapping paths. Calls remain independently approved and non-transactional."
             : state === "mismatch"
               ? "native-alias-session=mismatch. Start a new session before editing."
               : "native-alias-session=unbound. Never issue edit or apply_patch calls concurrently or in the same assistant message; wait for each result until one exact before-hook binds the session.";
@@ -1078,6 +1422,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       pendingSnapshots.clear();
       snapshots.clear();
       sessions.clear();
+      poisonedAliasSessions.clear();
     },
   };
 };

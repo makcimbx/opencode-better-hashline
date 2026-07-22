@@ -9,11 +9,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Add sole snapshot-bound `delete_file` and no-clobber `move_file` operations with exact-byte freshness, complete issued BOF-to-EOF source coverage, direct regular single-link sources, source authorization, and, for moves, dual-path authorization plus an absent destination under a stable existing parent on the same filesystem.
+- Add the two-task `file-ops-v1` deterministic model manifest and current `native-aliases-v2` adapter identity without making a paid model claim.
+- Add model-free schema-v6 lifecycle operation-schema and compact call-wire fixtures, retained in a new immutable result without rewriting the schema-v5 evidence.
+
 ### Changed
 
 - Remove the completed native-alias preview plan and superseded pre-v7 incident records while retaining the final pilot evidence and closed-ID safety rules.
+- Upgrade native-alias history and metadata to `native-aliases/v2`, binding each result to exact `update`, `delete_file`, or `move_file` operation identity and move destination correlation; v1 history now fails closed.
+- Plan file lifecycle operations separately from pure text `planEdits`, approve one immutable exact patch/metadata result before reread and publication, and serialize overlapping source/destination path sets while allowing disjoint sets to progress.
+- Keep retained schema-v5 and pilot-v7 evidence immutable and scoped to the earlier text-operation contract; neither result covers the new lifecycle task or adapter identity.
 
 ### Fixed
+
+- Report post-link move failures as `PARTIAL_PUBLICATION`, invalidate source and destination snapshots, poison the bound alias session, and require inspection plus a new session instead of attempting an unsafe rollback.
+- Preserve safe native-alias session-history failure categories, recover bounded transient fetches under one total deadline, and distinguish retryable host failures from oversized histories that require a genuinely new task ID.
 
 ## [0.5.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.4.0...v0.5.0) (2026-07-22)
 

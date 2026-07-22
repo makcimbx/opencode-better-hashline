@@ -6,8 +6,10 @@ import { exactRelativePath } from "./path-identity.js";
 import {
   canonicalJson,
   canonicalPathSha256,
+  isRendererPathSafe,
   jsonSha256,
   NATIVE_ALIAS_PROTOCOL,
+  type NativeAliasOperation,
   type NativeAliasSurface,
 } from "./presentation.js";
 
@@ -116,10 +118,17 @@ function rejectHistory(reason: string): never {
   fail("SESSION_PROTOCOL_MISMATCH", `${reason} Start a new session before editing.`);
 }
 
+function rejectOversizedHistory(): never {
+  fail(
+    "SESSION_PROTOCOL_MISMATCH",
+    "OpenCode persisted session history exceeds the bounded inspection window. Start a genuinely new session; do not resume the same task ID.",
+  );
+}
+
 function assertHistoryBounds(messagesValue: unknown): asserts messagesValue is unknown[] {
   if (!Array.isArray(messagesValue)) rejectHistory("OpenCode session history is unreadable.");
   if (messagesValue.length > SESSION_HISTORY_LIMIT) {
-    rejectHistory("OpenCode session history exceeds the bounded inspection limit.");
+    rejectOversizedHistory();
   }
   let serialized: string | undefined;
   try {
@@ -131,12 +140,15 @@ function assertHistoryBounds(messagesValue: unknown): asserts messagesValue is u
     serialized === undefined ||
     Buffer.byteLength(serialized, "utf8") > SESSION_HISTORY_MAX_BYTES
   ) {
-    rejectHistory("OpenCode session history exceeds the bounded inspection limit.");
+    rejectOversizedHistory();
   }
 }
 
 function shownPath(identity: NativeAliasProtocolIdentity, canonicalPath: string): string {
   const value = exactRelativePath(identity.worktree, canonicalPath)?.replaceAll("\\", "/");
+  if (!isRendererPathSafe(canonicalPath) || (value !== undefined && !isRendererPathSafe(value))) {
+    rejectHistory("Completed historical alias renderer path contains a line break.");
+  }
   if (!value || value === ".." || value.startsWith("../") || isAbsolute(value)) {
     rejectHistory("Completed historical alias path is outside the bound worktree.");
   }
@@ -147,21 +159,62 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
   return Object.keys(value).sort().join(",") === [...keys].sort().join(",");
 }
 
+export type NativeAliasCompletedEvidence = {
+  canonicalPath: string;
+  operation: NativeAliasOperation;
+  destinationCanonicalPath?: string;
+};
+
+type ValidatedMarker = {
+  canonicalPathSha256: string;
+  operation: NativeAliasOperation;
+  destinationPathSha256?: string;
+};
+
+const PATCH_SEPARATOR = "===================================================================";
+
 function assertPatch(
   patch: string,
   expectedPath: string,
-): { additions: number; deletions: number } {
+  operation: NativeAliasOperation,
+  expectedDestinationPath?: string,
+): { additions: number; deletions: number; destinationPath: string } {
   const lines = patch.split("\n");
-  const oldHeader = lines[0] === `Index: ${expectedPath}` ? 2 : 0;
+  let headerIndex = 0;
+  if (operation !== "move_file" && lines[0] === `Index: ${expectedPath}`) {
+    if (lines[1] !== PATCH_SEPARATOR) {
+      rejectHistory("Completed historical alias patch headers are inconsistent.");
+    }
+    headerIndex = 2;
+  } else if (operation === "move_file" && lines[0] === PATCH_SEPARATOR) {
+    headerIndex = 1;
+  }
+
+  const destinationHeader = lines[headerIndex + 1] ?? "";
+  const destinationPrefix = "+++ ";
+  const destinationSuffix = "\tafter";
   if (
-    (oldHeader === 2 &&
-      lines[1] !== "===================================================================") ||
-    lines[oldHeader] !== `--- ${expectedPath}\tbefore` ||
-    lines[oldHeader + 1] !== `+++ ${expectedPath}\tafter`
+    lines[headerIndex] !== `--- ${expectedPath}\tbefore` ||
+    !destinationHeader.startsWith(destinationPrefix) ||
+    !destinationHeader.endsWith(destinationSuffix)
   ) {
     rejectHistory("Completed historical alias patch headers are inconsistent.");
   }
-  let index = oldHeader + 2;
+  const destinationPath = destinationHeader.slice(
+    destinationPrefix.length,
+    -destinationSuffix.length,
+  );
+  const requiredDestinationPath =
+    operation === "move_file" ? expectedDestinationPath : expectedPath;
+  if (
+    !destinationPath ||
+    (requiredDestinationPath !== undefined && destinationPath !== requiredDestinationPath) ||
+    (operation === "move_file" && destinationPath === expectedPath)
+  ) {
+    rejectHistory("Completed historical alias patch headers are inconsistent.");
+  }
+
+  let index = headerIndex + 2;
   let additions = 0;
   let deletions = 0;
   let hunks = 0;
@@ -185,7 +238,9 @@ function assertPatch(
       (oldExpected === 0 ? oldStart < 0 : oldStart < 1) ||
       (newExpected === 0 ? newStart < 0 : newStart < 1) ||
       oldStart < previousOldEnd ||
-      newStart < previousNewEnd
+      newStart < previousNewEnd ||
+      (operation === "delete_file" &&
+        (hunks !== 1 || oldStart !== 1 || oldExpected < 1 || newStart !== 0 || newExpected !== 0))
     ) {
       rejectHistory("Completed historical alias patch hunk ranges are inconsistent.");
     }
@@ -225,39 +280,80 @@ function assertPatch(
       rejectHistory("Completed historical alias patch hunk ranges are inconsistent.");
     }
   }
-  if (hunks === 0 || index !== lines.length - 1) {
+  const validHunks =
+    operation === "update"
+      ? hunks > 0
+      : operation === "delete_file"
+        ? hunks === 0 || (hunks === 1 && additions === 0 && deletions > 0)
+        : hunks === 0;
+  if (!validHunks || index !== lines.length - 1) {
     rejectHistory("Completed historical alias patch is malformed.");
   }
-  return { additions, deletions };
+  return { additions, deletions, destinationPath };
 }
 
 function assertMarker(
   toolName: NativeAliasSurface,
   metadata: Record<string, unknown>,
   identity: NativeAliasProtocolIdentity,
-): Record<string, unknown> {
+): ValidatedMarker {
   const marker = record(metadata.betterHashline);
   if (!marker) rejectHistory(`Completed historical ${toolName} has no Better Hashline marker.`);
-  const markerKeys = Object.keys(marker).sort().join(",");
+  const operation = marker.operation;
+  if (operation !== "update" && operation !== "delete_file" && operation !== "move_file") {
+    rejectHistory(`Completed historical ${toolName} uses an incompatible protocol marker.`);
+  }
+  const markerKeys = [
+    "canonicalPathSha256",
+    "hostVersion",
+    "operation",
+    "packageVersion",
+    "protocol",
+    "schemaSha256",
+    "surface",
+  ];
+  if (operation === "move_file") markerKeys.push("destinationPathSha256");
   if (
-    markerKeys !== "canonicalPathSha256,hostVersion,packageVersion,protocol,schemaSha256,surface" ||
+    !exactKeys(marker, markerKeys) ||
     marker.protocol !== NATIVE_ALIAS_PROTOCOL ||
     marker.packageVersion !== identity.packageVersion ||
     marker.schemaSha256 !== identity.schemaSha256 ||
     marker.hostVersion !== identity.hostVersion ||
     marker.surface !== toolName ||
     typeof marker.canonicalPathSha256 !== "string" ||
-    !/^[a-f0-9]{64}$/u.test(marker.canonicalPathSha256)
+    !/^[a-f0-9]{64}$/u.test(marker.canonicalPathSha256) ||
+    (operation === "move_file" &&
+      (typeof marker.destinationPathSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(marker.destinationPathSha256)))
   ) {
     rejectHistory(`Completed historical ${toolName} uses an incompatible protocol marker.`);
   }
-  return marker;
+  return {
+    canonicalPathSha256: marker.canonicalPathSha256,
+    operation,
+    ...(operation === "move_file"
+      ? { destinationPathSha256: marker.destinationPathSha256 as string }
+      : {}),
+  };
+}
+
+function canonicalPathFromShown(
+  identity: NativeAliasProtocolIdentity,
+  relativePath: string,
+): string {
+  const canonicalPath = resolve(identity.worktree, relativePath);
+  if (shownPath(identity, canonicalPath) !== relativePath) {
+    rejectHistory("Completed historical alias destination path is inconsistent.");
+  }
+  return canonicalPath;
 }
 
 function assertCounts(
   metadata: { patch: string; additions: unknown; deletions: unknown },
   expectedPath: string,
-): void {
+  operation: NativeAliasOperation,
+  expectedDestinationPath?: string,
+): string {
   if (
     !Number.isSafeInteger(metadata.additions) ||
     (metadata.additions as number) < 0 ||
@@ -266,17 +362,18 @@ function assertCounts(
   ) {
     rejectHistory("Completed historical alias metadata has invalid change counts.");
   }
-  const counts = assertPatch(metadata.patch, expectedPath);
+  const counts = assertPatch(metadata.patch, expectedPath, operation, expectedDestinationPath);
   if (metadata.additions !== counts.additions || metadata.deletions !== counts.deletions) {
     rejectHistory("Completed historical alias metadata has inconsistent change counts.");
   }
+  return counts.destinationPath;
 }
 
 function assertCompletedMetadata(
   toolName: NativeAliasSurface,
   metadataValue: unknown,
   identity: NativeAliasProtocolIdentity,
-): string {
+): NativeAliasCompletedEvidence {
   const metadata = record(metadataValue);
   const diagnostics = record(metadata?.diagnostics);
   if (!metadata || !diagnostics || Object.keys(diagnostics).length !== 0) {
@@ -308,46 +405,82 @@ function assertCompletedMetadata(
       rejectHistory("Completed historical edit metadata is unreadable.");
     }
     const expectedPath = shownPath(identity, filediff.file);
-    assertCounts(
+    const destinationRelativePath = assertCounts(
       { patch: filediff.patch, additions: filediff.additions, deletions: filediff.deletions },
       expectedPath,
+      marker.operation,
     );
-    if (marker.canonicalPathSha256 !== canonicalPathSha256(filediff.file)) {
+    const destinationCanonicalPath =
+      marker.operation === "move_file"
+        ? canonicalPathFromShown(identity, destinationRelativePath)
+        : undefined;
+    if (
+      marker.canonicalPathSha256 !== canonicalPathSha256(filediff.file) ||
+      (marker.operation === "move_file" &&
+        marker.destinationPathSha256 !== canonicalPathSha256(destinationCanonicalPath as string))
+    ) {
       rejectHistory("Completed historical edit path metadata is inconsistent.");
     }
-    return filediff.file;
+    return {
+      canonicalPath: filediff.file,
+      operation: marker.operation,
+      ...(destinationCanonicalPath ? { destinationCanonicalPath } : {}),
+    };
   }
 
   if (!Array.isArray(metadata.files) || metadata.files.length !== 1) {
     rejectHistory("Completed historical apply_patch metadata is unreadable.");
   }
   const file = record(metadata.files[0]);
+  const expectedType =
+    marker.operation === "delete_file"
+      ? "delete"
+      : marker.operation === "move_file"
+        ? "move"
+        : "update";
+  const fileKeys = ["additions", "deletions", "filePath", "patch", "relativePath", "type"];
+  if (marker.operation === "move_file") fileKeys.push("movePath");
   if (
     !file ||
     typeof file.filePath !== "string" ||
     typeof file.relativePath !== "string" ||
-    file.type !== "update" ||
+    file.type !== expectedType ||
     typeof file.patch !== "string" ||
-    !exactKeys(file, ["additions", "deletions", "filePath", "patch", "relativePath", "type"])
+    !exactKeys(file, fileKeys) ||
+    (marker.operation === "move_file" && typeof file.movePath !== "string")
   ) {
     rejectHistory("Completed historical apply_patch metadata is unreadable.");
   }
-  const expectedRelative = shownPath(identity, file.filePath);
+  const expectedSourceRelative = shownPath(identity, file.filePath);
+  const destinationCanonicalPath =
+    marker.operation === "move_file" ? (file.movePath as string) : undefined;
+  const expectedRelative = destinationCanonicalPath
+    ? shownPath(identity, destinationCanonicalPath)
+    : expectedSourceRelative;
   assertCounts(
     { patch: file.patch, additions: file.additions, deletions: file.deletions },
+    expectedSourceRelative,
+    marker.operation,
     expectedRelative,
   );
   if (
     marker.canonicalPathSha256 !== canonicalPathSha256(file.filePath) ||
-    file.relativePath !== expectedRelative
+    file.relativePath !== expectedRelative ||
+    (marker.operation === "move_file" &&
+      (destinationCanonicalPath === file.filePath ||
+        marker.destinationPathSha256 !== canonicalPathSha256(destinationCanonicalPath as string)))
   ) {
     rejectHistory("Completed historical apply_patch path metadata is inconsistent.");
   }
-  return file.filePath;
+  return {
+    canonicalPath: file.filePath,
+    operation: marker.operation,
+    ...(destinationCanonicalPath ? { destinationCanonicalPath } : {}),
+  };
 }
 
 function samePath(left: string, right: string): boolean {
-  return left === right;
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
 function validLineNumber(value: unknown, allowZero = false): boolean {
@@ -414,13 +547,58 @@ function assertOperation(value: unknown): void {
   ) {
     return;
   }
+  if (operation.op === "delete_file" && exactKeys(operation, ["op"])) {
+    return;
+  }
+  if (
+    operation.op === "move_file" &&
+    exactKeys(operation, ["destinationPath", "op"]) &&
+    typeof operation.destinationPath === "string" &&
+    operation.destinationPath.length > 0
+  ) {
+    return;
+  }
   rejectHistory("Completed historical alias operation is unreadable.");
+}
+
+function assertInputPath(
+  toolName: NativeAliasSurface,
+  requestedValue: string,
+  canonicalPath: string,
+  directory: string,
+  requireSurvivingParent: boolean,
+): void {
+  let pathMatches = false;
+  const requestedPath = resolve(directory, requestedValue);
+  try {
+    pathMatches = samePath(realpathSync(requestedPath), canonicalPath);
+  } catch {
+    if (!requireSurvivingParent && samePath(requestedPath, canonicalPath)) {
+      pathMatches = true;
+    } else {
+      try {
+        const canonicalParentPath = dirname(canonicalPath);
+        const resolvedCanonicalParent = realpathSync(canonicalParentPath);
+        if (samePath(resolvedCanonicalParent, canonicalParentPath)) {
+          const requestedParent = statSync(realpathSync(dirname(requestedPath)), { bigint: true });
+          const canonicalParent = statSync(resolvedCanonicalParent, { bigint: true });
+          pathMatches =
+            samePath(basename(requestedPath), basename(canonicalPath)) &&
+            requestedParent.dev === canonicalParent.dev &&
+            requestedParent.ino === canonicalParent.ino;
+        }
+      } catch {}
+    }
+  }
+  if (!pathMatches) {
+    rejectHistory(`Completed historical ${toolName} input path is inconsistent.`);
+  }
 }
 
 function assertAliasInput(
   toolName: NativeAliasSurface,
   inputValue: unknown,
-  canonicalPath?: string,
+  completed?: NativeAliasCompletedEvidence,
   directory?: string,
 ): Record<string, unknown> {
   const input = record(inputValue);
@@ -456,6 +634,25 @@ function assertAliasInput(
   if (replaceFile.length > 0 && (input.operations.length !== 1 || input.rebase === "unique")) {
     rejectHistory(`Completed historical ${toolName} input is unreadable.`);
   }
+  const lifecycle = input.operations.filter((operation) => {
+    const name = record(operation)?.op;
+    return name === "delete_file" || name === "move_file";
+  });
+  if (
+    lifecycle.length > 0 &&
+    (lifecycle.length !== 1 ||
+      input.operations.length !== 1 ||
+      input.rebase === "unique" ||
+      input.readback === true)
+  ) {
+    rejectHistory(`Completed historical ${toolName} input is unreadable.`);
+  }
+  const inputOperation: NativeAliasOperation =
+    lifecycle.length === 0 ? "update" : (record(lifecycle[0])?.op as NativeAliasOperation);
+  if (completed && completed.operation !== inputOperation) {
+    rejectHistory(`Completed historical ${toolName} input operation is inconsistent.`);
+  }
+
   let totalLines = 0;
   let totalBytes = 0;
   for (const operationValue of input.operations) {
@@ -467,26 +664,26 @@ function assertAliasInput(
   if (totalLines > 100_000 || totalBytes > 16 * 1024 * 1024) {
     rejectHistory(`Completed historical ${toolName} input is unreadable.`);
   }
-  if (directory && canonicalPath) {
-    let pathMatches = false;
-    const requestedPath = resolve(directory, input.filePath);
-    try {
-      pathMatches = samePath(realpathSync(requestedPath), canonicalPath);
-    } catch {
-      pathMatches = samePath(requestedPath, canonicalPath);
-      if (!pathMatches) {
-        try {
-          const requestedParent = statSync(realpathSync(dirname(requestedPath)), { bigint: true });
-          const canonicalParent = statSync(realpathSync(dirname(canonicalPath)), { bigint: true });
-          pathMatches =
-            basename(requestedPath) === basename(canonicalPath) &&
-            requestedParent.dev === canonicalParent.dev &&
-            requestedParent.ino === canonicalParent.ino;
-        } catch {}
+  if (directory && completed) {
+    assertInputPath(
+      toolName,
+      input.filePath,
+      completed.canonicalPath,
+      directory,
+      completed.operation !== "update",
+    );
+    if (completed.operation === "move_file") {
+      const operation = record(input.operations[0]);
+      if (typeof operation?.destinationPath !== "string" || !completed.destinationCanonicalPath) {
+        rejectHistory(`Completed historical ${toolName} input is unreadable.`);
       }
-    }
-    if (!pathMatches) {
-      rejectHistory(`Completed historical ${toolName} input path is inconsistent.`);
+      assertInputPath(
+        toolName,
+        operation.destinationPath,
+        completed.destinationCanonicalPath,
+        directory,
+        true,
+      );
     }
   }
   return input;
@@ -495,10 +692,10 @@ function assertAliasInput(
 function assertCompletedInput(
   toolName: NativeAliasSurface,
   inputValue: unknown,
-  canonicalPath: string,
+  completed: NativeAliasCompletedEvidence,
   directory: string | undefined,
 ): void {
-  assertAliasInput(toolName, inputValue, canonicalPath, directory);
+  assertAliasInput(toolName, inputValue, completed, directory);
 }
 
 function isKnownNativeShapeRejection(toolName: NativeAliasSurface, state: Record<string, unknown>) {
@@ -678,11 +875,12 @@ function inspectHistory(
   messagesValue: unknown,
   identity: NativeAliasProtocolIdentity,
   options: HistoryOptions,
-): void {
+): NativeAliasCompletedEvidence[] {
   assertHistoryBounds(messagesValue);
   const inspectedMessages: Record<string, unknown>[] = [];
   let partCount = 0;
   let currentMatches = 0;
+  const completedAliases: NativeAliasCompletedEvidence[] = [];
   const currentInput =
     options.currentCall?.input === undefined ? undefined : canonicalJson(options.currentCall.input);
   const messageIds = new Set<string>();
@@ -696,7 +894,7 @@ function inspectHistory(
     }
     partCount += message.parts.length;
     if (partCount > SESSION_HISTORY_MAX_PARTS) {
-      rejectHistory("OpenCode session history exceeds the bounded inspection limit.");
+      rejectOversizedHistory();
     }
     if (
       options.sessionId &&
@@ -794,16 +992,26 @@ function inspectHistory(
           `Historical ${String(part.tool)} has an ambiguous execution state.${correlation}`,
         );
       }
-      const canonicalPath = assertCompletedMetadata(part.tool, state.metadata, identity);
-      if (options.directory) {
-        assertCompletedInput(part.tool, state.input, canonicalPath, options.directory);
+      const completed = assertCompletedMetadata(part.tool, state.metadata, identity);
+      if (options.directory || completed.operation !== "update") {
+        assertCompletedInput(part.tool, state.input, completed, options.directory);
       }
+      completedAliases.push(completed);
     }
     inspectedMessages.push({ ...message, parts: inspectedParts });
   }
   if (options.currentCall && currentMatches !== 1) {
     rejectHistory("The current alias call is missing from session history.");
   }
+  return completedAliases;
+}
+
+export function inspectNativeAliasHistory(
+  messagesValue: unknown,
+  identity: NativeAliasProtocolIdentity,
+  options: HistoryOptions = {},
+): NativeAliasCompletedEvidence[] {
+  return inspectHistory(messagesValue, identity, options);
 }
 
 export function assertNativeAliasHistory(

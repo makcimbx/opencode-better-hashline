@@ -26,6 +26,7 @@ export interface VerificationCaseReport {
   finalBytesSha256: string;
   providerRequests: number;
   malformedRejected: true;
+  fileOperationsVerified: true;
   continuationVerified: true;
   forkVerified: true;
   exportVerified: true;
@@ -49,6 +50,7 @@ export interface VerificationReport {
   hostVersion: string;
   protocol: typeof NATIVE_ALIAS_PROTOCOL;
   rollbackVerified: boolean;
+  fileOperationsVerified: boolean;
   modelRoutingVerified: boolean;
   editPermissionMatrixVerified: boolean;
   benchmarkOracleVerified: boolean;
@@ -71,10 +73,498 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
   return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 }
 
+const LIFECYCLE_DELETE_PATH = "lifecycle-delete.txt";
+const LIFECYCLE_MOVE_PATH = "lifecycle-move.txt";
+const LIFECYCLE_MOVED_PATH = "lifecycle-moved.txt";
+const LIFECYCLE_NO_CLOBBER_PATH = "lifecycle-no-clobber.txt";
+const LIFECYCLE_OCCUPIED_PATH = "lifecycle-occupied.txt";
+const PROBE_PATH = "probe.txt";
+const PRIVATE_CANARY = "BH_PRIVATE_CANARY_8f149f0a";
+const INITIAL_BYTES = "alpha\nbeta\ngamma\n";
+const LIFECYCLE_DELETE_BYTES = "delete exact bytes\n";
+const LIFECYCLE_MOVE_BYTES = "move exact bytes\n";
+const LIFECYCLE_NO_CLOBBER_BYTES = "source remains exact\n";
+const PATCH_SEPARATOR = "===================================================================";
+const EDIT_RECEIPT = "@hashline-edit previous=consumed successor=none next=hashline_read";
+
+type EvidenceOperation = "delete_file" | "move_file" | "update";
+
+interface OperationEvidence {
+  operation: EvidenceOperation;
+  sourcePath: string;
+  destinationPath: string;
+  patch: string;
+  additions: number;
+  deletions: number;
+}
+
+function fixturePath(path: string): string {
+  return `<fixture>/${path}`;
+}
+
+function patchHeader(
+  sourcePath: string,
+  destinationPath: string,
+  operation: EvidenceOperation,
+): string {
+  return `${operation === "move_file" ? "" : `Index: ${sourcePath}\n`}${PATCH_SEPARATOR}\n--- ${sourcePath}\tbefore\n+++ ${destinationPath}\tafter\n`;
+}
+
+function deletePatch(path: string, bytes: string): string {
+  const header = patchHeader(path, path, "delete_file");
+  if (bytes.length === 0) return header;
+  const lines = bytes.endsWith("\n") ? bytes.slice(0, -1).split("\n") : bytes.split("\n");
+  return `${header}@@ -1,${lines.length} +0,0 @@\n${lines.map((line) => `-${line}`).join("\n")}\n`;
+}
+
+const OPERATION_EVIDENCE: Record<EvidenceOperation, OperationEvidence> = {
+  delete_file: {
+    operation: "delete_file",
+    sourcePath: fixturePath(LIFECYCLE_DELETE_PATH),
+    destinationPath: fixturePath(LIFECYCLE_DELETE_PATH),
+    patch: deletePatch(fixturePath(LIFECYCLE_DELETE_PATH), LIFECYCLE_DELETE_BYTES),
+    additions: 0,
+    deletions: 1,
+  },
+  move_file: {
+    operation: "move_file",
+    sourcePath: fixturePath(LIFECYCLE_MOVE_PATH),
+    destinationPath: fixturePath(LIFECYCLE_MOVED_PATH),
+    patch: patchHeader(
+      fixturePath(LIFECYCLE_MOVE_PATH),
+      fixturePath(LIFECYCLE_MOVED_PATH),
+      "move_file",
+    ),
+    additions: 0,
+    deletions: 0,
+  },
+  update: {
+    operation: "update",
+    sourcePath: fixturePath(PROBE_PATH),
+    destinationPath: fixturePath(PROBE_PATH),
+    patch: `${patchHeader(fixturePath(PROBE_PATH), fixturePath(PROBE_PATH), "update")}@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n`,
+    additions: 1,
+    deletions: 1,
+  },
+};
+
+function sameJson(value: unknown, expected: unknown): boolean {
+  return canonicalJson(value) === canonicalJson(expected);
+}
+
+function parseUnifiedDiff(
+  patch: string,
+  expected: OperationEvidence,
+): { additions: number; deletions: number; hunks: number } | undefined {
+  const lines = patch.split("\n");
+  let index = 0;
+  if (expected.operation === "move_file") {
+    if (lines[0] !== PATCH_SEPARATOR) return undefined;
+    index = 1;
+  } else {
+    if (lines[0] !== `Index: ${expected.sourcePath}` || lines[1] !== PATCH_SEPARATOR) {
+      return undefined;
+    }
+    index = 2;
+  }
+  if (
+    lines[index] !== `--- ${expected.sourcePath}\tbefore` ||
+    lines[index + 1] !== `+++ ${expected.destinationPath}\tafter`
+  ) {
+    return undefined;
+  }
+  index += 2;
+
+  let additions = 0;
+  let deletions = 0;
+  let hunks = 0;
+  let previousOldEnd = 0;
+  let previousNewEnd = 0;
+  while (index < lines.length && lines[index] !== "") {
+    const header = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$/u.exec(lines[index] ?? "");
+    if (!header) return undefined;
+    hunks += 1;
+    const oldStart = Number(header[1]);
+    const oldExpected = header[2] === undefined ? 1 : Number(header[2]);
+    const newStart = Number(header[3]);
+    const newExpected = header[4] === undefined ? 1 : Number(header[4]);
+    if (
+      !Number.isSafeInteger(oldStart) ||
+      !Number.isSafeInteger(oldExpected) ||
+      !Number.isSafeInteger(newStart) ||
+      !Number.isSafeInteger(newExpected) ||
+      oldExpected < 0 ||
+      newExpected < 0 ||
+      (oldExpected === 0 ? oldStart < 0 : oldStart < 1) ||
+      (newExpected === 0 ? newStart < 0 : newStart < 1) ||
+      oldStart < previousOldEnd ||
+      newStart < previousNewEnd ||
+      (expected.operation === "delete_file" &&
+        (hunks !== 1 || oldStart !== 1 || oldExpected < 1 || newStart !== 0 || newExpected !== 0))
+    ) {
+      return undefined;
+    }
+    previousOldEnd = oldStart + oldExpected;
+    previousNewEnd = newStart + newExpected;
+
+    let oldCount = 0;
+    let newCount = 0;
+    let newlineMarkerAllowed = false;
+    index += 1;
+    while (index < lines.length) {
+      const line = lines[index] ?? "";
+      if (line.startsWith("@@ ") || line === "") break;
+      if (line === "\\ No newline at end of file") {
+        if (!newlineMarkerAllowed) return undefined;
+        newlineMarkerAllowed = false;
+        index += 1;
+        continue;
+      }
+      if (line.startsWith(" ")) {
+        oldCount += 1;
+        newCount += 1;
+      } else if (line.startsWith("-")) {
+        oldCount += 1;
+        deletions += 1;
+      } else if (line.startsWith("+")) {
+        newCount += 1;
+        additions += 1;
+      } else {
+        return undefined;
+      }
+      newlineMarkerAllowed = true;
+      index += 1;
+    }
+    if (oldCount !== oldExpected || newCount !== newExpected) return undefined;
+  }
+
+  const validHunks =
+    expected.operation === "update"
+      ? hunks > 0
+      : expected.operation === "delete_file"
+        ? hunks === 0 || (hunks === 1 && additions === 0 && deletions > 0)
+        : hunks === 0;
+  if (!validHunks || index !== lines.length - 1) return undefined;
+  return { additions, deletions, hunks };
+}
+
+function isExpectedPatch(value: unknown, expected: OperationEvidence): value is string {
+  if (typeof value !== "string" || value !== expected.patch) return false;
+  const parsed = parseUnifiedDiff(value, expected);
+  return parsed?.additions === expected.additions && parsed.deletions === expected.deletions;
+}
+
+function expectedReadOutput(bytes: string): string {
+  const lines = bytes.length === 0 ? [] : bytes.replace(/\n$/u, "").split("\n");
+  return [
+    `@hashline snapshot=<snapshot> sha256=${sha256(bytes).slice(0, 12)} lines=${lines.length}`,
+    ...lines.map((line, index) => `${index + 1}|${line}`),
+    "@eof",
+  ].join("\n");
+}
+
+function isCompleteRead(value: unknown, path: string, bytes: string, limit?: number): boolean {
+  const state = record(value);
+  const input = record(state?.input);
+  const metadata = record(state?.metadata);
+  const inputKeys = limit === undefined ? ["filePath"] : ["filePath", "limit"];
+  const displayedLines = bytes.length === 0 ? 0 : bytes.replace(/\n$/u, "").split("\n").length;
+  return (
+    state !== undefined &&
+    hasExactKeys(state, ["input", "metadata", "output", "status"]) &&
+    state.status === "completed" &&
+    input !== undefined &&
+    hasExactKeys(input, inputKeys) &&
+    input.filePath === path &&
+    (limit === undefined ? !("limit" in input) : input.limit === limit) &&
+    metadata !== undefined &&
+    hasExactKeys(metadata, ["displayedLines", "snapshotId", "truncated"]) &&
+    metadata.displayedLines === displayedLines &&
+    metadata.snapshotId === "<snapshot>" &&
+    metadata.truncated === false &&
+    state.output === expectedReadOutput(bytes)
+  );
+}
+
+function isFileOperationInput(
+  value: unknown,
+  sourcePath: string,
+  operation: "delete_file" | "move_file",
+  destinationPath?: string,
+): boolean {
+  return sameJson(value, {
+    filePath: sourcePath,
+    operations: [
+      operation === "delete_file" ? { op: operation } : { destinationPath, op: operation },
+    ],
+    snapshotId: "<snapshot>",
+  });
+}
+
+function isNativeMarker(
+  value: unknown,
+  editTool: "edit" | "apply_patch",
+  expected: OperationEvidence,
+  expectedPackageVersion: string,
+  expectedHostVersion: string,
+  schemaSha256: string,
+): boolean {
+  const marker = record(value);
+  const markerKeys = [
+    "canonicalPathSha256",
+    "hostVersion",
+    "operation",
+    "packageVersion",
+    "protocol",
+    "schemaSha256",
+    "surface",
+    ...(expected.operation === "move_file" ? ["destinationPathSha256"] : []),
+  ];
+  return (
+    marker !== undefined &&
+    hasExactKeys(marker, markerKeys) &&
+    marker.protocol === NATIVE_ALIAS_PROTOCOL &&
+    marker.packageVersion === expectedPackageVersion &&
+    marker.hostVersion === expectedHostVersion &&
+    marker.schemaSha256 === schemaSha256 &&
+    marker.surface === editTool &&
+    marker.operation === expected.operation &&
+    marker.canonicalPathSha256 === sha256(expected.sourcePath) &&
+    (expected.operation === "move_file"
+      ? marker.destinationPathSha256 === sha256(expected.destinationPath)
+      : !("destinationPathSha256" in marker))
+  );
+}
+
+function isNativeMetadata(
+  value: unknown,
+  editTool: "edit" | "apply_patch",
+  expected: OperationEvidence,
+  expectedPackageVersion: string,
+  expectedHostVersion: string,
+  schemaSha256: string,
+): boolean {
+  const metadata = record(value);
+  const diagnostics = record(metadata?.diagnostics);
+  if (
+    !metadata ||
+    !diagnostics ||
+    !hasExactKeys(diagnostics, []) ||
+    metadata.truncated !== false ||
+    !isNativeMarker(
+      metadata.betterHashline,
+      editTool,
+      expected,
+      expectedPackageVersion,
+      expectedHostVersion,
+      schemaSha256,
+    )
+  ) {
+    return false;
+  }
+
+  if (editTool === "apply_patch") {
+    if (!hasExactKeys(metadata, ["betterHashline", "diagnostics", "files", "truncated"])) {
+      return false;
+    }
+    const files = Array.isArray(metadata.files) ? metadata.files : [];
+    const file = record(files[0]);
+    const moving = expected.operation === "move_file";
+    return (
+      files.length === 1 &&
+      file !== undefined &&
+      hasExactKeys(file, [
+        "additions",
+        "deletions",
+        "filePath",
+        ...(moving ? ["movePath"] : []),
+        "patch",
+        "relativePath",
+        "type",
+      ]) &&
+      file.additions === expected.additions &&
+      file.deletions === expected.deletions &&
+      file.filePath === expected.sourcePath &&
+      file.relativePath === (moving ? expected.destinationPath : expected.sourcePath) &&
+      file.type ===
+        (expected.operation === "delete_file"
+          ? "delete"
+          : expected.operation === "move_file"
+            ? "move"
+            : "update") &&
+      (moving ? file.movePath === expected.destinationPath : !("movePath" in file)) &&
+      isExpectedPatch(file.patch, expected)
+    );
+  }
+
+  if (!hasExactKeys(metadata, ["betterHashline", "diagnostics", "diff", "filediff", "truncated"])) {
+    return false;
+  }
+  const filediff = record(metadata.filediff);
+  return (
+    filediff !== undefined &&
+    hasExactKeys(filediff, ["additions", "deletions", "file", "patch"]) &&
+    filediff.additions === expected.additions &&
+    filediff.deletions === expected.deletions &&
+    filediff.file === expected.sourcePath &&
+    filediff.patch === metadata.diff &&
+    isExpectedPatch(metadata.diff, expected)
+  );
+}
+
+function isEditMetadata(
+  value: unknown,
+  route: VerificationCaseReport["route"],
+  editTool: VerificationCaseReport["editTool"],
+  expected: OperationEvidence,
+  expectedPackageVersion: string,
+  expectedHostVersion: string,
+  schemaSha256: string,
+): boolean {
+  const metadata = record(value);
+  if (!metadata) return false;
+  if (route === "hashline") {
+    if (expected.operation === "update") {
+      return (
+        hasExactKeys(metadata, ["diff", "operationCount", "rebased", "truncated"]) &&
+        metadata.operationCount === 1 &&
+        metadata.rebased === false &&
+        metadata.truncated === false &&
+        isExpectedPatch(metadata.diff, expected)
+      );
+    }
+    return (
+      hasExactKeys(metadata, [
+        ...(expected.operation === "move_file" ? ["destinationPath"] : []),
+        "diff",
+        "operation",
+        "truncated",
+      ]) &&
+      metadata.operation === expected.operation &&
+      metadata.truncated === false &&
+      isExpectedPatch(metadata.diff, expected) &&
+      (expected.operation === "move_file"
+        ? metadata.destinationPath === expected.destinationPath
+        : !("destinationPath" in metadata))
+    );
+  }
+  return isNativeMetadata(
+    value,
+    editTool as "edit" | "apply_patch",
+    expected,
+    expectedPackageVersion,
+    expectedHostVersion,
+    schemaSha256,
+  );
+}
+
+function isMalformedState(value: unknown, editTool: VerificationCaseReport["editTool"]): boolean {
+  const state = record(value);
+  const input =
+    editTool === "apply_patch"
+      ? {
+          patchText: `*** Begin Patch\n*** Update File: malformed.txt\n@@\n-${PRIVATE_CANARY}\n+changed\n*** End Patch`,
+        }
+      : { filePath: "malformed.txt", newString: "changed", oldString: PRIVATE_CANARY };
+  return (
+    state !== undefined &&
+    hasExactKeys(state, ["error", "input", "status"]) &&
+    state.status === "error" &&
+    state.error === `INVALID_ARGUMENT: Invalid ${editTool} arguments.` &&
+    sameJson(state.input, input)
+  );
+}
+
+function isFileOperationState(
+  value: unknown,
+  route: VerificationCaseReport["route"],
+  editTool: VerificationCaseReport["editTool"],
+  expected: OperationEvidence,
+  expectedPackageVersion: string,
+  expectedHostVersion: string,
+  schemaSha256: string,
+): boolean {
+  if (expected.operation === "update") return false;
+  const state = record(value);
+  const sourcePath =
+    expected.operation === "delete_file" ? LIFECYCLE_DELETE_PATH : LIFECYCLE_MOVE_PATH;
+  const destinationPath = expected.operation === "move_file" ? LIFECYCLE_MOVED_PATH : undefined;
+  const output =
+    expected.operation === "delete_file"
+      ? `Deleted ${expected.sourcePath}.\n${EDIT_RECEIPT}`
+      : `Moved ${expected.sourcePath} to ${expected.destinationPath}.\n${EDIT_RECEIPT}`;
+  return (
+    state !== undefined &&
+    hasExactKeys(state, ["input", "metadata", "output", "status"]) &&
+    state.status === "completed" &&
+    isFileOperationInput(state.input, sourcePath, expected.operation, destinationPath) &&
+    state.output === output &&
+    isEditMetadata(
+      state.metadata,
+      route,
+      editTool,
+      expected,
+      expectedPackageVersion,
+      expectedHostVersion,
+      schemaSha256,
+    )
+  );
+}
+
+function isNoClobberState(value: unknown): boolean {
+  const state = record(value);
+  return (
+    state !== undefined &&
+    hasExactKeys(state, ["error", "input", "status"]) &&
+    state.status === "error" &&
+    state.error === "TARGET_EXISTS: The target already exists." &&
+    isFileOperationInput(
+      state.input,
+      LIFECYCLE_NO_CLOBBER_PATH,
+      "move_file",
+      LIFECYCLE_OCCUPIED_PATH,
+    )
+  );
+}
+
+function isFinalEditState(
+  value: unknown,
+  route: VerificationCaseReport["route"],
+  editTool: VerificationCaseReport["editTool"],
+  expectedPackageVersion: string,
+  expectedHostVersion: string,
+  schemaSha256: string,
+): boolean {
+  const state = record(value);
+  return (
+    state !== undefined &&
+    hasExactKeys(state, ["input", "metadata", "output", "status"]) &&
+    state.status === "completed" &&
+    sameJson(state.input, {
+      filePath: PROBE_PATH,
+      operations: [{ endLine: 2, lines: ["BETA"], op: "replace", startLine: 2 }],
+      snapshotId: "<snapshot>",
+    }) &&
+    state.output === `Applied 1 operation.\n${EDIT_RECEIPT}` &&
+    isEditMetadata(
+      state.metadata,
+      route,
+      editTool,
+      OPERATION_EVIDENCE.update,
+      expectedPackageVersion,
+      expectedHostVersion,
+      schemaSha256,
+    )
+  );
+}
+
 function isVerificationMetadataSnapshot(
   value: unknown,
   route: VerificationCaseReport["route"],
   editTool: VerificationCaseReport["editTool"],
+  expectedPackageVersion: string,
+  expectedHostVersion: string,
+  schemaSha256: string,
 ): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > 8_192) return false;
   let parsed: unknown;
@@ -83,11 +573,31 @@ function isVerificationMetadataSnapshot(
   } catch {
     return false;
   }
-  if (!Array.isArray(parsed) || parsed.length !== 3 || canonicalJson(parsed) !== value)
+  if (!Array.isArray(parsed) || parsed.length !== 9 || canonicalJson(parsed) !== value)
     return false;
-  const tools = [editTool, "hashline_read", editTool];
-  const statuses = ["error", "completed", "completed"];
-  return parsed.every((item, index) => {
+  const tools = [
+    editTool,
+    "hashline_read",
+    editTool,
+    "hashline_read",
+    editTool,
+    "hashline_read",
+    editTool,
+    "hashline_read",
+    editTool,
+  ];
+  const statuses = [
+    "error",
+    "completed",
+    "completed",
+    "completed",
+    "completed",
+    "completed",
+    "error",
+    "completed",
+    "completed",
+  ];
+  const validEnvelope = parsed.every((item, index) => {
     const event = record(item);
     const state = record(event?.state);
     return (
@@ -96,15 +606,54 @@ function isVerificationMetadataSnapshot(
       hasExactKeys(event, ["state", "tool", "type"]) &&
       event.type === "tool_use" &&
       event.tool === tools[index] &&
-      state.status === statuses[index] &&
-      record(state.input) !== undefined &&
-      (index === 0 || (typeof state.output === "string" && record(state.metadata) !== undefined)) &&
-      (index !== 2 ||
-        (route === "hashline"
-          ? record(state.metadata)?.operationCount === 1
-          : record(record(state.metadata)?.betterHashline)?.surface === editTool))
+      state.status === statuses[index]
     );
   });
+  if (!validEnvelope) return false;
+
+  const malformedState = record(record(parsed[0])?.state);
+  const deleteReadState = record(record(parsed[1])?.state);
+  const deleteState = record(record(parsed[2])?.state);
+  const moveReadState = record(record(parsed[3])?.state);
+  const moveState = record(record(parsed[4])?.state);
+  const noClobberReadState = record(record(parsed[5])?.state);
+  const noClobberState = record(record(parsed[6])?.state);
+  const probeReadState = record(record(parsed[7])?.state);
+  const editState = record(record(parsed[8])?.state);
+  return (
+    isMalformedState(malformedState, editTool) &&
+    isCompleteRead(deleteReadState, LIFECYCLE_DELETE_PATH, LIFECYCLE_DELETE_BYTES) &&
+    isFileOperationState(
+      deleteState,
+      route,
+      editTool,
+      OPERATION_EVIDENCE.delete_file,
+      expectedPackageVersion,
+      expectedHostVersion,
+      schemaSha256,
+    ) &&
+    isCompleteRead(moveReadState, LIFECYCLE_MOVE_PATH, LIFECYCLE_MOVE_BYTES) &&
+    isFileOperationState(
+      moveState,
+      route,
+      editTool,
+      OPERATION_EVIDENCE.move_file,
+      expectedPackageVersion,
+      expectedHostVersion,
+      schemaSha256,
+    ) &&
+    isCompleteRead(noClobberReadState, LIFECYCLE_NO_CLOBBER_PATH, LIFECYCLE_NO_CLOBBER_BYTES) &&
+    isNoClobberState(noClobberState) &&
+    isCompleteRead(probeReadState, PROBE_PATH, INITIAL_BYTES, 3) &&
+    isFinalEditState(
+      editState,
+      route,
+      editTool,
+      expectedPackageVersion,
+      expectedHostVersion,
+      schemaSha256,
+    )
+  );
 }
 
 export function assertFullVerificationReport(
@@ -119,7 +668,7 @@ export function assertFullVerificationReport(
       route: "native-edit",
       model: "scripted/scripted",
       editTool: "edit",
-      providerRequests: 24,
+      providerRequests: 32,
       modelRoutingVerified: true,
       editPermissionMatrixVerified: true,
       retryProviderRequests: 1,
@@ -128,7 +677,7 @@ export function assertFullVerificationReport(
       route: "native-apply-patch",
       model: "scripted/gpt-5-scripted",
       editTool: "apply_patch",
-      providerRequests: 21,
+      providerRequests: 29,
       modelRoutingVerified: false,
       editPermissionMatrixVerified: true,
       retryProviderRequests: 0,
@@ -137,7 +686,7 @@ export function assertFullVerificationReport(
       route: "hashline",
       model: "scripted/scripted",
       editTool: "hashline_edit",
-      providerRequests: 17,
+      providerRequests: 25,
       modelRoutingVerified: false,
       editPermissionMatrixVerified: false,
       retryProviderRequests: 0,
@@ -149,6 +698,7 @@ export function assertFullVerificationReport(
       "benchmarkOracleVerified",
       "cases",
       "editPermissionMatrixVerified",
+      "fileOperationsVerified",
       "hostVersion",
       "modelRoutingVerified",
       "ok",
@@ -163,6 +713,7 @@ export function assertFullVerificationReport(
     report.hostVersion !== expectedHostVersion ||
     report.protocol !== NATIVE_ALIAS_PROTOCOL ||
     report.rollbackVerified !== true ||
+    report.fileOperationsVerified !== true ||
     report.modelRoutingVerified !== true ||
     report.editPermissionMatrixVerified !== true ||
     report.benchmarkOracleVerified !== true ||
@@ -191,6 +742,7 @@ export function assertFullVerificationReport(
         "editPermissionMatrixVerified",
         "editTool",
         "exportVerified",
+        "fileOperationsVerified",
         "finalBytesSha256",
         "forkVerified",
         "malformedRejected",
@@ -220,6 +772,7 @@ export function assertFullVerificationReport(
       verificationCase.schemaSha256 !== schemaSha256 ||
       verificationCase.finalBytesSha256 !== finalBytesSha256 ||
       verificationCase.malformedRejected !== true ||
+      verificationCase.fileOperationsVerified !== true ||
       verificationCase.continuationVerified !== true ||
       verificationCase.forkVerified !== true ||
       verificationCase.exportVerified !== true ||
@@ -236,6 +789,9 @@ export function assertFullVerificationReport(
         verificationCase.metadataSnapshot,
         expected.route,
         expected.editTool,
+        expectedPackageVersion,
+        expectedHostVersion,
+        schemaSha256,
       ) ||
       sha256(verificationCase.metadataSnapshot) !== verificationCase.metadataSnapshotSha256 ||
       typeof verificationCase.rendererSnapshot !== "string" ||
