@@ -12,9 +12,9 @@ Better Hashline separates mechanical protocol evidence from model-quality eviden
 | Core microbenchmarks | Manual | No | Named-machine latency distribution |
 | Paired model-in-the-loop | Opt-in only | No | Model/task-specific editing outcomes |
 
-## Recorded Deterministic Run
+## Retained Deterministic Run
 
-Latest raw result: [`benchmarks/results/2026-07-22-file-lifecycle-windows-x64.json`](../benchmarks/results/2026-07-22-file-lifecycle-windows-x64.json)
+Latest retained raw result: [`benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json`](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json)
 
 The 15-scenario and 21-scenario results remain available as immutable historical evidence in
 [`2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json) and
@@ -24,13 +24,15 @@ schema-v5 record adds transfer safety, provider-schema, call-payload, and move-c
 without rewriting either earlier result.
 
 The schema-v5 evidence is frozen. It predates `delete_file`, `move_file`, `file-ops-v1`, and
-`native-aliases/v2`; it must not be relabeled as lifecycle-operation evidence. The current
-schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtures. It is mechanical
-fixture evidence, not paid model-quality evidence.
+`native-aliases/v2`; it must not be relabeled as lifecycle-operation evidence. The immutable
+[`2026-07-22-file-lifecycle-windows-x64.json`](../benchmarks/results/2026-07-22-file-lifecycle-windows-x64.json)
+schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtures. The current
+schema-v7 record adds the composed-move case and edit/write/readback/parent-create wire fixtures.
+Both are mechanical fixture evidence, not paid model-quality evidence.
 
 Environment: Windows x64, Bun 1.3.14, AMD64 Family 25 Model 97. Five microbenchmark warmups; 100 measured runs below 10,000 lines and 30 runs at or above it.
 
-The adversarial corpus contains 28 generated cases spanning the previous exact, stale, ambiguous,
+The schema-v6 adversarial corpus contains 28 generated cases spanning the previous exact, stale, ambiguous,
 boundary, overlap, encoding, and collision cases plus exact copy/move, independently relocated copy
 anchors, an intact relocated move corridor, changed transfer sources/corridors, and a copy-read versus
 replace-write conflict.
@@ -45,6 +47,27 @@ replace-write conflict.
 | 16-bit endpoint hashes | 6 | 13 | 4 | 5 |
 
 The expected outcomes encode this project's conservative relocation contract. This is useful for finding violations of that contract, not ranking arbitrary production tools. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The row does not establish an advantage for line-number addressing.
+
+## Schema-v7 Retained Result
+
+The current deterministic runner emits schema v7. It keeps the generated, seed-free, model-free
+classification methodology and adds one allowed move-with-intervening-replacements case to the
+adversarial corpus. It also measures the expanded edit/write schemas and compact readback and parent
+creation calls. Current classifications are:
+
+| Adapter | Exact applies | Safe rejects | False rejects | Unsafe accepts |
+| --- | ---: | ---: | ---: | ---: |
+| Better Hashline strict | 6 | 18 | 5 | 0 |
+| Better Hashline unique | 11 | 18 | 0 | 0 |
+| Target-only exact search/replace | 10 | 13 | 1 | 5 |
+| Original line numbers | 7 | 1 | 0 | 21 |
+| 8-bit endpoint hashes | 7 | 12 | 4 | 6 |
+| 16-bit endpoint hashes | 7 | 13 | 4 | 5 |
+
+These values are retained in
+[`2026-07-22-edit-protocol-ux-windows-x64.json`](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json).
+The schema-v6 lifecycle record and schema-v5 records remain immutable, as does the closed pilot-v7
+scope. This output makes no paid or model-quality claim.
 
 ## Static Size
 
@@ -104,7 +127,7 @@ different read-economics and should be evaluated independently.
 
 ## File Lifecycle Wire Size
 
-The schema-v6 runner compares the current flat description and provider schema with its
+The retained schema-v6 runner compared its then-current flat description and provider schema with its
 pre-transfer/lifecycle baseline:
 
 | Fixture | Baseline bytes | Current bytes | Change |
@@ -123,6 +146,23 @@ The Better Hashline calls include source path, snapshot, and strict rebase evide
 fixture contains patch text only, so the delta is not a semantic-equivalence or protocol-advantage
 claim. The retained schema-v6 JSON records these values without expanding their claim scope.
 
+## Schema-v7 Retained Wire Size
+
+The retained schema-v7 result records the following exact compact UTF-8 fixture sizes:
+
+| Fixture | Baseline bytes | Current bytes | Change |
+| --- | ---: | ---: | ---: |
+| `hashline_edit` schema | 3,686 | 5,033 | +1,347 (+36.54%) |
+| `hashline_write` schema | 282 | 548 | +266 (+94.33%) |
+| Explicit text readback call | 181 | 218 | +37 |
+| Parent-creating write call | 50 | 81 | +31 |
+
+The edit schema delta covers deterministic conflict evidence, one qualified move/replacement
+composition, and text readback windows. The write schema delta covers explicit bounded parent
+creation. The calls isolate `readbackOffset`/`readbackLimit` and `createParents:true`; they do not
+measure tokens or model behavior. Static-size, long-line rendering, lifecycle-call, transfer-call,
+move-corridor, and timing methodology are unchanged from the earlier retained evidence.
+
 ## Core Timings
 
 The raw result contains median and p95 timings for SHA-256, strict UTF-8 decoding, and one-line edit planning from 10 through 20,000 lines. These are non-gating wall-clock measurements from one named machine. They do not establish cross-platform performance and should be rerun after material protocol changes.
@@ -136,11 +176,13 @@ bun run bench
 bun run bench --output=benchmarks/results/local/my-run.json
 ```
 
-The runner prints summary tables and optionally writes the complete corpus, classifications,
-environment, static/rendering sizes, provider-schema, lifecycle-call, transfer-call, corridor-read
-evidence, and microbenchmark distributions.
+The schema-v7 runner prints summary tables and optionally writes the complete corpus,
+classifications, environment, static/rendering sizes, edit/write-schema, lifecycle/readback/parent-
+creation call, transfer-call, corridor-read evidence, and microbenchmark distributions.
 
-Result paths are write-once by default. Use `--force` only when deliberately regenerating an unpublished checked result from its final source revision.
+Result paths are write-once by default. Use `--force` only when deliberately regenerating an
+unpublished checked result from its final source revision. Never overwrite the retained schema-v7
+record; use a new dated path for a changed runner or protocol.
 
 ## Model Harness
 
@@ -273,6 +315,7 @@ claims only:
 - outcomes on the checked-in deterministic corpus.
 
 It does not claim lifecycle-operation model accuracy from schema-v5 or pilot-v7, and it makes no paid
-model claim for `file-ops-v1` or `native-aliases-v2`. More generally, it does not claim universal
+model claim for `file-ops-v1` or `native-aliases-v2`. Schema-v7 development output is likewise not a
+retained or model-quality result. More generally, it does not claim universal
 model accuracy, token savings, lower cost, semantic conflict detection, filesystem CAS,
 transactionality, or superiority over OpenCode's actual current tools.

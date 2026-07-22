@@ -104,6 +104,8 @@ Tool: `hashline_edit`, or `edit`/`apply_patch` on the explicit native-alias surf
   "snapshotId": "s_J7yi7wDyv3j9xQ2zP5kL8A",
   "rebase": "none",
   "readback": true,
+  "readbackOffset": 4,
+  "readbackLimit": 100,
   "operations": [
     { "op": "replace", "startLine": 4, "endLine": 6, "lines": ["replacement"] },
     { "op": "insert", "afterLine": 9, "lines": ["inserted"] }
@@ -130,6 +132,9 @@ runtime validation accepts only these exact combinations and rejects every unlis
 
 At the top level, the source remains `filePath` plus `snapshotId`; `destinationPath` belongs only to
 the sole `move_file` operation. `rebase` is optional and defaults to `"none"`.
+`readbackOffset` is an optional one-based post-edit text line and `readbackLimit` is an optional
+integer from 1 through 1,000. Both require `readback:true`; neither is valid for a lifecycle
+operation. The offset defaults to the first new-file hunk line and the limit defaults to 1,000.
 `allowHashlinePrefixes` is optional and defaults to `false`. Before any path lookup or permission,
 the executor rejects literal `replace`, `insert`, and `replace_file` lines beginning in column zero
 with a positive non-zero decimal annotation (`17|` or `17!|`) or the exact markers `@hashline`,
@@ -146,8 +151,9 @@ binding; after restart, continuation requires that exact unsanitized result. Tex
 never makes a rejected native-looking call compatible.
 
 `readback` is optional and defaults to `false` for text edits. Use it for structural verification or
-a dependent follow-up edit; the attached page begins with unified-diff context near the first
-changed hunk. File lifecycle operations reject `readback: true` and never attach a successor. A
+a dependent follow-up edit. It renders exactly one contiguous successor page using the explicit
+offset/limit or the first-hunk/1,000-line defaults. File lifecycle operations reject
+`readback:true`, `readbackOffset`, and `readbackLimit`, and never attach a successor. A
 successful text edit begins with `Applied N operations.`; lifecycle success begins with `Deleted
 <source>.` or `Moved <source> to <destination>.`. Every successful mutation then includes one
 snapshot lifecycle receipt:
@@ -159,15 +165,18 @@ snapshot lifecycle receipt:
 ```
 
 `none` means no successor was requested or the operation does not support one. `attached` is
-immediately followed by a bounded page from a new snapshot near the first changed hunk. The old
-snapshot remains invalid, and successor refs become editable only after the same output-digest,
-marker, and truncation checks used by `hashline_read`. If those checks fail, the write remains
-successful but the after-hook replaces the result with `unavailable`.
+immediately followed by the one bounded page from a new snapshot. The old snapshot remains invalid,
+and only refs in that delivered page become editable after the same output-digest, marker, and
+truncation checks used by `hashline_read`. The protocol never returns a successor snapshot ID
+without its page. If delivery checks fail, the write remains successful but the after-hook replaces
+the result with `unavailable`; the pending successor issues nothing and is not exposed by ID.
 
 A bounded readback that starts after line 1, stops before EOF, or contains a preview-only line is
 explicitly marked `partial=true` in its header. Its displayed `N|` refs remain usable. Whole-file
 replacement still requires cumulative issued coverage of all lines plus BOF and EOF; read missing
 pages for the same unchanged snapshot or perform a fresh complete read.
+For `replace_file`, `delete_file`, or `move_file`, incomplete coverage reports concise recovery:
+`Read the file from offset=1 through @eof with the same snapshotId, then retry.`
 
 ### Replace
 
@@ -202,6 +211,15 @@ pages for the same unchanged snapshot or perform a fresh complete read.
 ```
 
 Move reorders retained logical texts over the existing positional EOL slots in the inclusive corridor between the source and destination. It preserves the file BOM, exact EOL-slot sequence, final-newline state, logical-line count, and byte count. The complete corridor and destination boundary must have been issued. A destination strictly inside the source is `INVALID_ARGUMENT`. The immediately-before and immediately-after identity destinations return `NO_CHANGE` for the entire batch.
+
+One batch may compose exactly one `move_range` with one or more pairwise-disjoint `replace`
+operations when every replacement lies wholly in the intervening part of that move corridor and
+outside the move source. Every payload is read and applied against immutable pre-batch corridor
+content before the move permutation. The whole corridor still requires issued provenance and exact
+freshness, and the output must preserve its positional EOL-slot sequence. Under `rebase:"unique"`,
+each replacement must remain wholly inside the relocated intervening corridor. A second move, a
+replacement touching the source or outside that intervening span, overlapping replacements, or any
+other destructive composition rejects conservatively.
 
 The logical-line parser treats adjacent CR and LF bytes as one CRLF delimiter and does not create a phantom line after a terminal delimiter. Some moves involving empty logical texts therefore have no byte serialization that preserves the promised text/EOL-slot sequence. Such a move is rejected with `INVALID_ARGUMENT` against an unchanged target, or `AMBIGUOUS_RELOCATION` when the incompatibility appears in an exact-unique relocated layout. The planner never normalizes delimiters or silently weakens the move invariants.
 
@@ -282,15 +300,16 @@ Explicit recovery for cooperative edits. A replacement range relocates only when
 - every successful bounded exact left/right signature selects the same candidate in the current file;
 - contradictory unique signatures reject as `AMBIGUOUS_RELOCATION`, regardless of search order or context size;
 - all relocated operations preserve their original order;
-- relocated operations do not overlap.
+- relocated operations do not overlap, except for the exact move/replacement composition described
+  above.
 
 An insertion relocates only when both original neighboring line tokens remain adjacent at the selected base boundary and all successful bounded signatures agree on one boundary. BOF/EOF require a bounded prefix/suffix that occurs only at the corresponding current edge; copied edge evidence is ambiguous. A concurrent insertion at the same boundary invalidates the boundary.
 
-In a transfer-containing batch, every source range, destination boundary, move corridor, replacement range, and insertion boundary is mapped canonically through one cumulative work budget. Copy source and destination anchors relocate independently. Move source, corridor, and destination anchors also relocate independently, then must retain their exact geometric relationship. Pairwise range and boundary relations must remain equal to the base snapshot. A destructive span intersecting a move corridor or an insertion destination strictly inside it rejects rather than being incorporated into the move; a read-only copy source may intersect it.
+In a transfer-containing batch, every source range, destination boundary, move corridor, replacement range, and insertion boundary is mapped canonically through one cumulative work budget. Copy source and destination anchors relocate independently. Move source, corridor, and destination anchors also relocate independently, then must retain their exact geometric relationship. Pairwise range and boundary relations must remain equal to the base snapshot. Only qualifying pairwise-disjoint replacements inside one move's intervening corridor are incorporated into that move. Every other destructive intersection, and every insertion destination strictly inside a destructive span, rejects; a read-only copy source may intersect it.
 
 This global topology and canonical anchor ordering applies only to batches containing `copy_range` or `move_range`. Transfer-free batches retain the pre-transfer mapper order, work consumption, and output bytes for batches that remain valid. Consequently, adding a transfer to an otherwise unchanged legacy batch can expose a global topology ambiguity and return `AMBIGUOUS_RELOCATION`.
 
-There is no fuzzy normalization, whitespace tolerance, nearest candidate, conflict marker, or fallback from strict to unique.
+There is no fuzzy normalization, whitespace tolerance, nearest candidate, conflict marker, or fallback from strict to unique. If an exact range has no relocation candidate but its original selected coordinates retain identical line texts with changed delimiters, `TARGET_CHANGED` adds `Exact line delimiters changed; reread the file before retrying.` This diagnostic does not make the target eligible, normalize EOLs, or invoke a fallback. Content changes, shifted/missing ranges, and boundary failures keep their existing generic diagnostics.
 
 For example, suppose a retained snapshot contains `alpha`, `target`, `omega`, and another process inserts `prefix` at BOF. Strict mode returns `TARGET_CHANGED`; `rebase: "unique"` can use that same retained ID to relocate base line 2 to current line 3 when the exact evidence is unique. If a successful Better Hashline edit already consumed the ID, a later call returns `SNAPSHOT_UNKNOWN` before relocation; use its readback successor or read again.
 
@@ -300,6 +319,10 @@ Native aliases use protocol marker `native-aliases/v2`. The marker records `oper
 `delete_file`, or `move_file`; a move also records the destination canonical-path SHA-256. Exact
 persisted `native-aliases/v1` history is deliberately incompatible and fails closed with
 `SESSION_PROTOCOL_MISMATCH` rather than being interpreted under v2.
+The marker string does not imply schema compatibility. Every canonical schema SHA-256 and protocol
+fingerprint is exact identity; the current expanded contracts change both while retaining the v2
+marker name. A session carrying an older v2 identity therefore fails closed and requires a plugin
+restart plus a new session.
 
 Completed `edit` metadata contains the exact unified diff in both `diff` and `filediff.patch`.
 Completed `apply_patch` metadata contains exactly one source-correlated entry whose type is
@@ -380,8 +403,10 @@ For a text edit:
 11. Invalidate all snapshots for this session/path immediately before publication.
 12. Attempt one rename over the canonical target.
 13. Reread and verify the resulting bytes.
-14. When `readback: true`, retain those verified bytes as a new snapshot and render a bounded page.
-15. Issue the successor refs only after `tool.execute.after` attests the delivered output.
+14. When `readback: true`, retain those verified bytes as a pending snapshot and render the one
+    requested/default contiguous page.
+15. Issue only that page's refs after `tool.execute.after` attests the delivered output; otherwise
+    expose no successor ID and report `successor=unavailable`.
 
 For a file lifecycle operation:
 
@@ -400,13 +425,29 @@ No rebase, destination substitution, patch change, metadata change, or lifecycle
 permission approval. If approved state changed while permission was pending, publication rejects.
 Lifecycle operations never create a readback successor.
 
-For a new file, `hashline_write` requests the same path permissions, writes and flushes an exclusive
+For a new file, `hashline_write` is create-only and accepts optional `createParents`, defaulting to
+`false`. With omission or `false`, the parent must already exist and the strict behavior is
+unchanged. The tool requests the same path permissions, writes and flushes an exclusive
 same-directory temporary file, then publishes it with a no-replace hard link. It verifies staged
 and published identity, link count, exact bytes, and parent identity before returning success. It
 never overwrites a file, directory, or symlink. Filesystems that cannot provide these local
 hard-link semantics reject the operation. A failure after the hard link succeeds can leave the new
 file committed; the plugin reports `RACE_AFTER_WRITE` and does not risk deleting a newer writer's
 file.
+
+With explicit `createParents:true`, the plugin locates and pins the deepest existing requested and
+canonical directory ancestor, rejects more than 64 missing directories, and freezes one root-to-leaf
+directory chain plus the target. It authorizes every planned directory and target, acquires
+deterministic locks for all of them, revalidates the exact absence/identity plan without replanning,
+and requests one edit permission for the complete diff and directory list. Publication creates each
+directory with exclusive non-recursive `mkdir`, verifies each directory and immediate parent, then
+delegates file creation to the same staged no-clobber path above. Failures before the first `mkdir`
+attempt retain their ordinary prepublication code and leave no created state. If an attempted
+`mkdir` reports failure but either planned name appeared, publication is conservatively ambiguous.
+From that point, every cancellation, race, staging, linking, readback, or final verification failure
+returns `PARTIAL_PUBLICATION`; created directories and any committed file are intentionally retained
+and never rolled back. Partial errors omit canonical host paths, and native-alias sessions are
+poisoned. `move_file` does not use this path and never creates parents.
 
 ## Batch Semantics
 
@@ -419,7 +460,8 @@ change the provenance error class. Transfer-free batches retain their existing r
 provenance behavior.
 
 The text array is declarative, not a sequential program, and array order cannot resolve conflicts.
-Every source is read from the immutable pre-batch document. The batch rejects:
+Every source is read from the immutable pre-batch document. Except for the one qualified
+move/replacement composition, the batch rejects:
 
 - overlapping destructive spans;
 - insertions or copy destinations sharing a boundary;
@@ -430,11 +472,14 @@ may touch either destructive endpoint. Copy sources may overlap other reads or w
 always read the immutable pre-batch document. Conflict rules are checked both before and after
 unique relocation.
 
-If a transfer-containing batch has several conflict classes, diagnostics use one global precedence:
-destructive intersection, insertion strictly inside a destructive span, then duplicate insertion
-boundary. Request-array order therefore changes neither the error code nor its diagnostic text.
-Diagnostics include a repair hint to merge overlapping destructive payloads, fold an internal
-insertion into its replacement, or combine same-boundary insertions in the intended order.
+If a batch has several conflict classes, diagnostics use one global precedence: destructive
+intersection, insertion strictly inside a destructive span, then duplicate insertion boundary.
+Within the selected class, the lexicographically smallest pair of zero-based original operation
+indexes is reported, independent of traversal order. Existing `OPERATIONS_OVERLAP` and
+`INSERTION_BOUNDARY_CONFLICT` codes remain stable. Their message appends the deterministic suffix
+`Conflict: operations[i] (kind) and operations[j] (kind).` Diagnostics also retain the repair hint
+to merge overlapping destructive payloads, fold an internal insertion into its replacement, or
+combine same-boundary insertions in the intended order.
 
 An individually byte-identical `move_range` rejects the entire batch with `NO_CHANGE`, including
 when another member would change the file. This intentionally treats an identity move as a
@@ -466,7 +511,7 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `NATIVE_TOOL_DISABLED` | Enforcement rejected a hidden native mutator |
 | `TOOL_SURFACE_UNAVAILABLE` | The requested alias surface cannot be safely activated on this host |
 | `SESSION_PROTOCOL_MISMATCH` | Session history or its bound protocol is missing, unreadable, or incompatible |
-| `PATH_NOT_FOUND` | Requested source path or required destination parent does not exist |
+| `PATH_NOT_FOUND` | Requested source path or a parent required under strict creation/move behavior does not exist |
 | `TARGET_EXISTS` | Create-only or move publication found an existing destination, including a symlink |
 | `SNAPSHOT_REQUIRED` | No valid issued snapshot is available |
 | `SNAPSHOT_UNKNOWN` | ID was not retained for this scope |
@@ -483,7 +528,7 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `PERMISSION_DENIED` | OpenCode rejected a required permission |
 | `RACE_BEFORE_WRITE` | Approved identity, bytes, direct binding, parent, or destination state changed before publication |
 | `RACE_AFTER_WRITE` | Published bytes, identity, link count, parent, or final path state did not remain equal to the plan |
-| `PARTIAL_PUBLICATION` | A move created the destination link but could not safely complete or verify source removal |
+| `PARTIAL_PUBLICATION` | A move published its destination link, or parent creation created or may have created a directory, but publication could not safely complete or verify |
 | `UNSUPPORTED_FILE` | File type, metadata, encoding, size, filesystem relation, or policy is unsupported |
 
 Consumers must treat every `CODE: message` as failure. The native-alias `DISPLAY_PREFIX_REJECTED` result is completed only at the host transport layer so its attestation persists; it never reports `Applied`, requests permission, or changes a file.
@@ -500,6 +545,26 @@ marker adds operation identity and, for moves, a destination-path digest; render
 adds exact delete/move source and destination correlation. Existing v1 history is not migrated or
 silently accepted. Restart the plugin and begin a new session with a fresh `hashline_read` after
 upgrading.
+
+The text-edit top level adds `readbackOffset` and `readbackLimit`, both conditional on
+`readback:true`; generated clients must not send them to lifecycle operations. `hashline_write` adds
+optional `createParents`, whose omitted/false behavior remains strict. A successful readback has one
+delivered page rather than an ID-only continuation, and complete-snapshot failures now give the
+short full-reread instruction documented above.
+
+One move may now compose with qualifying intervening-corridor replacements. Other overlap and
+boundary classifications keep their codes, but their human-readable diagnostics now end in the
+deterministic zero-based operation-pair suffix. Exact EOL-only unique-relocation failures retain
+`TARGET_CHANGED` and only add diagnostic guidance.
+
+The v2 marker name remains unchanged across these schema additions, but the canonical schema SHA and
+protocol fingerprint do not. Sessions created by an earlier v2 development build are incompatible,
+fail closed, and require a restart plus a new session. The retained deterministic
+[schema-v7 result](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json) records:
+`hashline_edit` schema `3686 -> 5033`
+(+1347, 36.54%), `hashline_write` schema `282 -> 548` (+266, 94.33%), readback call `181 -> 218`
+(+37), and parent-create call `50 -> 81` (+31). This is retained model-free mechanical evidence, not
+a paid/model-quality claim.
 
 ## Migration From 0.4.0
 

@@ -41,12 +41,75 @@ describe("unique relocation", () => {
     ).toThrow("AMBIGUOUS_RELOCATION:");
   });
 
-  test("rejects changed target bytes including line endings", () => {
-    expect(() => mapRangeUniquely(lines("a\nb\n"), lines("a\nchanged\n"), 2, 2, 2)).toThrow(
-      "TARGET_CHANGED:",
-    );
+  test("diagnoses exact LF and CRLF delimiter changes at the selected range", () => {
+    const diagnostic =
+      "TARGET_CHANGED: Lines 2-2 are no longer unchanged. Exact line delimiters changed; reread the file before retrying.";
+    expect(() => mapRangeUniquely(lines("a\nb\n"), lines("a\nb\r\n"), 2, 2, 2)).toThrow(diagnostic);
     expect(() => mapRangeUniquely(lines("a\r\nb\r\n"), lines("a\r\nb\n"), 2, 2, 2)).toThrow(
-      "TARGET_CHANGED:",
+      diagnostic,
+    );
+  });
+
+  test("diagnoses exact lone-CR and mixed delimiter changes", () => {
+    expect(() => mapRangeUniquely(lines("a\rb\r"), lines("a\rb\n"), 2, 2, 2)).toThrow(
+      "TARGET_CHANGED: Lines 2-2 are no longer unchanged. Exact line delimiters changed; reread the file before retrying.",
+    );
+    expect(() =>
+      mapRangeUniquely(
+        lines("head\r\nleft\nright\rtail\r\n"),
+        lines("head\r\nleft\rright\ntail\r\n"),
+        2,
+        3,
+        2,
+      ),
+    ).toThrow(
+      "TARGET_CHANGED: Lines 2-3 are no longer unchanged. Exact line delimiters changed; reread the file before retrying.",
+    );
+  });
+
+  test("diagnoses a changed final delimiter in either direction", () => {
+    const diagnostic =
+      "TARGET_CHANGED: Lines 2-2 are no longer unchanged. Exact line delimiters changed; reread the file before retrying.";
+    expect(() => mapRangeUniquely(lines("a\nb\n"), lines("a\nb"), 2, 2, 2)).toThrow(diagnostic);
+    expect(() => mapRangeUniquely(lines("a\nb"), lines("a\nb\n"), 2, 2, 2)).toThrow(diagnostic);
+  });
+
+  test("keeps the generic target-change error when content also changes", () => {
+    const generic = /^TARGET_CHANGED: Lines 2-2 are no longer unchanged\.$/;
+    expect(() => mapRangeUniquely(lines("a\nb\n"), lines("a\nchanged\n"), 2, 2, 2)).toThrow(
+      generic,
+    );
+    expect(() => mapRangeUniquely(lines("a\nb\n"), lines("a\nchanged\r\n"), 2, 2, 2)).toThrow(
+      generic,
+    );
+    expect(() => mapRangeUniquely(lines("a\n\u00e9\n"), lines("a\ne\u0301\r\n"), 2, 2, 2)).toThrow(
+      generic,
+    );
+  });
+
+  test("does not infer delimiter-only changes across shifted or missing ranges", () => {
+    expect(() => mapRangeUniquely(lines("a\nb\n"), lines("new\na\nb\r\n"), 2, 2, 2)).toThrow(
+      /^TARGET_CHANGED: Lines 2-2 are no longer unchanged\.$/,
+    );
+    expect(() => mapRangeUniquely(lines("a\nb\nc\n"), lines("a\nbc\n"), 2, 3, 2)).toThrow(
+      /^TARGET_CHANGED: Lines 2-3 are no longer unchanged\.$/,
+    );
+  });
+
+  test("keeps an unaffected final unterminated target exact", () => {
+    expect(mapRangeUniquely(lines("a\nb"), lines("a\r\nb"), 2, 2, 2)).toEqual({
+      start: 1,
+      end: 1,
+    });
+    expect(mapRangeUniquely(lines("a\nb"), lines("new\na\nb"), 2, 2, 2)).toEqual({
+      start: 2,
+      end: 2,
+    });
+  });
+
+  test("keeps boundary failures free of range delimiter diagnostics", () => {
+    expect(() => mapBoundaryUniquely(lines("a\nb\n"), lines("a\r\nb\n"), 1, 2)).toThrow(
+      /^BOUNDARY_CHANGED: The insertion boundary is no longer adjacent\.$/,
     );
   });
 
@@ -129,5 +192,13 @@ describe("unique relocation", () => {
 
     const shiftedLongLine = createUniqueMapper(lines("target\n"), lines(`${long}\ntarget\n`), 50);
     expect(shiftedLongLine.mapRange(1, 1, 1)).toEqual({ start: 1, end: 1 });
+  });
+
+  test("omits the optional EOL diagnostic when its work budget is exhausted", () => {
+    const long = "x".repeat(2_000_000);
+    const mapper = createUniqueMapper(lines(`${long}\n`), lines(`${long}\r\n`), 2_000_010);
+    expect(() => mapper.mapRange(1, 1, 0)).toThrow(
+      /^TARGET_CHANGED: Lines 1-1 are no longer unchanged\.$/,
+    );
   });
 });

@@ -398,6 +398,17 @@ export function scenarios(): Scenario[] {
       expectedText: "A\nD\nB\nC\n",
     },
     {
+      id: "exact-move-with-contained-replace",
+      category: "transfer",
+      base: "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\n",
+      current: "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\n",
+      operations: [
+        { op: "move_range", startLine: 2, endLine: 3, afterLine: 13 },
+        { op: "replace", startLine: 5, endLine: 5, lines: ["R5"] },
+      ],
+      expectedText: "L1\nL4\nR5\nL6\nL7\nL8\nL9\nL10\nL11\nL12\nL13\nL2\nL3\n",
+    },
+    {
       id: "copy-range-independent-relocation",
       category: "transfer-relocation",
       base: "head\nsource\nmiddle\ndestination\ntail\n",
@@ -706,6 +717,39 @@ export function runFileLifecycleCallWireSuite() {
       deltaBytes: hashlineBytes - nativeApplyPatchBytes,
     };
   });
+}
+
+export function runEditProtocolUxCallWireSuite() {
+  const serialized = (value: unknown) => encoder.encode(JSON.stringify(value)).byteLength;
+  const base = {
+    filePath: "src/example.ts",
+    snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
+    rebase: "none",
+    operations: [{ op: "replace", startLine: 10, endLine: 10, lines: ["changed"] }],
+    readback: true,
+  };
+  const defaultReadbackBytes = serialized(base);
+  const explicitWindowBytes = serialized({ ...base, readbackOffset: 8, readbackLimit: 5 });
+  const strictWriteBytes = serialized({ filePath: "src/new.ts", content: "export {};\n" });
+  const createParentsBytes = serialized({
+    filePath: "src/generated/new.ts",
+    content: "export {};\n",
+    createParents: true,
+  });
+  return [
+    {
+      scenario: "explicit readback window",
+      baselineBytes: defaultReadbackBytes,
+      currentBytes: explicitWindowBytes,
+      deltaBytes: explicitWindowBytes - defaultReadbackBytes,
+    },
+    {
+      scenario: "opt-in parent creation",
+      baselineBytes: strictWriteBytes,
+      currentBytes: createParentsBytes,
+      deltaBytes: createParentsBytes - strictWriteBytes,
+    },
+  ];
 }
 
 export function runMoveCorridorWireSuite() {

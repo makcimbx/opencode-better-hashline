@@ -17,10 +17,10 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/path-identity.ts` | Exact canonical path equality, containment, and filesystem-root identity |
 | `src/process-capture.ts` | Bounded subprocess capture and process-tree termination |
 | `src/exact-tree.ts` | Race-resistant physical tree, file-identity, reparse, and stream evaluation |
-| `src/rebase.ts` | Exact unique range/boundary relocation with a cumulative comparison budget |
-| `src/edits.ts` | Text-operation validation, transfer effect analysis, immutable planning, bounded projection, and final bytes |
-| `src/filesystem.ts` | Canonicalization, dual-path authorization, deterministic locks, stable reads, and text/lifecycle publication |
-| `src/plugin.ts` | Flat tool schemas, hooks, native-mutator enforcement, and fixed-plan lifecycle orchestration |
+| `src/rebase.ts` | Exact unique range/boundary relocation, bounded comparison work, and diagnostic-only EOL-change detection |
+| `src/edits.ts` | Text-operation validation, deterministic conflict-pair evidence, transfer composition, bounded projection, and final bytes |
+| `src/filesystem.ts` | Canonicalization, authorization, deterministic locks, stable reads, fixed parent plans, and text/lifecycle publication |
+| `src/plugin.ts` | Flat tool schemas, hooks, native-mutator enforcement, readback delivery, and fixed-plan filesystem orchestration |
 | `src/index.ts` | Public library exports and OpenCode `PluginModule` |
 | `src/server.ts` | Modern OpenCode `./server` package entrypoint |
 | `src/verify.ts`, `src/cli.ts` | Credential-free packed OpenCode route, schema, hook, export/import, and renderer verification |
@@ -44,12 +44,15 @@ testing possible without weakening the filesystem path.
 Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy
 reads retained pre-edit logical texts and inserts them with destination-local EOL rules, even when
 another operation writes across its source. Move rewrites one source-to-destination corridor by
-permuting texts over fixed positional EOL slots. A declarative write-footprint graph rejects
-intersecting destructive spans, internal insertion destinations, and duplicate insertion
-destinations instead of giving operation array order sequential meaning. Projected text statistics
-compose CRLF across planned segment boundaries; after bounded projection, every move is rendered
-lazily and reparsed to prove that its expected logical texts and positional EOL slots remain
-representable.
+permuting texts over fixed positional EOL slots. One move can absorb pairwise-disjoint replacements
+wholly inside its intervening corridor and outside its source; all payloads still come from the
+immutable pre-batch corridor, and full-corridor issuance/freshness remains authoritative. A
+declarative write-footprint graph rejects every other intersecting destructive span, internal
+insertion destination, and duplicate insertion destination instead of giving operation array order
+sequential meaning. Rejections preserve their overlap/boundary code and report the lexicographically
+smallest zero-based original operation pair. Projected text statistics compose CRLF across planned
+segment boundaries; after bounded projection, every move is rendered lazily and reparsed to prove
+that its expected logical texts and positional EOL slots remain representable.
 
 Whole-file deletion and movement are intentionally outside `planEdits`. They depend on direct
 directory-entry identity, destination absence, stable parents, filesystem identity, and link-count
@@ -66,6 +69,11 @@ complete source/destination path set. After approval, current bytes, identities,
 binding, parent identity, and destination absence are checked again. The plugin never asks approval
 for one patch, then silently rebases, substitutes a destination, or publishes another.
 
+Opt-in `hashline_write` parent creation follows the same principle. The deepest existing ancestor,
+at most 64 missing directories, target, lock set, and permission metadata are frozen before
+approval. Every directory and the target are authorized and locked, and revalidation never replaces
+the approved chain with a newly observed one.
+
 ### Publication is separate from conflict detection
 
 Conflict detection uses exact bytes and identity. Text edits use same-directory staging plus rename,
@@ -73,7 +81,11 @@ which improves visibility and crash behavior where supported but is not conditio
 Delete revalidates the direct source entry before unlink. Move creates a no-clobber destination hard
 link, verifies exact inode/bytes/link count, then unlinks the source. If publication passes the link
 boundary but cannot safely finish, `PARTIAL_PUBLICATION` reports that both names may exist; there is
-no unsafe automatic rollback. These distinctions are explicit in API errors and documentation.
+no unsafe automatic rollback. Parent creation uses exclusive non-recursive root-to-leaf `mkdir`
+before delegating to existing staged no-clobber file publication. After its first directory exists,
+or a failed `mkdir` leaves the outcome ambiguous, every later failure is `PARTIAL_PUBLICATION` and no
+created state is rolled back.
+These distinctions are explicit in API errors and documentation.
 
 ## OpenCode Integration
 
@@ -93,6 +105,9 @@ Activation uses the host-configured SDK transport, exact observed host and schem
 `native-aliases/v2` operation/path markers, bounded session-history validation, double argument
 parsing, and native renderer metadata. V1 history is incompatible by design. Registry ownership
 still cannot be attested, so this surface does not replace the unique-ID recommendation.
+The marker string remains v2 across the current schema expansion, but canonical schema SHA-256 and
+protocol fingerprint are exact identity. An older v2 session therefore fails closed and requires a
+restart plus a new session rather than schema fallback.
 
 Before process-local session binding, alias calls remain sequential so history validation sees at
 most one active native-looking call. A bound session skips repeated history inspection for the same
@@ -111,9 +126,12 @@ A successful or attempted publication transition invalidates prior snapshots for
 path. Successful output explicitly reports that transition through
 `@hashline-edit previous=consumed successor=none|attached|unavailable`. Text edits require a reread
 by default; with explicit `readback: true`, post-rename verification bytes may instead create a new
-snapshot near the changed hunk. Its refs are issued only after the after-hook attests delivery, and
-continuation never changes the already-completed write into a reported mutation failure. Lifecycle
-operations reject readback. Delete invalidates the source; move invalidates source and destination
+pending snapshot with one contiguous page. `readbackOffset` selects a one-based post-edit start,
+defaulting to the first hunk; `readbackLimit` is `1..1000`, defaulting to 1,000. Both require
+`readback:true`. Only refs on the page attested by the after-hook are issued; there is no ID-only
+successor, and failed delivery reports `unavailable`. Continuation never changes the
+already-completed write into a reported mutation failure. Lifecycle operations reject readback
+requests and window fields. Delete invalidates the source; move invalidates source and destination
 immediately before link publication, including when the result becomes `PARTIAL_PUBLICATION`.
 Multiple exact reads can reuse one retained snapshot only when digest and bytes both match, and
 their issued pages can accumulate complete coverage.
@@ -126,6 +144,13 @@ a stricter resolver: the requested terminal entry itself must be a regular file,
 and must remain bound to the canonical source and stable parent. New files and move destinations
 resolve an existing canonical parent and treat every existing terminal entry, including a symlink,
 as occupied.
+
+`hashline_write` with omitted/false `createParents` retains that existing-parent rule. With explicit
+`true`, it pins the deepest existing requested/canonical ancestor and freezes up to 64 absent
+directory entries. Every directory and the target are canonicalized, authorized, and locked;
+directories are created exclusively from root to leaf and identity-checked before staged no-clobber
+file publication. The first directory observed after an attempted `mkdir`, including an ambiguous
+reported failure, is the no-rollback boundary. `move_file` never enters this path.
 
 Supported existing targets are regular, single-link files within the size and UTF-8 policy limits.
 Hardlinks are rejected because replacing, deleting, or moving one directory entry would violate the
@@ -146,11 +171,11 @@ The test suite has separate layers:
 - pure text, relocation, and edit planner tests;
 - snapshot provenance, complete-coverage, TTL, pinning, invalidation, and byte-budget tests;
 - renderer truncation and UTF-8 budget tests;
-- real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, deterministic path-set locks, no-replace creation and movement, and partial move publication;
-- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including lifecycle shapes, dual-path permissions, immutable approval metadata, receipts, attested terminal rejections, poisoned bindings, and bound/unbound alias concurrency;
+- real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, fixed parent chains, exclusive directory creation, deterministic path-set locks, no-replace creation and movement, and partial publication;
+- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including readback windows/issuance, deterministic conflict pairs, lifecycle and parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, poisoned bindings, and bound/unbound alias concurrency;
 - packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
-- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities.
+- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current deterministic runner is retained as immutable schema-v7 model-free evidence; schema-v6 and pilot-v7 evidence remain immutable.
 
 Timing benchmarks never gate shared CI. Safety regressions do.
 

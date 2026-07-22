@@ -50,6 +50,13 @@ export type EditOperation =
   | TransferOperation;
 export type RebaseMode = "none" | "unique";
 
+type OperationKind = Exclude<EditOperation["op"], "replace_file">;
+
+type OperationProvenance<Kind extends OperationKind = OperationKind> = {
+  operationIndex: number;
+  operationKind: Kind;
+};
+
 export type EditPlan = {
   text: string;
   bytes: Uint8Array;
@@ -64,7 +71,7 @@ type LineSpan = {
   end: number;
 };
 
-type ChangeLocation = {
+type ChangeLocation = OperationProvenance & {
   start: number;
   end: number;
   basePosition: number;
@@ -95,9 +102,16 @@ type PlannedChange = ChangeLocation & {
   move?: MoveValidation;
 };
 
-type Effect = {
+type Effect = OperationProvenance & {
   destructive?: LineSpan;
   insertion?: number;
+};
+
+type ConflictPair = readonly [OperationProvenance, OperationProvenance];
+
+type MoveComposition = {
+  moveOperationIndex: number;
+  replacementOperationIndexes: ReadonlySet<number>;
 };
 
 type RangeAnchor = {
@@ -114,26 +128,26 @@ type BoundaryAnchor = {
 
 type Anchor = RangeAnchor | BoundaryAnchor;
 
-type MappedReplace = {
+type MappedReplace = OperationProvenance<"replace"> & {
   op: "replace";
   operation: ReplaceOperation;
   target: LineSpan;
 };
 
-type MappedInsert = {
+type MappedInsert = OperationProvenance<"insert"> & {
   op: "insert";
   operation: InsertOperation;
   destination: number;
 };
 
-type MappedCopy = {
+type MappedCopy = OperationProvenance<"copy_range"> & {
   op: "copy_range";
   operation: CopyRangeOperation;
   source: LineSpan;
   destination: number;
 };
 
-type MappedMove = {
+type MappedMove = OperationProvenance<"move_range"> & {
   op: "move_range";
   operation: MoveRangeOperation;
   source: LineSpan;
@@ -213,6 +227,7 @@ function replaceText(
   startIndex: number,
   endIndex: number,
   lines: readonly string[],
+  provenance: OperationProvenance<"replace">,
 ): MappedChange {
   const first = document.lines[startIndex];
   const last = document.lines[endIndex - 1];
@@ -220,6 +235,7 @@ function replaceText(
   const eol = last.eol || first.eol || document.preferredEol;
   const replacement = lines.length === 0 ? "" : `${lines.join(eol)}${last.eol ? last.eol : ""}`;
   return {
+    ...provenance,
     start: first.start,
     end: last.end,
     replacement,
@@ -231,10 +247,12 @@ function insertText(
   document: TextDocument,
   position: number,
   lines: readonly string[],
+  provenance: OperationProvenance<"insert">,
 ): MappedChange {
   if (lines.length === 0) fail("INVALID_ARGUMENT", "insert requires at least one line.");
   const layout = insertionLayout(document, position);
   return {
+    ...provenance,
     start: layout.start,
     end: layout.start,
     replacement: `${layout.prefix}${lines.join(layout.eol)}${layout.suffix}`,
@@ -251,21 +269,67 @@ function changesOverlap(left: ChangeLocation, right: ChangeLocation): boolean {
   return left.start < right.end && right.start < left.end;
 }
 
+function selectConflictPair(
+  current: ConflictPair | undefined,
+  left: OperationProvenance,
+  right: OperationProvenance,
+): ConflictPair {
+  const candidate: ConflictPair =
+    left.operationIndex <= right.operationIndex ? [left, right] : [right, left];
+  if (
+    !current ||
+    candidate[0].operationIndex < current[0].operationIndex ||
+    (candidate[0].operationIndex === current[0].operationIndex &&
+      candidate[1].operationIndex < current[1].operationIndex)
+  ) {
+    return candidate;
+  }
+  return current;
+}
+
+function failConflict(
+  code: "OPERATIONS_OVERLAP" | "INSERTION_BOUNDARY_CONFLICT",
+  message: string,
+  conflict: ConflictPair,
+): never {
+  const [left, right] = conflict;
+  fail(
+    code,
+    `${message} Conflict: operations[${left.operationIndex}] (${left.operationKind}) and operations[${right.operationIndex}] (${right.operationKind}).`,
+  );
+}
+
 function assertCompatibleChanges(changes: readonly ChangeLocation[]): void {
+  let overlapConflict: ConflictPair | undefined;
+  let insertionConflict: ConflictPair | undefined;
   for (let left = 0; left < changes.length; left += 1) {
     for (let right = left + 1; right < changes.length; right += 1) {
       const first = changes[left];
       const second = changes[right];
       if (first && second && changesOverlap(first, second)) {
         const duplicateBoundary = first.start === first.end && second.start === second.end;
-        fail(
-          duplicateBoundary ? "INSERTION_BOUNDARY_CONFLICT" : "OPERATIONS_OVERLAP",
-          duplicateBoundary
-            ? "Edit insertions share a byte boundary after relocation."
-            : "Edit operations overlap after relocation.",
-        );
+        if (duplicateBoundary) {
+          insertionConflict = selectConflictPair(insertionConflict, first, second);
+        } else {
+          overlapConflict = selectConflictPair(overlapConflict, first, second);
+        }
       }
     }
+  }
+
+  if (overlapConflict) {
+    failConflict(
+      "OPERATIONS_OVERLAP",
+      "Edit operations overlap after relocation.",
+      overlapConflict,
+    );
+  }
+  if (insertionConflict) {
+    failConflict(
+      "INSERTION_BOUNDARY_CONFLICT",
+      "Edit insertions share a byte boundary after relocation.",
+      insertionConflict,
+    );
   }
 
   const byBase = [...changes].sort((left, right) => left.basePosition - right.basePosition);
@@ -282,10 +346,71 @@ function spansIntersect(left: LineSpan, right: LineSpan): boolean {
   return left.start < right.end && right.start < left.end;
 }
 
-function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean): void {
-  let destructiveConflict = false;
-  let insertionDestructiveConflict = false;
-  let insertionConflict = false;
+function spanContains(outer: LineSpan, inner: LineSpan): boolean {
+  return outer.start <= inner.start && inner.end <= outer.end;
+}
+
+function moveInterveningSpan(operation: MoveRangeOperation): LineSpan {
+  const source = rangeFor(operation.startLine, operation.endLine);
+  const corridor = moveCorridorSpan(operation);
+  return operation.afterLine < operation.startLine - 1
+    ? { start: corridor.start, end: source.start }
+    : { start: source.end, end: corridor.end };
+}
+
+function analyzeMoveComposition(operations: readonly EditOperation[]): MoveComposition | undefined {
+  let move: { operation: MoveRangeOperation; operationIndex: number } | undefined;
+  for (const [operationIndex, operation] of operations.entries()) {
+    if (operation.op !== "move_range") continue;
+    if (move) return undefined;
+    move = { operation, operationIndex };
+  }
+  if (!move) return undefined;
+
+  const source = rangeFor(move.operation.startLine, move.operation.endLine);
+  const intervening = moveInterveningSpan(move.operation);
+  const replacementOperationIndexes = new Set<number>();
+  for (const [operationIndex, operation] of operations.entries()) {
+    if (operation.op !== "replace") continue;
+    const target = rangeFor(operation.startLine, operation.endLine);
+    const destinationIntersects =
+      move.operation.afterLine > target.start && move.operation.afterLine < target.end;
+    if (
+      spanContains(intervening, target) &&
+      !spansIntersect(source, target) &&
+      !destinationIntersects
+    ) {
+      replacementOperationIndexes.add(operationIndex);
+    }
+  }
+  return {
+    moveOperationIndex: move.operationIndex,
+    replacementOperationIndexes,
+  };
+}
+
+function isComposedDestructivePair(
+  left: Effect,
+  right: Effect,
+  composition: MoveComposition | undefined,
+): boolean {
+  if (!composition) return false;
+  return (
+    (left.operationIndex === composition.moveOperationIndex &&
+      composition.replacementOperationIndexes.has(right.operationIndex)) ||
+    (right.operationIndex === composition.moveOperationIndex &&
+      composition.replacementOperationIndexes.has(left.operationIndex))
+  );
+}
+
+function assertEffectsCompatible(
+  effects: readonly Effect[],
+  relocated: boolean,
+  composition?: MoveComposition,
+): void {
+  let destructiveConflict: ConflictPair | undefined;
+  let insertionDestructiveConflict: ConflictPair | undefined;
+  let insertionConflict: ConflictPair | undefined;
   for (let left = 0; left < effects.length; left += 1) {
     for (let right = left + 1; right < effects.length; right += 1) {
       const first = effects[left];
@@ -294,9 +419,10 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
       if (
         first.destructive &&
         second.destructive &&
-        spansIntersect(first.destructive, second.destructive)
+        spansIntersect(first.destructive, second.destructive) &&
+        !isComposedDestructivePair(first, second, composition)
       ) {
-        destructiveConflict = true;
+        destructiveConflict = selectConflictPair(destructiveConflict, first, second);
       }
       for (const [insertion, destructive] of [
         [first.insertion, second.destructive],
@@ -308,7 +434,11 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
           insertion > destructive.start &&
           insertion < destructive.end
         ) {
-          insertionDestructiveConflict = true;
+          insertionDestructiveConflict = selectConflictPair(
+            insertionDestructiveConflict,
+            first,
+            second,
+          );
         }
       }
       if (
@@ -316,33 +446,36 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
         second.insertion !== undefined &&
         first.insertion === second.insertion
       ) {
-        insertionConflict = true;
+        insertionConflict = selectConflictPair(insertionConflict, first, second);
       }
     }
   }
 
   if (destructiveConflict) {
-    fail(
+    failConflict(
       "OPERATIONS_OVERLAP",
       relocated
         ? "Relocated destructive write ranges overlap. Merge them into one replacement, or split the edits."
         : "Destructive write ranges overlap. Merge them into one replacement, or split the edits.",
+      destructiveConflict,
     );
   }
   if (insertionDestructiveConflict) {
-    fail(
+    failConflict(
       "OPERATIONS_OVERLAP",
       relocated
         ? "A relocated insertion is inside a destructive write range. Fold it into the replacement, or split the edits."
         : "An insertion is inside a destructive write range. Fold it into the replacement, or split the edits.",
+      insertionDestructiveConflict,
     );
   }
   if (insertionConflict) {
-    fail(
+    failConflict(
       "INSERTION_BOUNDARY_CONFLICT",
       relocated
         ? "Relocated insertions use the same boundary. Combine them into one insertion in the desired order."
         : "Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+      insertionConflict,
     );
   }
 }
@@ -350,6 +483,9 @@ function assertEffectsCompatible(effects: readonly Effect[], relocated: boolean)
 function assertLegacyBaseOperationsCompatible(
   operations: readonly (ReplaceOperation | InsertOperation)[],
 ): void {
+  let replacementConflict: ConflictPair | undefined;
+  let insertionReplacementConflict: ConflictPair | undefined;
+  let insertionConflict: ConflictPair | undefined;
   for (let left = 0; left < operations.length; left += 1) {
     for (let right = left + 1; right < operations.length; right += 1) {
       const first = operations[left];
@@ -357,9 +493,10 @@ function assertLegacyBaseOperationsCompatible(
       if (!first || !second) continue;
       if (first.op === "insert" && second.op === "insert") {
         if (first.afterLine === second.afterLine) {
-          fail(
-            "INSERTION_BOUNDARY_CONFLICT",
-            "Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+          insertionConflict = selectConflictPair(
+            insertionConflict,
+            { operationIndex: left, operationKind: first.op },
+            { operationIndex: right, operationKind: second.op },
           );
         }
         continue;
@@ -371,9 +508,10 @@ function assertLegacyBaseOperationsCompatible(
         const start = replacement.startLine - 1;
         const end = replacement.endLine;
         if (insertion.afterLine > start && insertion.afterLine < end) {
-          fail(
-            "OPERATIONS_OVERLAP",
-            "An insertion is inside a replacement range. Fold it into the replacement, or split the edits.",
+          insertionReplacementConflict = selectConflictPair(
+            insertionReplacementConflict,
+            { operationIndex: left, operationKind: first.op },
+            { operationIndex: right, operationKind: second.op },
           );
         }
         continue;
@@ -384,34 +522,65 @@ function assertLegacyBaseOperationsCompatible(
         first.startLine - 1 < second.endLine &&
         second.startLine - 1 < first.endLine
       ) {
-        fail(
-          "OPERATIONS_OVERLAP",
-          "Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits.",
+        replacementConflict = selectConflictPair(
+          replacementConflict,
+          { operationIndex: left, operationKind: first.op },
+          { operationIndex: right, operationKind: second.op },
         );
       }
     }
   }
+
+  if (replacementConflict) {
+    failConflict(
+      "OPERATIONS_OVERLAP",
+      "Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits.",
+      replacementConflict,
+    );
+  }
+  if (insertionReplacementConflict) {
+    failConflict(
+      "OPERATIONS_OVERLAP",
+      "An insertion is inside a replacement range. Fold it into the replacement, or split the edits.",
+      insertionReplacementConflict,
+    );
+  }
+  if (insertionConflict) {
+    failConflict(
+      "INSERTION_BOUNDARY_CONFLICT",
+      "Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order.",
+      insertionConflict,
+    );
+  }
 }
 
-function baseEffect(operation: Exclude<EditOperation, ReplaceFileOperation>): Effect {
+function baseEffect(
+  operation: Exclude<EditOperation, ReplaceFileOperation>,
+  operationIndex: number,
+): Effect {
+  const provenance = { operationIndex, operationKind: operation.op };
   if (operation.op === "replace") {
-    return { destructive: rangeFor(operation.startLine, operation.endLine) };
+    return { ...provenance, destructive: rangeFor(operation.startLine, operation.endLine) };
   }
-  if (operation.op === "insert") return { insertion: operation.afterLine };
+  if (operation.op === "insert") return { ...provenance, insertion: operation.afterLine };
   if (operation.op === "copy_range") {
-    return { insertion: operation.afterLine };
+    return { ...provenance, insertion: operation.afterLine };
   }
   const corridor = moveCorridorSpan(operation);
-  return { destructive: corridor };
+  return { ...provenance, destructive: corridor };
 }
 
 function mappedEffect(operation: MappedOperation): Effect {
-  if (operation.op === "replace") return { destructive: operation.target };
-  if (operation.op === "insert") return { insertion: operation.destination };
+  const provenance = {
+    operationIndex: operation.operationIndex,
+    operationKind: operation.operationKind,
+  };
+  if (operation.op === "replace") return { ...provenance, destructive: operation.target };
+  if (operation.op === "insert") return { ...provenance, insertion: operation.destination };
   if (operation.op === "copy_range") {
-    return { insertion: operation.destination };
+    return { ...provenance, insertion: operation.destination };
   }
-  return { destructive: operation.corridor };
+  return { ...provenance, destructive: operation.corridor };
 }
 
 function renderWholeFile(
@@ -495,11 +664,13 @@ export function validateEditOperations(
     (operation) => operation.op === "copy_range" || operation.op === "move_range",
   );
   if (hasTransfer) {
+    const composition = analyzeMoveComposition(operations);
     assertEffectsCompatible(
-      operations.map((operation) =>
-        baseEffect(operation as Exclude<EditOperation, ReplaceFileOperation>),
+      operations.map((operation, operationIndex) =>
+        baseEffect(operation as Exclude<EditOperation, ReplaceFileOperation>, operationIndex),
       ),
       false,
+      composition,
     );
   } else {
     assertLegacyBaseOperationsCompatible(
@@ -527,7 +698,7 @@ function planLegacyOperations(input: {
   const { base, current, operations, unchanged, maxContextLines } = input;
   const changes: MappedChange[] = [];
   const mapper = unchanged ? undefined : createUniqueMapper(base.lines, current.lines);
-  for (const operation of operations) {
+  for (const [operationIndex, operation] of operations.entries()) {
     if (operation.op === "replace") {
       const baseStart = operation.startLine - 1;
       const length = operation.endLine - operation.startLine + 1;
@@ -535,7 +706,10 @@ function planLegacyOperations(input: {
         ? baseStart
         : mapper?.mapRange(operation.startLine, operation.endLine, maxContextLines).start;
       if (currentStart === undefined) fail("TARGET_CHANGED", "The target cannot be relocated.");
-      const change = replaceText(current, currentStart, currentStart + length, operation.lines);
+      const change = replaceText(current, currentStart, currentStart + length, operation.lines, {
+        operationIndex,
+        operationKind: operation.op,
+      });
       change.basePosition = baseStart * 2;
       changes.push(change);
       continue;
@@ -546,7 +720,10 @@ function planLegacyOperations(input: {
       : mapper?.mapBoundary(operation.afterLine, maxContextLines);
     if (currentPosition === undefined)
       fail("BOUNDARY_CHANGED", "The boundary cannot be relocated.");
-    const change = insertText(current, currentPosition, operation.lines);
+    const change = insertText(current, currentPosition, operation.lines, {
+      operationIndex,
+      operationKind: operation.op,
+    });
     change.basePosition = operation.afterLine * 2 + 1;
     changes.push(change);
   }
@@ -715,10 +892,12 @@ function mapTransferOperations(
   operations: readonly EditOperation[],
   mapped: ReadonlyMap<string, Anchor>,
 ): MappedOperation[] {
-  return operations.map((operation) => {
+  return operations.map((operation, operationIndex) => {
     if (operation.op === "replace") {
       return {
         op: "replace",
+        operationIndex,
+        operationKind: operation.op,
         operation,
         target: getMappedRange(mapped, rangeFor(operation.startLine, operation.endLine)),
       };
@@ -726,6 +905,8 @@ function mapTransferOperations(
     if (operation.op === "insert") {
       return {
         op: "insert",
+        operationIndex,
+        operationKind: operation.op,
         operation,
         destination: getMappedBoundary(mapped, operation.afterLine),
       };
@@ -733,6 +914,8 @@ function mapTransferOperations(
     if (operation.op === "copy_range") {
       return {
         op: "copy_range",
+        operationIndex,
+        operationKind: operation.op,
         operation,
         source: getMappedRange(mapped, rangeFor(operation.startLine, operation.endLine)),
         destination: getMappedBoundary(mapped, operation.afterLine),
@@ -752,7 +935,15 @@ function mapTransferOperations(
     if (!coherent) {
       fail("AMBIGUOUS_RELOCATION", "The relocated move anchors no longer form one exact corridor.");
     }
-    return { op: "move_range", operation, source, corridor, destination };
+    return {
+      op: "move_range",
+      operationIndex,
+      operationKind: operation.op,
+      operation,
+      source,
+      corridor,
+      destination,
+    };
   });
 }
 
@@ -872,6 +1063,8 @@ function joinedSourceStats(
 
 function eagerChange(change: MappedChange): PlannedChange {
   return {
+    operationIndex: change.operationIndex,
+    operationKind: change.operationKind,
     start: change.start,
     end: change.end,
     basePosition: change.basePosition,
@@ -893,6 +1086,8 @@ function copyChange(
     statsForText(layout.suffix),
   ]);
   return {
+    operationIndex: operation.operationIndex,
+    operationKind: operation.operationKind,
     start: layout.start,
     end: layout.start,
     basePosition: operation.operation.afterLine * 2 + 1,
@@ -908,6 +1103,183 @@ function copyChange(
         caches.rendered.set(key, source);
       }
       return `${layout.prefix}${source}${layout.suffix}`;
+    },
+  };
+}
+
+type CompositeLine = Pick<TextDocument["lines"][number], "text" | "eol">;
+
+type CompositeReplacement = {
+  target: LineSpan;
+  lines: readonly CompositeLine[];
+};
+
+function replacementLines(document: TextDocument, operation: MappedReplace): CompositeLine[] {
+  const first = document.lines[operation.target.start];
+  const last = document.lines[operation.target.end - 1];
+  if (!first || !last) fail("TARGET_CHANGED", "The replacement range no longer exists.");
+  const eol = last.eol || first.eol || document.preferredEol;
+  return operation.operation.lines.map((text, index, lines) => ({
+    text,
+    eol: index === lines.length - 1 ? last.eol : eol,
+  }));
+}
+
+function mapStructuralBoundary(
+  position: number,
+  replacements: readonly CompositeReplacement[],
+): number {
+  let mapped = position;
+  for (const replacement of replacements) {
+    if (position > replacement.target.start && position < replacement.target.end) {
+      fail("AMBIGUOUS_RELOCATION", "A composed move boundary intersects a replacement.");
+    }
+    if (position >= replacement.target.end) {
+      mapped += replacement.lines.length - (replacement.target.end - replacement.target.start);
+    }
+  }
+  return mapped;
+}
+
+function lineSequenceStats(
+  texts: readonly string[],
+  eols: readonly CompositeLine["eol"][],
+): TextStats {
+  let stats = { ...EMPTY_STATS };
+  for (let index = 0; index < texts.length; index += 1) {
+    const text = texts[index];
+    const eol = eols[index];
+    if (text === undefined || eol === undefined) {
+      fail("AMBIGUOUS_RELOCATION", "The composed move output is incomplete.");
+    }
+    stats = combineStats([stats, statsForText(text), statsForText(eol)]);
+  }
+  return stats;
+}
+
+function compositeMoveChange(
+  document: TextDocument,
+  operation: MappedMove,
+  replacementOperations: readonly MappedReplace[],
+): PlannedChange {
+  const upward = operation.operation.afterLine < operation.operation.startLine - 1;
+  const intervening = upward
+    ? { start: operation.corridor.start, end: operation.source.start }
+    : { start: operation.source.end, end: operation.corridor.end };
+  for (const replacement of replacementOperations) {
+    const destinationIntersects =
+      operation.destination > replacement.target.start &&
+      operation.destination < replacement.target.end;
+    if (
+      !spanContains(intervening, replacement.target) ||
+      spansIntersect(operation.source, replacement.target) ||
+      destinationIntersects
+    ) {
+      fail(
+        "AMBIGUOUS_RELOCATION",
+        "A replacement no longer lies wholly inside the relocated move corridor.",
+      );
+    }
+  }
+
+  const replacements: CompositeReplacement[] = [...replacementOperations]
+    .sort(
+      (left, right) =>
+        left.target.start - right.target.start ||
+        left.target.end - right.target.end ||
+        left.operationIndex - right.operationIndex,
+    )
+    .map((replacement) => ({
+      target: replacement.target,
+      lines: replacementLines(document, replacement),
+    }));
+
+  const corridor = document.lines.slice(operation.corridor.start, operation.corridor.end);
+  const first = corridor[0];
+  const last = corridor.at(-1);
+  if (!first || !last) {
+    fail("AMBIGUOUS_RELOCATION", "The relocated move corridor is inconsistent.");
+  }
+
+  // Slice every target from the immutable pre-batch corridor, never from another replacement.
+  const replaced: CompositeLine[] = [];
+  let cursor = operation.corridor.start;
+  for (const replacement of replacements) {
+    if (replacement.target.start < cursor || replacement.target.end > operation.corridor.end) {
+      fail("AMBIGUOUS_RELOCATION", "Composed replacement ranges are inconsistent.");
+    }
+    replaced.push(...document.lines.slice(cursor, replacement.target.start), ...replacement.lines);
+    cursor = replacement.target.end;
+  }
+  replaced.push(...document.lines.slice(cursor, operation.corridor.end));
+
+  const mappedCorridor = {
+    start: mapStructuralBoundary(operation.corridor.start, replacements),
+    end: mapStructuralBoundary(operation.corridor.end, replacements),
+  };
+  const mappedSource = {
+    start: mapStructuralBoundary(operation.source.start, replacements),
+    end: mapStructuralBoundary(operation.source.end, replacements),
+  };
+  const mappedDestination = mapStructuralBoundary(operation.destination, replacements);
+  const coherent = upward
+    ? mappedCorridor.start === mappedDestination && mappedCorridor.end === mappedSource.end
+    : mappedCorridor.start === mappedSource.start && mappedCorridor.end === mappedDestination;
+  if (!coherent || mappedCorridor.end - mappedCorridor.start !== replaced.length) {
+    fail("AMBIGUOUS_RELOCATION", "The composed move corridor is structurally inconsistent.");
+  }
+
+  const sourceStart = mappedSource.start - mappedCorridor.start;
+  const sourceEnd = mappedSource.end - mappedCorridor.start;
+  const destination = mappedDestination - mappedCorridor.start;
+  const texts = replaced.map((line) => line.text);
+  const eols = replaced.map((line) => line.eol);
+  const source = texts.slice(sourceStart, sourceEnd);
+  const output = upward
+    ? [...source, ...texts.slice(destination, sourceStart)]
+    : [...texts.slice(sourceEnd, destination), ...source];
+  if (output.length !== replaced.length) {
+    fail("AMBIGUOUS_RELOCATION", "The composed move output is structurally inconsistent.");
+  }
+
+  let rendered: string | undefined;
+  const render = (): string => {
+    rendered ??= output
+      .map((text, index) => {
+        const eol = eols[index];
+        if (eol === undefined) {
+          fail("AMBIGUOUS_RELOCATION", "The composed move output is incomplete.");
+        }
+        return `${text}${eol}`;
+      })
+      .join("");
+    return rendered;
+  };
+  let replacementOnly: string | undefined;
+  let layoutValid: boolean | undefined;
+  const basePosition = moveCorridorSpan(operation.operation).start * 2;
+  return {
+    operationIndex: operation.operationIndex,
+    operationKind: operation.operationKind,
+    start: first.start,
+    end: last.end,
+    basePosition,
+    stats: lineSequenceStats(output, eols),
+    render,
+    move: {
+      basePosition,
+      isLayoutValid: () => {
+        if (layoutValid !== undefined) return layoutValid;
+        const reparsed = parseTextLines(render());
+        layoutValid =
+          reparsed.length === output.length &&
+          reparsed.every((line, index) => line.text === output[index] && line.eol === eols[index]);
+        return layoutValid;
+      },
+      isNoChange: () => {
+        replacementOnly ??= replaced.map((line) => `${line.text}${line.eol}`).join("");
+        return render() === replacementOnly;
+      },
     },
   };
 }
@@ -941,6 +1313,8 @@ function moveChange(document: TextDocument, operation: MappedMove): PlannedChang
   };
   const basePosition = moveCorridorSpan(operation.operation).start * 2;
   return {
+    operationIndex: operation.operationIndex,
+    operationKind: operation.operationKind,
     start: first.start,
     end: last.end,
     basePosition,
@@ -1024,30 +1398,54 @@ function renderPlannedChanges(document: TextDocument, changes: readonly PlannedC
 function createTransferChanges(
   document: TextDocument,
   operations: readonly MappedOperation[],
+  composition?: MoveComposition,
 ): PlannedChange[] {
   let copyCaches: CopyCaches | undefined;
-  return operations.map((operation) => {
+  const replacementOperations = operations.filter(
+    (operation): operation is MappedReplace =>
+      operation.op === "replace" &&
+      composition?.replacementOperationIndexes.has(operation.operationIndex) === true,
+  );
+  const changes: PlannedChange[] = [];
+  for (const operation of operations) {
     if (operation.op === "replace") {
+      if (composition?.replacementOperationIndexes.has(operation.operationIndex)) continue;
       const change = replaceText(
         document,
         operation.target.start,
         operation.target.end,
         operation.operation.lines,
+        {
+          operationIndex: operation.operationIndex,
+          operationKind: operation.operationKind,
+        },
       );
       change.basePosition = (operation.operation.startLine - 1) * 2;
-      return eagerChange(change);
+      changes.push(eagerChange(change));
+      continue;
     }
     if (operation.op === "insert") {
-      const change = insertText(document, operation.destination, operation.operation.lines);
+      const change = insertText(document, operation.destination, operation.operation.lines, {
+        operationIndex: operation.operationIndex,
+        operationKind: operation.operationKind,
+      });
       change.basePosition = operation.operation.afterLine * 2 + 1;
-      return eagerChange(change);
+      changes.push(eagerChange(change));
+      continue;
     }
     if (operation.op === "copy_range") {
       copyCaches ??= createCopyCaches(document);
-      return copyChange(document, operation, copyCaches);
+      changes.push(copyChange(document, operation, copyCaches));
+      continue;
     }
-    return moveChange(document, operation);
-  });
+    changes.push(
+      operation.operationIndex === composition?.moveOperationIndex &&
+        replacementOperations.length > 0
+        ? compositeMoveChange(document, operation, replacementOperations)
+        : moveChange(document, operation),
+    );
+  }
+  return changes;
 }
 
 function sortedMoveChanges(
@@ -1085,8 +1483,9 @@ function planTransferOperations(input: {
   const mappedAnchors = mapAnchors({ anchors, base, current, unchanged, maxContextLines });
   assertAnchorTopology(anchors, mappedAnchors);
   const mappedOperations = mapTransferOperations(operations, mappedAnchors);
-  assertEffectsCompatible(mappedOperations.map(mappedEffect), true);
-  const changes = createTransferChanges(current, mappedOperations);
+  const composition = analyzeMoveComposition(operations);
+  assertEffectsCompatible(mappedOperations.map(mappedEffect), true, composition);
+  const changes = createTransferChanges(current, mappedOperations, composition);
 
   assertCompatibleChanges(changes);
   const projected = projectChanges(current, changes, maxFileBytes, maxLines);
@@ -1104,6 +1503,7 @@ function planTransferOperations(input: {
     const baseChanges = createTransferChanges(
       base,
       mapTransferOperations(operations, baseMappedAnchors),
+      composition,
     );
     assertCompatibleChanges(baseChanges);
     const baseProjected = projectChanges(

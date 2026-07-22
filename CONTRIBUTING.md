@@ -25,7 +25,8 @@ Tool names, flat schemas, operation-specific field combinations, line rendering,
 normalization, validation, mismatch behavior, permission metadata, and publication results are
 public protocol surface. File lifecycle changes also include direct path identity, complete issued
 coverage, source/destination authorization, lock sets, native renderer metadata, and partial-state
-semantics. A pull request changing any of them must include:
+semantics. Readback windows, operation-pair conflict diagnostics, and parent-chain creation plans are
+also public protocol surface. A pull request changing any of them must include:
 
 - a concrete failure or measured opportunity;
 - deterministic safety and compatibility tests;
@@ -40,8 +41,19 @@ without replanning, and `PARTIAL_PUBLICATION` without unsafe rollback. Native-al
 cover operation/source/destination metadata correlation, old-version history rejection, affected
 snapshot invalidation, and poisoned-session recovery.
 
-Do not replace fail-closed behavior with fuzzy matching, silent fallback, overwrite, parent creation,
-or destructive rollback merely to improve a success-rate benchmark.
+Parent-creating write tests must additionally cover the 64-directory bound, a fixed deepest-ancestor
+plan, authorization and deterministic locks for every directory plus the target, exclusive
+non-recursive root-to-leaf `mkdir`, the existing staged no-clobber file publication, no state before
+the first directory exists or creation becomes ambiguous, retained state and `PARTIAL_PUBLICATION`
+afterward, and no rollback.
+Omitted or false `createParents` must remain strict, and `move_file` must never create parents.
+Readback tests must cover one-based post-edit offsets, the 1..1000 limit, defaults, text-only
+validation, one contiguous delivered page, and rejection of undelivered or ID-only successor
+authority. Conflict tests must preserve stable codes and deterministic zero-based operation-pair
+suffixes.
+
+Do not replace fail-closed behavior with fuzzy matching, silent fallback, overwrite, unplanned or
+recursive parent creation, or destructive rollback merely to improve a success-rate benchmark.
 
 ## Benchmarks
 
@@ -50,6 +62,9 @@ revisions, runtime versions, and model snapshots where applicable. Preserve raw 
 failures, retries, partial publications, and unintended changes rather than success-conditioned
 averages. Never rewrite retained evidence to cover a new schema, operation, task set, or adapter; add
 a new identity and result. Dry runs and model-free verifier evidence are not paid model evidence.
+Development runner output is not retained evidence until it is written once at a new final result
+path. Preserve the schema-v6 and schema-v7 results plus pilot-v7 scope unchanged; future runner or
+protocol revisions require a new result identity.
 
 ## Commits
 

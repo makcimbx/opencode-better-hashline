@@ -641,6 +641,8 @@ describe("native alias session protocol", () => {
       ],
       ["delete_file", { ...lifecycleInput("delete_file"), rebase: "unique" }],
       ["move_file", { ...lifecycleInput("move_file"), readback: true }],
+      ["delete_file", { ...lifecycleInput("delete_file"), readbackOffset: 1 }],
+      ["move_file", { ...lifecycleInput("move_file"), readback: true, readbackLimit: 1 }],
       [
         "move_file",
         {

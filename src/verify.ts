@@ -7,7 +7,7 @@ import { tool } from "@opencode-ai/plugin";
 import { evaluateExactTree } from "./exact-tree.js";
 import { inspectNativeAliasTrace } from "./model-trace.js";
 import { openCodeProviderSchema } from "./native-alias.js";
-import { hashlineEditArgumentsSchema } from "./plugin.js";
+import { hashlineEditArgumentsSchema, hashlineWriteArgumentsSchema } from "./plugin.js";
 import {
   canonicalJson,
   canonicalPathSha256,
@@ -49,6 +49,45 @@ const LIFECYCLE_MOVED_PATH = "lifecycle-moved.txt";
 const LIFECYCLE_NO_CLOBBER_PATH = "lifecycle-no-clobber.txt";
 const LIFECYCLE_OCCUPIED_PATH = "lifecycle-occupied.txt";
 const PROBE_PATH = "probe.txt";
+const NESTED_CREATE_PATH = "nested/inner/new.txt";
+const NESTED_CREATE_BYTES = "created\n";
+const NESTED_CREATE_DISPLAY_PATH = `<fixture>/${NESTED_CREATE_PATH}`;
+const NESTED_CREATE_DIFF = `Index: ${NESTED_CREATE_DISPLAY_PATH}
+===================================================================
+--- ${NESTED_CREATE_DISPLAY_PATH}\tbefore
++++ ${NESTED_CREATE_DISPLAY_PATH}\tafter
+@@ -0,0 +1,1 @@
++created
+`;
+const READBACK_PATH = "readback-window.txt";
+const READBACK_LINES = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`);
+const READBACK_BYTES = `${READBACK_LINES.join("\n")}\n`;
+const READBACK_EDITED_LINES = READBACK_LINES.map((line, index) =>
+  index === 9 ? "readback-changed" : line,
+);
+const READBACK_EDITED_BYTES = `${READBACK_EDITED_LINES.join("\n")}\n`;
+const READBACK_FINAL_LINES = READBACK_EDITED_LINES.map((line, index) =>
+  index === 7 ? "readback-inside" : line,
+);
+const READBACK_FINAL_BYTES = `${READBACK_FINAL_LINES.join("\n")}\n`;
+const COMPOSITION_PATH = "composition.txt";
+const COMPOSITION_BYTES = `${Array.from({ length: 13 }, (_, index) => `L${index + 1}`).join("\n")}\n`;
+const COMPOSITION_FINAL_BYTES = [
+  "L1",
+  "L4",
+  "R5",
+  "L6",
+  "L7",
+  "L8",
+  "L9",
+  "L10",
+  "L11",
+  "L12",
+  "L13",
+  "L2",
+  "L3",
+  "",
+].join("\n");
 const RENDERED_BYTES = VERIFIER_RENDERED_BYTES;
 const PRIVATE_CANARY = "BH_PRIVATE_CANARY_8f149f0a";
 const RELEVANT_TOOLS = new Set([
@@ -93,8 +132,14 @@ interface HookRecord {
   hook?: string;
   tool?: string;
   sessionID?: string;
+  callID?: string;
+  args?: unknown;
   output?: string;
   metadata?: Record<string, unknown>;
+  permission?: string;
+  pattern?: unknown;
+  requestedStatus?: string;
+  status?: string;
 }
 
 interface ToolPart {
@@ -265,8 +310,19 @@ async function record(value) {
   if (!logPath) throw new Error("BETTER_HASHLINE_VERIFY_HOOK_LOG is required");
   await appendFile(logPath, JSON.stringify(value) + "\\n", "utf8");
 }
-export default async function observer() {
+export default async function observer({ client }) {
   return {
+    async event({ event }) {
+      if (!${JSON.stringify(label === "first")}) return;
+      const permission = event?.type === "permission.asked" ? event.properties : undefined;
+      if (!permission || !Array.isArray(permission.metadata?.createdDirectories)) return;
+      const response = await client.postSessionIdPermissionsPermissionId({
+        path: { id: permission.sessionID, permissionID: permission.id },
+        body: { response: "once" },
+      });
+      if (response.error) throw new Error("Failed to approve verification permission");
+      await record({ label: ${JSON.stringify(label)}, hook: "permission.ask", permission: permission.permission, pattern: permission.patterns, metadata: permission.metadata, requestedStatus: "ask", status: "allow" });
+    },
     async "tool.execute.before"(input, output) {
       if (!relevant.has(input.tool)) return;
       await record({ label: ${JSON.stringify(label)}, hook: "before", tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args });
@@ -582,7 +638,11 @@ function normalizeRendererValue(
       .replaceAll("\\", "/")
       .replaceAll("\r\n", "\n")
       .replaceAll(/<fixture>\/+/gu, "<fixture>/")
-      .replaceAll(/^((?:---|\+\+\+) )"(<fixture>\/[^"\n]+)"(\t(?:before|after))$/gmu, "$1$2$3");
+      .replaceAll(
+        /^((?:---|\+\+\+) )"(<fixture>\/[^"\n]+)"(\t(?:before|after))$/gmu,
+        (_match, prefix: string, path: string, suffix: string) =>
+          `${prefix}${path.replaceAll(/\/+/gu, "/")}${suffix}`,
+      );
   }
   if (Array.isArray(value))
     return value.map((item) => normalizeRendererValue(item, roots, pathDigests));
@@ -742,6 +802,9 @@ async function verifyScenario(
     const movedFixture = join(workspace, LIFECYCLE_MOVED_PATH);
     const noClobberFixture = join(workspace, LIFECYCLE_NO_CLOBBER_PATH);
     const occupiedFixture = join(workspace, LIFECYCLE_OCCUPIED_PATH);
+    const nestedFixture = join(workspace, NESTED_CREATE_PATH);
+    const readbackFixture = join(workspace, READBACK_PATH);
+    const compositionFixture = join(workspace, COMPOSITION_PATH);
     const hookLog = join(root, "hooks.jsonl");
     const providerLog = join(root, "provider.jsonl");
     const firstObserver = join(root, "observer-first.ts");
@@ -769,6 +832,7 @@ async function verifyScenario(
       ].map((directory) => mkdir(directory, { recursive: true })),
     );
     await rm(movedFixture, { force: true });
+    await rm(join(workspace, "nested"), { force: true, recursive: true });
     await Promise.all([
       writeFile(fixture, INITIAL_BYTES, "utf8"),
       writeFile(malformedFixture, `${PRIVATE_CANARY}\n`, "utf8"),
@@ -776,6 +840,8 @@ async function verifyScenario(
       writeFile(moveFixture, LIFECYCLE_MOVE_BYTES, "utf8"),
       writeFile(noClobberFixture, LIFECYCLE_NO_CLOBBER_SOURCE_BYTES, "utf8"),
       writeFile(occupiedFixture, LIFECYCLE_NO_CLOBBER_DESTINATION_BYTES, "utf8"),
+      writeFile(readbackFixture, READBACK_BYTES, "utf8"),
+      writeFile(compositionFixture, COMPOSITION_BYTES, "utf8"),
       writeFile(hookLog, "", "utf8"),
       writeFile(providerLog, "", "utf8"),
       writeFile(firstObserver, observerSource("first"), "utf8"),
@@ -1011,6 +1077,157 @@ async function verifyScenario(
               id: "call_file-lifecycle_read-no-clobber",
               name: "hashline_read",
               args: { filePath: LIFECYCLE_NO_CLOBBER_PATH },
+            },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Create one nested file through one approved parent plan")) {
+          if (serialized.includes("Created 2 parent directories and the file")) {
+            return streamResponse(
+              { kind: "text", text: "Nested parent creation verified." },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_hashline-write_nested",
+              name: "hashline_write",
+              args: {
+                filePath: NESTED_CREATE_PATH,
+                content: NESTED_CREATE_BYTES,
+                createParents: true,
+              },
+            },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Exercise one explicit contiguous edit readback window")) {
+          const prompt = "Exercise one explicit contiguous edit readback window";
+          const phaseHistory = serialized.slice(serialized.lastIndexOf(prompt));
+          const snapshotId = phaseHistory.match(/s_[A-Za-z0-9_-]{22}/gu)?.at(-1);
+          if (
+            phaseHistory.includes("readback-inside") &&
+            phaseHistory.includes("Applied 1 operation")
+          ) {
+            return streamResponse(
+              { kind: "text", text: "Contiguous edit readback verified." },
+              scenario.modelID,
+            );
+          }
+          if (phaseHistory.includes("RANGE_NOT_FULLY_ISSUED") && snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_readback-inside",
+                name: scenario.editTool,
+                args: {
+                  filePath: READBACK_PATH,
+                  snapshotId,
+                  operations: [
+                    {
+                      op: "replace",
+                      startLine: 8,
+                      endLine: 8,
+                      lines: ["readback-inside"],
+                    },
+                  ],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          if (phaseHistory.includes("readbackOffset") && snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_readback-outside",
+                name: scenario.editTool,
+                args: {
+                  filePath: READBACK_PATH,
+                  snapshotId,
+                  operations: [
+                    {
+                      op: "replace",
+                      startLine: 13,
+                      endLine: 13,
+                      lines: ["readback-outside"],
+                    },
+                  ],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          if (snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_readback-window",
+                name: scenario.editTool,
+                args: {
+                  filePath: READBACK_PATH,
+                  snapshotId,
+                  operations: [
+                    {
+                      op: "replace",
+                      startLine: 10,
+                      endLine: 10,
+                      lines: ["readback-changed"],
+                    },
+                  ],
+                  readback: true,
+                  readbackOffset: 8,
+                  readbackLimit: 5,
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_hashline-read_readback",
+              name: "hashline_read",
+              args: { filePath: READBACK_PATH },
+            },
+            scenario.modelID,
+          );
+        }
+        if (serialized.includes("Compose one move range with one contained replacement")) {
+          const prompt = "Compose one move range with one contained replacement";
+          const phaseHistory = serialized.slice(serialized.lastIndexOf(prompt));
+          if (phaseHistory.includes("Applied 2 operations")) {
+            return streamResponse(
+              { kind: "text", text: "Composite move and replacement verified." },
+              scenario.modelID,
+            );
+          }
+          const snapshotId = phaseHistory.match(/s_[A-Za-z0-9_-]{22}/gu)?.at(-1);
+          if (snapshotId) {
+            return streamResponse(
+              {
+                kind: "tool",
+                id: "call_composition",
+                name: scenario.editTool,
+                args: {
+                  filePath: COMPOSITION_PATH,
+                  snapshotId,
+                  operations: [
+                    { op: "move_range", startLine: 2, endLine: 3, afterLine: 13 },
+                    { op: "replace", startLine: 5, endLine: 5, lines: ["R5"] },
+                  ],
+                },
+              },
+              scenario.modelID,
+            );
+          }
+          return streamResponse(
+            {
+              kind: "tool",
+              id: "call_hashline-read_composition",
+              name: "hashline_read",
+              args: { filePath: COMPOSITION_PATH },
             },
             scenario.modelID,
           );
@@ -1501,6 +1718,350 @@ async function verifyScenario(
     );
     await writeFile(hookLog, "", "utf8");
 
+    environment.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      ...config,
+      permission: { ...config.permission, edit: "ask" },
+    });
+    const nestedRequestStart = providerRequests.length;
+    const nestedRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline nested creation verification ${scenario.route}`,
+        "Create one nested file through one approved parent plan, then stop.",
+      ],
+      workspace,
+      environment,
+    );
+    environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
+    invariant(
+      nestedRun.stdout.includes("Nested parent creation verified"),
+      `Nested parent creation did not finish: ${nestedRun.stdout.slice(-4096)}`,
+    );
+    invariant(
+      providerRequests.length === nestedRequestStart + 2,
+      "Nested parent creation made unexpected provider requests",
+    );
+    const nestedTools = providerRequests[nestedRequestStart]?.tools ?? [];
+    const effectiveWrite = nestedTools.find((entry) => entry.function?.name === "hashline_write");
+    invariant(effectiveWrite?.function?.parameters, "Effective hashline_write schema is missing");
+    const expectedWriteSchema = providerSchemaProjection(
+      tool.schema.toJSONSchema(hashlineWriteArgumentsSchema),
+    );
+    const effectiveWriteSchema = providerSchemaProjection(effectiveWrite.function.parameters);
+    const writeSchemaSha256 = jsonSha256(expectedWriteSchema);
+    invariant(
+      jsonSha256(effectiveWriteSchema) === writeSchemaSha256,
+      "Effective hashline_write schema does not match Better Hashline",
+    );
+    invariant(
+      hashlineWriteArgumentsSchema.safeParse({
+        filePath: NESTED_CREATE_PATH,
+        content: NESTED_CREATE_BYTES,
+        createParents: true,
+      }).success &&
+        !hashlineWriteArgumentsSchema.safeParse({
+          filePath: NESTED_CREATE_PATH,
+          content: NESTED_CREATE_BYTES,
+          createParents: "true",
+        }).success,
+      "hashline_write createParents validation changed",
+    );
+
+    const nestedHooks = (await readFile(hookLog, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as HookRecord);
+    const permissionHooks = nestedHooks.filter(({ hook }) => hook === "permission.ask");
+    invariant(permissionHooks.length === 1, "Nested creation did not use one permission envelope");
+    const permissionHook = permissionHooks[0];
+    invariant(
+      permissionHook?.permission === "edit" &&
+        permissionHook.requestedStatus === "ask" &&
+        permissionHook.status === "allow",
+      "Nested creation permission envelope was not explicitly approved",
+    );
+    const normalizedPermissionPattern = normalizeRendererValue(permissionHook.pattern, [workspace]);
+    const normalizedPermissionMetadata = normalizeRendererValue(permissionHook.metadata, [
+      workspace,
+    ]);
+    const expectedPermissionPatterns = [
+      `<fixture>/${NESTED_CREATE_PATH}`,
+      "<fixture>/nested",
+      "<fixture>/nested/inner",
+    ];
+    const expectedPermissionMetadata = {
+      filepath: `<fixture>/${NESTED_CREATE_PATH}`,
+      filepaths: expectedPermissionPatterns,
+      diff: NESTED_CREATE_DIFF,
+      createdDirectories: ["<fixture>/nested", "<fixture>/nested/inner"],
+    };
+    invariant(
+      canonicalJson(normalizedPermissionPattern) === canonicalJson(expectedPermissionPatterns) &&
+        canonicalJson(normalizedPermissionMetadata) === canonicalJson(expectedPermissionMetadata),
+      `Nested creation permission envelope changed: ${canonicalJson({ pattern: normalizedPermissionPattern, metadata: normalizedPermissionMetadata })}`,
+    );
+    const nestedAfter = nestedHooks.find(
+      ({ label, hook, tool }) => label === "last" && hook === "after" && tool === "hashline_write",
+    );
+    invariant(
+      typeof nestedAfter?.sessionID === "string",
+      "Nested creation session was not observed",
+    );
+    const nestedExport = await run(
+      [opencode, "export", nestedAfter.sessionID],
+      workspace,
+      environment,
+    );
+    const nestedPart = collectToolParts(JSON.parse(nestedExport.stdout) as unknown).find(
+      (part) => part.tool === "hashline_write" && part.state.status === "completed",
+    );
+    const expectedNestedInput = {
+      filePath: NESTED_CREATE_PATH,
+      content: NESTED_CREATE_BYTES,
+      createParents: true,
+    };
+    const expectedNestedMetadata = {
+      diff: NESTED_CREATE_DIFF,
+      createdDirectories: ["<fixture>/nested", "<fixture>/nested/inner"],
+      created: true,
+      truncated: false,
+    };
+    const normalizedNestedInput = normalizeRendererValue(nestedPart?.state.input, [workspace]);
+    const normalizedNestedMetadata = normalizeRendererValue(nestedPart?.state.metadata, [
+      workspace,
+    ]);
+    invariant(
+      nestedPart?.state.output ===
+        "Created 2 parent directories and the file. Use hashline_read before editing it." &&
+        canonicalJson(normalizedNestedInput) === canonicalJson(expectedNestedInput) &&
+        canonicalJson(normalizedNestedMetadata) === canonicalJson(expectedNestedMetadata),
+      `Exported nested creation evidence changed: ${canonicalJson({ input: normalizedNestedInput, metadata: normalizedNestedMetadata, output: nestedPart?.state.output })}`,
+    );
+    const nestedTree = await evaluateExactTree(join(workspace, "nested"), {
+      expectedFiles: { "inner/new.txt": NESTED_CREATE_BYTES },
+    });
+    invariant(
+      nestedTree.exactFiles,
+      `Nested creation tree is not exact: ${nestedTree.mismatches.join("; ")}`,
+    );
+    const nestedCreationEvidence = canonicalJson({
+      creation: {
+        input: normalizedNestedInput,
+        metadata: normalizedNestedMetadata,
+        output: nestedPart.state.output,
+        status: nestedPart.state.status,
+        tool: nestedPart.tool,
+      },
+      permission: {
+        approved: true,
+        count: permissionHooks.length,
+        metadata: expectedPermissionMetadata,
+        patterns: normalizedPermissionPattern,
+        permission: permissionHook.permission,
+      },
+      tree: {
+        directories: ["nested", "nested/inner"],
+        files: [{ bytes: await readFile(nestedFixture, "utf8"), path: NESTED_CREATE_PATH }],
+      },
+    });
+    const nestedCreationEvidenceSha256 = sha256(nestedCreationEvidence);
+    await writeFile(hookLog, "", "utf8");
+
+    const readbackRequestStart = providerRequests.length;
+    const readbackRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline readback verification ${scenario.route}`,
+        "Exercise one explicit contiguous edit readback window, reject line 13, then edit line 8.",
+      ],
+      workspace,
+      environment,
+    );
+    invariant(
+      readbackRun.stdout.includes("Contiguous edit readback verified") &&
+        readbackRun.stdout.includes("RANGE_NOT_FULLY_ISSUED"),
+      `Explicit edit readback did not prove its issued boundary: ${readbackRun.stdout.slice(-4096)}`,
+    );
+    invariant(
+      providerRequests.length === readbackRequestStart + 5,
+      "Explicit edit readback made unexpected provider requests",
+    );
+    invariant(
+      (await readFile(readbackFixture, "utf8")) === READBACK_FINAL_BYTES,
+      "Explicit edit readback produced unexpected bytes",
+    );
+    const readbackHooks = (await readFile(hookLog, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as HookRecord);
+    const readbackSessionID = readbackHooks.findLast(
+      ({ label, hook, tool }) => label === "last" && hook === "after" && tool === scenario.editTool,
+    )?.sessionID;
+    invariant(typeof readbackSessionID === "string", "Readback session was not observed");
+    const readbackExport = await run(
+      [opencode, "export", readbackSessionID],
+      workspace,
+      environment,
+    );
+    const readbackParts = collectToolParts(JSON.parse(readbackExport.stdout) as unknown).filter(
+      (part) => part.tool === scenario.editTool,
+    );
+    invariant(readbackParts.length === 3, "Readback export is missing edit attempts");
+    const normalizedReadbackParts = readbackParts.map((part) => ({
+      part,
+      input: normalizeRendererValue(part.state.input, [workspace]),
+    }));
+    const readbackPart = normalizedReadbackParts.find(({ input }) =>
+      canonicalJson(input).includes('"readbackOffset":8'),
+    );
+    const outsidePart = normalizedReadbackParts.find(({ input }) =>
+      canonicalJson(input).includes('"readback-outside"'),
+    );
+    const insidePart = normalizedReadbackParts.find(({ input }) =>
+      canonicalJson(input).includes('"readback-inside"'),
+    );
+    const deliveredLines = READBACK_EDITED_LINES.slice(7, 12);
+    const expectedReadbackOutput = [
+      "Applied 1 operation.",
+      "@hashline-edit previous=consumed successor=attached",
+      `@hashline snapshot=<snapshot> sha256=${sha256(READBACK_EDITED_BYTES).slice(0, 12)} lines=20 partial=true`,
+      ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
+      "@more offset=13",
+    ].join("\n");
+    const normalizedReadbackOutput = normalizeRendererValue(readbackPart?.part.state.output, [
+      workspace,
+    ]);
+    invariant(
+      readbackPart?.part.state.status === "completed" &&
+        normalizedReadbackOutput === expectedReadbackOutput &&
+        !Object.hasOwn(readbackPart.part.state.metadata ?? {}, "hashlinePending"),
+      "Exported readback window was not exactly delivered and activated",
+    );
+    invariant(
+      outsidePart?.part.state.status === "error" &&
+        outsidePart.part.state.error?.includes("RANGE_NOT_FULLY_ISSUED") &&
+        insidePart?.part.state.status === "completed" &&
+        insidePart.part.state.output ===
+          "Applied 1 operation.\n@hashline-edit previous=consumed successor=none next=hashline_read",
+      "Exported readback issuance boundary changed",
+    );
+    const readbackEvidence = canonicalJson({
+      delivered: { endLine: 12, lines: deliveredLines, startLine: 8 },
+      finalBytes: await readFile(readbackFixture, "utf8"),
+      issuance: {
+        inside: {
+          input: insidePart.input,
+          output: insidePart.part.state.output,
+          status: insidePart.part.state.status,
+        },
+        outside: {
+          errorCode: "RANGE_NOT_FULLY_ISSUED",
+          input: outsidePart.input,
+          status: outsidePart.part.state.status,
+        },
+      },
+      readback: {
+        input: readbackPart.input,
+        output: normalizedReadbackOutput,
+        pendingRemoved: true,
+        status: readbackPart.part.state.status,
+        tool: readbackPart.part.tool,
+      },
+    });
+    const readbackEvidenceSha256 = sha256(readbackEvidence);
+    await writeFile(hookLog, "", "utf8");
+
+    const compositionRequestStart = providerRequests.length;
+    const compositionRun = await run(
+      [
+        opencode,
+        "run",
+        "--model",
+        providerModel,
+        "--agent",
+        "build",
+        "--format",
+        "json",
+        "--title",
+        `Better Hashline composition verification ${scenario.route}`,
+        "Compose one move range with one contained replacement, then stop.",
+      ],
+      workspace,
+      environment,
+    );
+    invariant(
+      compositionRun.stdout.includes("Composite move and replacement verified"),
+      `Composite edit did not finish: ${compositionRun.stdout.slice(-4096)}`,
+    );
+    invariant(
+      providerRequests.length === compositionRequestStart + 3,
+      "Composite edit made unexpected provider requests",
+    );
+    invariant(
+      (await readFile(compositionFixture, "utf8")) === COMPOSITION_FINAL_BYTES,
+      "Composite edit produced unexpected bytes",
+    );
+    const compositionHooks = (await readFile(hookLog, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as HookRecord);
+    const compositionSessionID = compositionHooks.find(
+      ({ label, hook, tool }) => label === "last" && hook === "after" && tool === scenario.editTool,
+    )?.sessionID;
+    invariant(typeof compositionSessionID === "string", "Composite edit session was not observed");
+    const compositionExport = await run(
+      [opencode, "export", compositionSessionID],
+      workspace,
+      environment,
+    );
+    const compositionPart = collectToolParts(JSON.parse(compositionExport.stdout) as unknown).find(
+      (part) => part.tool === scenario.editTool && part.state.status === "completed",
+    );
+    const normalizedCompositionInput = normalizeRendererValue(compositionPart?.state.input, [
+      workspace,
+    ]);
+    const expectedCompositionInput = {
+      filePath: COMPOSITION_PATH,
+      operations: [
+        { op: "move_range", startLine: 2, endLine: 3, afterLine: 13 },
+        { op: "replace", startLine: 5, endLine: 5, lines: ["R5"] },
+      ],
+      snapshotId: "<snapshot>",
+    };
+    invariant(
+      compositionPart?.state.output ===
+        "Applied 2 operations.\n@hashline-edit previous=consumed successor=none next=hashline_read" &&
+        canonicalJson(normalizedCompositionInput) === canonicalJson(expectedCompositionInput),
+      "Exported composite edit evidence changed",
+    );
+    const compositionEvidence = canonicalJson({
+      edit: {
+        input: normalizedCompositionInput,
+        output: compositionPart.state.output,
+        status: compositionPart.state.status,
+        tool: compositionPart.tool,
+      },
+      finalBytes: await readFile(compositionFixture, "utf8"),
+    });
+    const compositionEvidenceSha256 = sha256(compositionEvidence);
+    await writeFile(hookLog, "", "utf8");
+
     const mainRequestStart = providerRequests.length;
     const firstRun = await run(
       [
@@ -1886,6 +2447,9 @@ async function verifyScenario(
         [LIFECYCLE_MOVED_PATH]: LIFECYCLE_MOVE_BYTES,
         [LIFECYCLE_NO_CLOBBER_PATH]: LIFECYCLE_NO_CLOBBER_SOURCE_BYTES,
         [LIFECYCLE_OCCUPIED_PATH]: LIFECYCLE_NO_CLOBBER_DESTINATION_BYTES,
+        [NESTED_CREATE_PATH]: NESTED_CREATE_BYTES,
+        [READBACK_PATH]: READBACK_FINAL_BYTES,
+        [COMPOSITION_PATH]: COMPOSITION_FINAL_BYTES,
         "probe.txt": RENDERED_BYTES,
       },
     });
@@ -1904,6 +2468,7 @@ async function verifyScenario(
       model: providerModel,
       editTool: scenario.editTool,
       schemaSha256,
+      writeSchemaSha256,
       ...(fingerprint ? { protocolFingerprint: fingerprint } : {}),
       finalBytesSha256: sha256(RENDERED_BYTES),
       providerRequests: providerRequests.length,
@@ -1922,6 +2487,12 @@ async function verifyScenario(
       retryProviderRequests,
       metadataSnapshotSha256: sha256(metadataSnapshot),
       metadataSnapshot,
+      nestedCreationEvidenceSha256,
+      nestedCreationEvidence,
+      readbackEvidenceSha256,
+      readbackEvidence,
+      compositionEvidenceSha256,
+      compositionEvidence,
       rendererSnapshotSha256: rendererSha256,
       rendererSnapshot,
     };

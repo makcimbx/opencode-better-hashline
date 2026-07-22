@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { tool } from "@opencode-ai/plugin";
 import { openCodeProviderSchema } from "./native-alias.js";
-import { hashlineEditArgumentsSchema } from "./plugin.js";
+import { hashlineEditArgumentsSchema, hashlineWriteArgumentsSchema } from "./plugin.js";
 import {
   canonicalJson,
   jsonSha256,
@@ -22,6 +22,7 @@ export interface VerificationCaseReport {
   model: string;
   editTool: "hashline_edit" | "edit" | "apply_patch";
   schemaSha256: string;
+  writeSchemaSha256: string;
   protocolFingerprint?: string;
   finalBytesSha256: string;
   providerRequests: number;
@@ -40,6 +41,12 @@ export interface VerificationCaseReport {
   retryProviderRequests: number;
   metadataSnapshotSha256: string;
   metadataSnapshot: string;
+  nestedCreationEvidenceSha256: string;
+  nestedCreationEvidence: string;
+  readbackEvidenceSha256: string;
+  readbackEvidence: string;
+  compositionEvidenceSha256: string;
+  compositionEvidence: string;
   rendererSnapshotSha256: string;
   rendererSnapshot: string;
 }
@@ -86,6 +93,33 @@ const LIFECYCLE_MOVE_BYTES = "move exact bytes\n";
 const LIFECYCLE_NO_CLOBBER_BYTES = "source remains exact\n";
 const PATCH_SEPARATOR = "===================================================================";
 const EDIT_RECEIPT = "@hashline-edit previous=consumed successor=none next=hashline_read";
+const NESTED_CREATE_PATH = "nested/inner/new.txt";
+const NESTED_CREATE_BYTES = "created\n";
+const READBACK_PATH = "readback-window.txt";
+const COMPOSITION_PATH = "composition.txt";
+const READBACK_BEFORE_LINES = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`);
+const READBACK_AFTER_LINES = READBACK_BEFORE_LINES.map((line, index) =>
+  index === 9 ? "readback-changed" : line,
+);
+const READBACK_FINAL_LINES = READBACK_AFTER_LINES.map((line, index) =>
+  index === 7 ? "readback-inside" : line,
+);
+const COMPOSITION_FINAL_BYTES = [
+  "L1",
+  "L4",
+  "R5",
+  "L6",
+  "L7",
+  "L8",
+  "L9",
+  "L10",
+  "L11",
+  "L12",
+  "L13",
+  "L2",
+  "L3",
+  "",
+].join("\n");
 
 type EvidenceOperation = "delete_file" | "move_file" | "update";
 
@@ -150,6 +184,126 @@ const OPERATION_EVIDENCE: Record<EvidenceOperation, OperationEvidence> = {
 
 function sameJson(value: unknown, expected: unknown): boolean {
   return canonicalJson(value) === canonicalJson(expected);
+}
+
+function createFilePatch(path: string, bytes: string): string {
+  const lines = bytes.endsWith("\n") ? bytes.slice(0, -1).split("\n") : bytes.split("\n");
+  return `${patchHeader(path, path, "update")}@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}\n`;
+}
+
+function expectedNestedCreationEvidence() {
+  const target = fixturePath(NESTED_CREATE_PATH);
+  const directories = [fixturePath("nested"), fixturePath("nested/inner")];
+  const diff = createFilePatch(target, NESTED_CREATE_BYTES);
+  return {
+    creation: {
+      input: {
+        content: NESTED_CREATE_BYTES,
+        createParents: true,
+        filePath: NESTED_CREATE_PATH,
+      },
+      metadata: { created: true, createdDirectories: directories, diff, truncated: false },
+      output: "Created 2 parent directories and the file. Use hashline_read before editing it.",
+      status: "completed",
+      tool: "hashline_write",
+    },
+    permission: {
+      approved: true,
+      count: 1,
+      metadata: {
+        createdDirectories: directories,
+        diff,
+        filepath: target,
+        filepaths: [target, ...directories],
+      },
+      patterns: [target, ...directories],
+      permission: "edit",
+    },
+    tree: {
+      directories: ["nested", "nested/inner"],
+      files: [{ bytes: NESTED_CREATE_BYTES, path: NESTED_CREATE_PATH }],
+    },
+  };
+}
+
+function editInput(
+  filePath: string,
+  operations: Array<Record<string, unknown>>,
+  extra: Record<string, unknown> = {},
+) {
+  return { filePath, ...extra, operations, snapshotId: "<snapshot>" };
+}
+
+function expectedReadbackEvidence(editTool: VerificationCaseReport["editTool"]) {
+  const deliveredLines = READBACK_AFTER_LINES.slice(7, 12);
+  const readbackBytes = `${READBACK_AFTER_LINES.join("\n")}\n`;
+  const readbackOutput = [
+    "Applied 1 operation.",
+    "@hashline-edit previous=consumed successor=attached",
+    `@hashline snapshot=<snapshot> sha256=${sha256(readbackBytes).slice(0, 12)} lines=20 partial=true`,
+    ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
+    "@more offset=13",
+  ].join("\n");
+  return {
+    delivered: {
+      endLine: 12,
+      lines: deliveredLines,
+      startLine: 8,
+    },
+    finalBytes: `${READBACK_FINAL_LINES.join("\n")}\n`,
+    issuance: {
+      inside: {
+        input: editInput(READBACK_PATH, [
+          { endLine: 8, lines: ["readback-inside"], op: "replace", startLine: 8 },
+        ]),
+        output: `Applied 1 operation.\n${EDIT_RECEIPT}`,
+        status: "completed",
+      },
+      outside: {
+        errorCode: "RANGE_NOT_FULLY_ISSUED",
+        input: editInput(READBACK_PATH, [
+          { endLine: 13, lines: ["readback-outside"], op: "replace", startLine: 13 },
+        ]),
+        status: "error",
+      },
+    },
+    readback: {
+      input: editInput(
+        READBACK_PATH,
+        [{ endLine: 10, lines: ["readback-changed"], op: "replace", startLine: 10 }],
+        { readback: true, readbackLimit: 5, readbackOffset: 8 },
+      ),
+      output: readbackOutput,
+      pendingRemoved: true,
+      status: "completed",
+      tool: editTool,
+    },
+  };
+}
+
+function expectedCompositionEvidence(editTool: VerificationCaseReport["editTool"]) {
+  return {
+    edit: {
+      input: editInput(COMPOSITION_PATH, [
+        { afterLine: 13, endLine: 3, op: "move_range", startLine: 2 },
+        { endLine: 5, lines: ["R5"], op: "replace", startLine: 5 },
+      ]),
+      output: `Applied 2 operations.\n${EDIT_RECEIPT}`,
+      status: "completed",
+      tool: editTool,
+    },
+    finalBytes: COMPOSITION_FINAL_BYTES,
+  };
+}
+
+function isExactEvidence(value: unknown, expected: unknown): boolean {
+  if (typeof value !== "string" || value.length === 0 || value.length > 8_192) return false;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return value === canonicalJson(parsed) && sameJson(parsed, expected);
+  } catch {
+    return false;
+  }
 }
 
 function parseUnifiedDiff(
@@ -668,7 +822,7 @@ export function assertFullVerificationReport(
       route: "native-edit",
       model: "scripted/scripted",
       editTool: "edit",
-      providerRequests: 32,
+      providerRequests: 42,
       modelRoutingVerified: true,
       editPermissionMatrixVerified: true,
       retryProviderRequests: 1,
@@ -677,7 +831,7 @@ export function assertFullVerificationReport(
       route: "native-apply-patch",
       model: "scripted/gpt-5-scripted",
       editTool: "apply_patch",
-      providerRequests: 29,
+      providerRequests: 39,
       modelRoutingVerified: false,
       editPermissionMatrixVerified: true,
       retryProviderRequests: 0,
@@ -686,7 +840,7 @@ export function assertFullVerificationReport(
       route: "hashline",
       model: "scripted/scripted",
       editTool: "hashline_edit",
-      providerRequests: 25,
+      providerRequests: 35,
       modelRoutingVerified: false,
       editPermissionMatrixVerified: false,
       retryProviderRequests: 0,
@@ -727,6 +881,26 @@ export function assertFullVerificationReport(
   const schemaSha256 = jsonSha256(
     openCodeProviderSchema(tool.schema.toJSONSchema(hashlineEditArgumentsSchema)),
   );
+  const writeSchema = openCodeProviderSchema(
+    tool.schema.toJSONSchema(hashlineWriteArgumentsSchema),
+  );
+  const writeSchemaRecord = record(writeSchema);
+  const writeProperties = record(writeSchemaRecord?.properties);
+  const writeRequired = writeSchemaRecord?.required;
+  if (
+    !writeSchemaRecord ||
+    !writeProperties ||
+    !hasExactKeys(writeProperties, ["content", "createParents", "filePath"]) ||
+    !sameJson(writeRequired, ["filePath", "content"]) ||
+    !sameJson(record(writeProperties.createParents), {
+      description:
+        "Default false. When true, create up to 64 missing parent directories through one fixed, approved no-rollback plan; after a directory exists or a mkdir outcome becomes ambiguous, failures return PARTIAL_PUBLICATION.",
+      type: "boolean",
+    })
+  ) {
+    throw new Error("Verifier write schema does not expose optional boolean createParents.");
+  }
+  const writeSchemaSha256 = jsonSha256(writeSchema);
   const finalBytesSha256 = sha256(VERIFIER_RENDERED_BYTES);
   let protocolFingerprint: string | undefined;
   for (let index = 0; index < expectedCases.length; index += 1) {
@@ -739,6 +913,8 @@ export function assertFullVerificationReport(
       !hasExactKeys(verificationCase, [
         "benchmarkOracleVerified",
         "continuationVerified",
+        "compositionEvidence",
+        "compositionEvidenceSha256",
         "editPermissionMatrixVerified",
         "editTool",
         "exportVerified",
@@ -750,10 +926,14 @@ export function assertFullVerificationReport(
         "metadataSnapshotSha256",
         "model",
         "modelRoutingVerified",
+        "nestedCreationEvidence",
+        "nestedCreationEvidenceSha256",
         "providerRequests",
         ...(native ? ["protocolFingerprint"] : []),
         "rendererSnapshot",
         "rendererSnapshotSha256",
+        "readbackEvidence",
+        "readbackEvidenceSha256",
         "reopenVerified",
         "retryAbortVerified",
         "retryProviderRequests",
@@ -761,6 +941,7 @@ export function assertFullVerificationReport(
         "sanitizedExportVerified",
         "schemaSha256",
         "terminalRendererVerified",
+        "writeSchemaSha256",
       ]) ||
       verificationCase.route !== expected.route ||
       verificationCase.model !== expected.model ||
@@ -770,6 +951,7 @@ export function assertFullVerificationReport(
       verificationCase.editPermissionMatrixVerified !== expected.editPermissionMatrixVerified ||
       verificationCase.retryProviderRequests !== expected.retryProviderRequests ||
       verificationCase.schemaSha256 !== schemaSha256 ||
+      verificationCase.writeSchemaSha256 !== writeSchemaSha256 ||
       verificationCase.finalBytesSha256 !== finalBytesSha256 ||
       verificationCase.malformedRejected !== true ||
       verificationCase.fileOperationsVerified !== true ||
@@ -794,6 +976,24 @@ export function assertFullVerificationReport(
         schemaSha256,
       ) ||
       sha256(verificationCase.metadataSnapshot) !== verificationCase.metadataSnapshotSha256 ||
+      !/^[a-f0-9]{64}$/u.test(String(verificationCase.nestedCreationEvidenceSha256)) ||
+      !isExactEvidence(verificationCase.nestedCreationEvidence, expectedNestedCreationEvidence()) ||
+      sha256(String(verificationCase.nestedCreationEvidence)) !==
+        verificationCase.nestedCreationEvidenceSha256 ||
+      !/^[a-f0-9]{64}$/u.test(String(verificationCase.readbackEvidenceSha256)) ||
+      !isExactEvidence(
+        verificationCase.readbackEvidence,
+        expectedReadbackEvidence(expected.editTool),
+      ) ||
+      sha256(String(verificationCase.readbackEvidence)) !==
+        verificationCase.readbackEvidenceSha256 ||
+      !/^[a-f0-9]{64}$/u.test(String(verificationCase.compositionEvidenceSha256)) ||
+      !isExactEvidence(
+        verificationCase.compositionEvidence,
+        expectedCompositionEvidence(expected.editTool),
+      ) ||
+      sha256(String(verificationCase.compositionEvidence)) !==
+        verificationCase.compositionEvidenceSha256 ||
       typeof verificationCase.rendererSnapshot !== "string" ||
       verificationCase.rendererSnapshot.length === 0 ||
       verificationCase.rendererSnapshot.length > 8_192 ||

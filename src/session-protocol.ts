@@ -607,6 +607,8 @@ function assertAliasInput(
     "filePath",
     "operations",
     "readback",
+    "readbackLimit",
+    "readbackOffset",
     "rebase",
     "snapshotId",
   ];
@@ -623,7 +625,12 @@ function assertAliasInput(
     (input.rebase !== undefined && input.rebase !== "none" && input.rebase !== "unique") ||
     (input.allowHashlinePrefixes !== undefined &&
       typeof input.allowHashlinePrefixes !== "boolean") ||
-    (input.readback !== undefined && typeof input.readback !== "boolean")
+    (input.readback !== undefined && typeof input.readback !== "boolean") ||
+    (input.readbackOffset !== undefined && !validLineNumber(input.readbackOffset)) ||
+    (input.readbackLimit !== undefined &&
+      (!validLineNumber(input.readbackLimit) || (input.readbackLimit as number) > 1000)) ||
+    ((input.readbackOffset !== undefined || input.readbackLimit !== undefined) &&
+      input.readback !== true)
   ) {
     rejectHistory(`Completed historical ${toolName} input is unreadable.`);
   }
@@ -643,7 +650,9 @@ function assertAliasInput(
     (lifecycle.length !== 1 ||
       input.operations.length !== 1 ||
       input.rebase === "unique" ||
-      input.readback === true)
+      input.readback === true ||
+      input.readbackOffset !== undefined ||
+      input.readbackLimit !== undefined)
   ) {
     rejectHistory(`Completed historical ${toolName} input is unreadable.`);
   }

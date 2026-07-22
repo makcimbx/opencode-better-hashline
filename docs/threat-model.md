@@ -7,7 +7,7 @@ Better Hashline is designed to prevent these failures during cooperative agent e
 - applying an edit, delete, or move to bytes different from the approved strict snapshot;
 - selecting a wrong duplicate target through fuzzy or nearest matching;
 - accepting only range endpoints while an interior line changed;
-- composing overlapping or same-boundary text operations;
+- composing overlapping or same-boundary text operations except one explicitly bounded move with pairwise-disjoint replacements wholly inside its intervening corridor and outside its source;
 - mutating content that was retained internally but not issued to the model;
 - copying retained source text that was not issued to the model;
 - moving through unseen corridor content or composing a range move from evolving coordinates;
@@ -17,6 +17,7 @@ Better Hashline is designed to prevent these failures during cooperative agent e
 - moving across filesystems or publishing without authorizing both canonical paths;
 - bypassing normal OpenCode read/edit/external-directory permission decisions;
 - silently overwriting an existing path through the create tool;
+- silently creating an unapproved parent chain, replanning that chain after approval, or rolling back created directories over a concurrent writer;
 - following a retargeted text-edit symlink without reauthorization;
 - returning success when post-publication bytes or path state differ from the plan;
 - rolling back a partially published move in a way that could delete a newer writer's entry;
@@ -48,6 +49,11 @@ creation plus source unlink is also not transactional; post-publication verifica
 races and partial states but cannot safely roll them back over an even newer writer. Use OS isolation
 when uncoordinated writers are in scope.
 
+Opt-in parent creation similarly cannot make a portable directory-chain transaction. Exclusive
+non-recursive `mkdir` and immediate identity checks detect many races, but after the first directory
+is created the safe result can be a retained partial tree or committed target. The plugin reports
+`PARTIAL_PUBLICATION` and never deletes those names automatically.
+
 ### Shell and other plugins
 
 On the default surface, `enforce: true` hides and rejects OpenCode tool IDs `edit`, `write`, and
@@ -67,6 +73,9 @@ operation and source/destination correlation, not ongoing registry ownership. Al
 trusts plugin ordering, requires Better Hashline to be the last external collider, and must be
 reverified after configuration changes. It cannot provide the default unique IDs' collision
 isolation or continuous-ownership claim. V1 history is incompatible and cannot bind a v2 session.
+The current schema expansion retains the `native-aliases/v2` marker string but changes canonical
+schema/fingerprint identity; older v2 sessions also fail closed and require restart into a new
+session.
 
 ### Privileged filesystem attacks
 
@@ -83,12 +92,13 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | Property | Scope |
 | --- | --- |
 | Snapshot freshness | Exact byte equality in strict mode |
-| Issued authority | Required text ranges/boundaries, or complete lifecycle BOF-to-EOF source coverage |
+| Issued authority | Required text ranges/boundaries, or complete lifecycle BOF-to-EOF source coverage; readback issues only one delivered page and never an ID alone |
 | Target identity | Canonical path plus stable metadata; lifecycle also requires direct terminal and parent binding |
 | Relocation | Exact selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges |
-| Text-batch validation | One immutable pre-batch file, declared read/write effects checked before mutation |
-| Permission binding | Exact planned patch and complete source/destination path set before approval |
-| New file safety | Staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
+| Text-batch validation | One immutable pre-batch file, declared read/write effects checked before mutation, stable conflict codes with deterministic zero-based pair evidence |
+| Permission binding | Exact planned patch and complete source/destination or parent-chain path set before approval |
+| New file safety | Existing-parent strict default; staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
+| Parent creation safety | Explicit opt-in, at most 64 fixed missing directories, all-path authorization/locks, exclusive root-to-leaf creation, and no rollback after a directory exists or creation becomes ambiguous |
 | Delete safety | Direct regular single-link source revalidated before exact unlink and absence verification |
 | Move safety | Existing stable parents, same filesystem, absent destination, no-clobber hard link, exact inode/byte/link-count verification, then source unlink |
 | Partial move safety | No destructive rollback; affected snapshots invalidated, explicit `PARTIAL_PUBLICATION`, and bound alias session poisoned |
@@ -100,11 +110,16 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 Transfer operations are source-referenced compound text edits. Copy requires complete source
 provenance plus destination-boundary provenance. Move requires complete provenance for the
 source-to-destination corridor because logical texts are permuted over its positional EOL slots.
+One move may include pairwise-disjoint replacements wholly inside the intervening corridor and
+outside its source; all replacement inputs still come from immutable pre-batch bytes, and the whole
+corridor remains freshness and issuance authority. All other destructive intersections reject.
 Exact-unique relocation maps every source, corridor, and destination anchor through one cumulative
 budget, then rejects changed topology. Copy amplification is projected against configured output
 limits before materializing the final document. Projection composes CRLF across segment boundaries,
 and move rendering is reparsed against its expected logical texts and EOL slots. This prevents
 empty-text moves from merging a lone CR with a relocated LF or changing the no-phantom EOF model.
+When failed exact relocation detects only delimiter changes at the original selected coordinates,
+it adds a reread explanation but still returns `TARGET_CHANGED`; it does not normalize or fuzzy-match.
 
 File lifecycle operations are not text transfers. They are sole, strict operations planned outside
 `planEdits`; line fields, readback, unique relocation, overwrite, parent creation, and cross-filesystem
@@ -112,6 +127,14 @@ movement are unavailable. Their exact delete/move patch and v2 metadata are immu
 approval. Delete revalidates the direct terminal binding before unlink. Move publishes destination
 first with a verified hard link and can therefore truthfully report a nontransactional state in
 which both names remain.
+
+`hashline_write` parent creation is separate from lifecycle movement. Omitted/false
+`createParents` stays strict; explicit `true` fixes the deepest existing ancestor and at most 64
+missing directories before permission, authorizes and locks every directory plus the target, and
+uses exclusive root-to-leaf creation before existing staged no-clobber publication. Once the first
+directory exists, or a failed `mkdir` leaves its outcome ambiguous, a failure is reported as
+`PARTIAL_PUBLICATION` with no automatic rollback. The error omits requested and canonical host roots,
+and a bound native-alias session is poisoned.
 
 ## Metadata
 
@@ -121,6 +144,9 @@ relationship, or directory durability property. Existing hardlinks and unsupport
 are rejected rather than pretending those semantics are preserved. Lifecycle operations preserve
 the source inode rather than recreating file content, but do not claim transactional rename or
 directory durability.
+
+Windows alternate-data-stream separators are rejected before lookup, permission, or staging; only
+the drive designator of an absolute path may contain `:`.
 
 ## Sensitive Data
 

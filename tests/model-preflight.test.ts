@@ -9,7 +9,7 @@ import {
 } from "../benchmarks/model/preflight.js";
 import type { EffectiveToolIdentities } from "../benchmarks/model/provenance.js";
 import { openCodeProviderSchema } from "../src/native-alias.js";
-import { hashlineEditArgumentsSchema } from "../src/plugin.js";
+import { hashlineEditArgumentsSchema, hashlineWriteArgumentsSchema } from "../src/plugin.js";
 import { canonicalJson, jsonSha256, nativeAliasProtocolFingerprint } from "../src/presentation.js";
 import { PACKAGE_VERSION } from "../src/version.js";
 
@@ -17,6 +17,9 @@ const hash = "a".repeat(64);
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const schemaSha256 = jsonSha256(
   openCodeProviderSchema(z.toJSONSchema(hashlineEditArgumentsSchema)),
+);
+const writeSchemaSha256 = jsonSha256(
+  openCodeProviderSchema(z.toJSONSchema(hashlineWriteArgumentsSchema)),
 );
 const hostVersion = "1.18.3";
 const protocolFingerprint = nativeAliasProtocolFingerprint({
@@ -40,6 +43,128 @@ const probePath = fixturePath("probe.txt");
 const deletePatch = `${patchHeader(deletePath, deletePath)}@@ -1,1 +0,0 @@\n-delete exact bytes\n`;
 const movePatch = patchHeader(movePath, movedPath, true);
 const probePatch = `${patchHeader(probePath, probePath)}@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n`;
+const nestedCreatePath = "nested/inner/new.txt";
+const nestedCreateBytes = "created\n";
+const nestedCreatePatch = `${patchHeader(fixturePath(nestedCreatePath), fixturePath(nestedCreatePath))}@@ -0,0 +1,1 @@\n+created\n`;
+const editReceipt = "@hashline-edit previous=consumed successor=none next=hashline_read";
+const readbackPath = "readback-window.txt";
+const readbackLines = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`);
+const readbackAfterLines = readbackLines.map((line, index) =>
+  index === 9 ? "readback-changed" : line,
+);
+const readbackFinalLines = readbackAfterLines.map((line, index) =>
+  index === 7 ? "readback-inside" : line,
+);
+const compositionPath = "composition.txt";
+const compositionFinalBytes = [
+  "L1",
+  "L4",
+  "R5",
+  "L6",
+  "L7",
+  "L8",
+  "L9",
+  "L10",
+  "L11",
+  "L12",
+  "L13",
+  "L2",
+  "L3",
+  "",
+].join("\n");
+const editInput = (
+  filePath: string,
+  operations: Array<Record<string, unknown>>,
+  extra: Record<string, unknown> = {},
+) => ({ filePath, ...extra, operations, snapshotId: "<snapshot>" });
+const nestedCreationEvidence = canonicalJson({
+  creation: {
+    input: { content: nestedCreateBytes, createParents: true, filePath: nestedCreatePath },
+    metadata: {
+      created: true,
+      createdDirectories: [fixturePath("nested"), fixturePath("nested/inner")],
+      diff: nestedCreatePatch,
+      truncated: false,
+    },
+    output: "Created 2 parent directories and the file. Use hashline_read before editing it.",
+    status: "completed",
+    tool: "hashline_write",
+  },
+  permission: {
+    approved: true,
+    count: 1,
+    metadata: {
+      createdDirectories: [fixturePath("nested"), fixturePath("nested/inner")],
+      diff: nestedCreatePatch,
+      filepath: fixturePath(nestedCreatePath),
+      filepaths: [
+        fixturePath(nestedCreatePath),
+        fixturePath("nested"),
+        fixturePath("nested/inner"),
+      ],
+    },
+    patterns: [fixturePath(nestedCreatePath), fixturePath("nested"), fixturePath("nested/inner")],
+    permission: "edit",
+  },
+  tree: {
+    directories: ["nested", "nested/inner"],
+    files: [{ bytes: nestedCreateBytes, path: nestedCreatePath }],
+  },
+});
+const readbackEvidence = (editTool: "hashline_edit" | "edit" | "apply_patch") => {
+  const deliveredLines = readbackAfterLines.slice(7, 12);
+  const readbackBytes = `${readbackAfterLines.join("\n")}\n`;
+  return canonicalJson({
+    delivered: { endLine: 12, lines: deliveredLines, startLine: 8 },
+    finalBytes: `${readbackFinalLines.join("\n")}\n`,
+    issuance: {
+      inside: {
+        input: editInput(readbackPath, [
+          { endLine: 8, lines: ["readback-inside"], op: "replace", startLine: 8 },
+        ]),
+        output: `Applied 1 operation.\n${editReceipt}`,
+        status: "completed",
+      },
+      outside: {
+        errorCode: "RANGE_NOT_FULLY_ISSUED",
+        input: editInput(readbackPath, [
+          { endLine: 13, lines: ["readback-outside"], op: "replace", startLine: 13 },
+        ]),
+        status: "error",
+      },
+    },
+    readback: {
+      input: editInput(
+        readbackPath,
+        [{ endLine: 10, lines: ["readback-changed"], op: "replace", startLine: 10 }],
+        { readback: true, readbackLimit: 5, readbackOffset: 8 },
+      ),
+      output: [
+        "Applied 1 operation.",
+        "@hashline-edit previous=consumed successor=attached",
+        `@hashline snapshot=<snapshot> sha256=${digest(readbackBytes).slice(0, 12)} lines=20 partial=true`,
+        ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
+        "@more offset=13",
+      ].join("\n"),
+      pendingRemoved: true,
+      status: "completed",
+      tool: editTool,
+    },
+  });
+};
+const compositionEvidence = (editTool: "hashline_edit" | "edit" | "apply_patch") =>
+  canonicalJson({
+    edit: {
+      input: editInput(compositionPath, [
+        { afterLine: 13, endLine: 3, op: "move_range", startLine: 2 },
+        { endLine: 5, lines: ["R5"], op: "replace", startLine: 5 },
+      ]),
+      output: `Applied 2 operations.\n${editReceipt}`,
+      status: "completed",
+      tool: editTool,
+    },
+    finalBytes: compositionFinalBytes,
+  });
 const readOutput = (bytes: string) => {
   const lines = bytes.replace(/\n$/u, "").split("\n");
   return [
@@ -298,18 +423,21 @@ const caseReport = (
       : route === "native-apply-patch"
         ? "Renderer verified.\n\n> build · gpt-5-scripted\n\n⚙ hashline_read probe.txt\n% Patch 1 file"
         : "Renderer verified.\n\n> build · scripted\n\n⚙ hashline_read probe.txt\n⚙ hashline_edit probe.txt";
+  const readback = readbackEvidence(editTool);
+  const composition = compositionEvidence(editTool);
   return {
     route,
     model: route === "native-apply-patch" ? "scripted/gpt-5-scripted" : "scripted/scripted",
     editTool,
     schemaSha256,
+    writeSchemaSha256,
     ...(route === "hashline"
       ? {}
       : {
           protocolFingerprint,
         }),
     finalBytesSha256: "8b1f3c90fab7f353b4a997497392fa025ea08f0b023c2f5f4ab9ec0993494293",
-    providerRequests: route === "native-edit" ? 32 : route === "native-apply-patch" ? 29 : 25,
+    providerRequests: route === "native-edit" ? 42 : route === "native-apply-patch" ? 39 : 35,
     malformedRejected: true as const,
     fileOperationsVerified: true as const,
     continuationVerified: true as const,
@@ -325,6 +453,12 @@ const caseReport = (
     retryProviderRequests: route === "native-edit" ? 1 : 0,
     metadataSnapshotSha256: digest(metadataSnapshot),
     metadataSnapshot,
+    nestedCreationEvidenceSha256: digest(nestedCreationEvidence),
+    nestedCreationEvidence,
+    readbackEvidenceSha256: digest(readback),
+    readbackEvidence: readback,
+    compositionEvidenceSha256: digest(composition),
+    compositionEvidence: composition,
     rendererSnapshotSha256: digest(rendererSnapshot),
     rendererSnapshot,
   };
@@ -651,6 +785,50 @@ describe("native alias preflight receipt", () => {
     for (const [caseIndex, mutate] of mutations) {
       const invalid = forged(caseIndex, mutate);
       expect(() => assertNativeAliasPreflightReceipt(invalid, expected)).toThrow();
+    }
+  });
+
+  test("rejects forged write schema and self-hashed edit UX evidence", () => {
+    const forgedWriteSchema = structuredClone(receipt);
+    const writeCase = forgedWriteSchema.verifierReport.cases[0];
+    if (!writeCase) throw new Error("Missing write-schema verifier case.");
+    writeCase.writeSchemaSha256 = digest("forged write schema");
+    expect(() => assertNativeAliasPreflightReceipt(forgedWriteSchema, expected)).toThrow();
+
+    const forgedEvidence = (
+      caseIndex: number,
+      evidenceField: "nestedCreationEvidence" | "readbackEvidence" | "compositionEvidence",
+      hashField:
+        | "nestedCreationEvidenceSha256"
+        | "readbackEvidenceSha256"
+        | "compositionEvidenceSha256",
+      mutate: (evidence: Record<string, unknown>) => void,
+    ) => {
+      const invalid = structuredClone(receipt);
+      const verificationCase = invalid.verifierReport.cases[caseIndex];
+      if (!verificationCase) throw new Error(`Missing verifier case ${caseIndex}.`);
+      const evidence = JSON.parse(verificationCase[evidenceField]) as Record<string, unknown>;
+      mutate(evidence);
+      verificationCase[evidenceField] = canonicalJson(evidence);
+      verificationCase[hashField] = digest(verificationCase[evidenceField]);
+      return invalid;
+    };
+    const invalid = [
+      forgedEvidence(0, "nestedCreationEvidence", "nestedCreationEvidenceSha256", (evidence) => {
+        const creation = evidence.creation as Record<string, unknown>;
+        const input = creation.input as Record<string, unknown>;
+        input.createParents = false;
+      }),
+      forgedEvidence(1, "readbackEvidence", "readbackEvidenceSha256", (evidence) => {
+        const delivered = evidence.delivered as Record<string, unknown>;
+        delivered.endLine = 13;
+      }),
+      forgedEvidence(2, "compositionEvidence", "compositionEvidenceSha256", (evidence) => {
+        evidence.finalBytes = "forged\n";
+      }),
+    ];
+    for (const value of invalid) {
+      expect(() => assertNativeAliasPreflightReceipt(value, expected)).toThrow();
     }
   });
 });

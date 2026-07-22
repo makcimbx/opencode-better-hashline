@@ -11,6 +11,11 @@ session/request approvals, a reported-cost stop threshold (not a provider billin
 auth source, and `BENCHMARK_ACK_COSTS=yes` are all present. Every isolated agent is capped at 12
 steps.
 
+The marker name remains `native-aliases/v2`, but the current edit-schema expansion changes the
+canonical schema SHA and protocol fingerprint. Sessions with the older v2 identity fail closed and
+must be restarted as new sessions; marker-name equality alone does not make them compatible. This
+does not reopen or extend the immutable pilot-v7 schedule.
+
 Use `--preflight --output=<new-directory>` to build, pack, install, probe adapter isolation, and run
 the stock-host verifier without a model request. Preflight may use the npm registry and writes local
 evidence. The v2 verifier route checks lifecycle operations separately from paid model execution.
@@ -42,6 +47,8 @@ complete accounting. It covered the earlier text-operation contract and provides
 `delete_file`, `move_file`, `file-ops-v1`, `native-aliases/v2`, or lifecycle metadata. It is
 technical transport evidence without a model-superiority claim; all pilot IDs through v7 are
 closed. There is no paid model result or model-quality claim for the new task or adapter identity.
+The retained schema-v7 deterministic result is likewise model-free mechanical evidence, not a
+continuation of pilot v7 or a paid model-quality result.
 
 `--native-alias-probe` is development evidence only. It accepts the exact focused probe tasks or the
 full `baseline-v1` task set, the native-alias-only probe adapter set or current paired

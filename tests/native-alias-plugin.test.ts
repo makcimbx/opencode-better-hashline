@@ -533,6 +533,8 @@ describe("native alias argument and mutation contract", () => {
       const args = {
         ...replaceArgs("file.txt", String(readResult.metadata.snapshotId)),
         readback: true,
+        readbackOffset: 2,
+        readbackLimit: 1,
       };
       currentInput = args;
 
@@ -553,6 +555,9 @@ describe("native alias argument and mutation contract", () => {
         "Applied 1 operation.\n@hashline-edit previous=consumed successor=attached\n@hashline snapshot=",
       );
       expect(result.output).toContain("2|TWO");
+      expect(result.output).not.toContain("1|one");
+      expect(result.output).not.toContain("3|three");
+      expect(result.output).toContain("partial=true");
       expect(result.metadata.hashlinePending).toBeUndefined();
       expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\nTWO\nthree\n");
       expect(asks.map(({ permission }) => permission)).toEqual(["read", "edit"]);
@@ -1009,6 +1014,51 @@ describe("native alias argument and mutation contract", () => {
     await expect(tools.edit.execute(args, toolContext)).rejects.toThrow(
       "SESSION_PROTOCOL_MISMATCH:",
     );
+  });
+
+  test("poisons a bound alias session after partial parent publication", async () => {
+    const { value } = await aliasHarness();
+    const tools = aliasRegistry(value);
+    const toolContext = context();
+    await writeFile(join(root, "bound.txt"), "one\ntwo\n");
+    const boundSnapshot = await issueSnapshot(value, toolContext, "bound.txt");
+    await tools.edit.execute(
+      replaceArgs("bound.txt", String(boundSnapshot.metadata.snapshotId)),
+      toolContext,
+    );
+    await writeFile(join(root, "next.txt"), "one\ntwo\n");
+    const nextSnapshot = await issueSnapshot(value, toolContext, "next.txt");
+
+    const realMkdir = fsPromises.mkdir;
+    const mkdirMock = spyOn(fsPromises, "mkdir").mockImplementation(async (path) => {
+      await realMkdir(path, { mode: 0o777, recursive: false });
+      throw new Error("simulated post-mkdir failure");
+    });
+    try {
+      await expect(
+        tools.hashlineWrite.execute(
+          {
+            filePath: "partial-parent/inner/created.txt",
+            content: "created\n",
+            createParents: true,
+          },
+          toolContext,
+        ),
+      ).rejects.toThrow("PARTIAL_PUBLICATION:");
+    } finally {
+      mkdirMock.mockRestore();
+    }
+
+    expect((await fsPromises.stat(join(root, "partial-parent"))).isDirectory()).toBe(true);
+    expect(await systemGuidance(value, toolContext.sessionID)).toContain(
+      "native-alias-session=mismatch",
+    );
+    await expect(
+      tools.edit.execute(
+        replaceArgs("next.txt", String(nextSnapshot.metadata.snapshotId)),
+        toolContext,
+      ),
+    ).rejects.toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
   test("keeps snapshots session-scoped and permission denial side-effect free", async () => {
