@@ -121,10 +121,12 @@ function samePath(left: string, right: string): boolean {
 }
 
 async function canonicalRoot(root: string): Promise<string> {
+  const resolved = resolve(root);
+  if (resolved === parse(resolved).root) return resolved;
   try {
-    return await realpath(root);
+    return await realpath(resolved);
   } catch {
-    return resolve(root);
+    return resolved;
   }
 }
 

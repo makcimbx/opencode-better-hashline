@@ -30,6 +30,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Canonicalize renderer, permission, and verifier roots through physical worktree identities so macOS `/var` aliases and Windows 8.3/case aliases retain correct relative paths.
 - Reject Windows alternate-data-stream path separators before permission or staging, classify ambiguous first-directory creation as `PARTIAL_PUBLICATION`, keep partial errors free of private canonical paths, and poison native-alias sessions after partial parent publication.
 - Explain exact selected-range EOL-only changes after failed unique relocation while preserving `TARGET_CHANGED` and making no normalization, fuzzy-match, or fallback change.
 - Report post-link move failures as `PARTIAL_PUBLICATION`, invalidate source and destination snapshots, poison the bound alias session, and require inspection plus a new session instead of attempting an unsafe rollback.

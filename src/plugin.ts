@@ -289,7 +289,9 @@ function hostWorktreePath(worktree: string, directory: string): string {
 }
 
 async function canonicalDisplayRoot(worktree: string, directory: string): Promise<string> {
-  return realpath(hostWorktreePath(worktree, directory));
+  const candidate = hostWorktreePath(worktree, directory);
+  if (candidate === parse(candidate).root) return candidate;
+  return realpath(candidate);
 }
 
 function samePathRoot(left: string, right: string): boolean {

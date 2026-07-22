@@ -1562,7 +1562,11 @@ async function verifyScenario(
     await writeFile(hookLog, "", "utf8");
     environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
 
-    const expectedWorktree = parse(resolve(workspace)).root;
+    const [canonicalWorkspace, lifecycleDeleteCanonicalPath, lifecycleMoveCanonicalPath] =
+      await Promise.all([realpath(workspace), realpath(deleteFixture), realpath(moveFixture)]);
+    const expectedWorktree = parse(canonicalWorkspace).root;
+    const lifecycleMovedCanonicalPath = join(canonicalWorkspace, relative(workspace, movedFixture));
+    const fixtureRoots = [workspace, canonicalWorkspace];
     const lifecycleRequestStart = providerRequests.length;
     const lifecycleRun = await run(
       [
@@ -1644,7 +1648,7 @@ async function verifyScenario(
       expectedWorktree,
       "delete_file",
       LIFECYCLE_DELETE_PATH,
-      resolve(deleteFixture),
+      lifecycleDeleteCanonicalPath,
     );
     assertSuccessfulFileOperation(
       movePart,
@@ -1652,9 +1656,9 @@ async function verifyScenario(
       expectedWorktree,
       "move_file",
       LIFECYCLE_MOVE_PATH,
-      resolve(moveFixture),
+      lifecycleMoveCanonicalPath,
       LIFECYCLE_MOVED_PATH,
-      resolve(movedFixture),
+      lifecycleMovedCanonicalPath,
     );
     if (scenario.surface === "native-aliases") {
       const lifecycleSchemaSha256 = jsonSha256(
@@ -1788,10 +1792,14 @@ async function verifyScenario(
         permissionHook.status === "allow",
       "Nested creation permission envelope was not explicitly approved",
     );
-    const normalizedPermissionPattern = normalizeRendererValue(permissionHook.pattern, [workspace]);
-    const normalizedPermissionMetadata = normalizeRendererValue(permissionHook.metadata, [
-      workspace,
-    ]);
+    const normalizedPermissionPattern = normalizeRendererValue(
+      permissionHook.pattern,
+      fixtureRoots,
+    );
+    const normalizedPermissionMetadata = normalizeRendererValue(
+      permissionHook.metadata,
+      fixtureRoots,
+    );
     const expectedPermissionPatterns = [
       `<fixture>/${NESTED_CREATE_PATH}`,
       "<fixture>/nested",
@@ -1834,10 +1842,11 @@ async function verifyScenario(
       created: true,
       truncated: false,
     };
-    const normalizedNestedInput = normalizeRendererValue(nestedPart?.state.input, [workspace]);
-    const normalizedNestedMetadata = normalizeRendererValue(nestedPart?.state.metadata, [
-      workspace,
-    ]);
+    const normalizedNestedInput = normalizeRendererValue(nestedPart?.state.input, fixtureRoots);
+    const normalizedNestedMetadata = normalizeRendererValue(
+      nestedPart?.state.metadata,
+      fixtureRoots,
+    );
     invariant(
       nestedPart?.state.output ===
         "Created 2 parent directories and the file. Use hashline_read before editing it." &&
@@ -1925,7 +1934,7 @@ async function verifyScenario(
     invariant(readbackParts.length === 3, "Readback export is missing edit attempts");
     const normalizedReadbackParts = readbackParts.map((part) => ({
       part,
-      input: normalizeRendererValue(part.state.input, [workspace]),
+      input: normalizeRendererValue(part.state.input, fixtureRoots),
     }));
     const readbackPart = normalizedReadbackParts.find(({ input }) =>
       canonicalJson(input).includes('"readbackOffset":8'),
@@ -1944,9 +1953,10 @@ async function verifyScenario(
       ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
       "@more offset=13",
     ].join("\n");
-    const normalizedReadbackOutput = normalizeRendererValue(readbackPart?.part.state.output, [
-      workspace,
-    ]);
+    const normalizedReadbackOutput = normalizeRendererValue(
+      readbackPart?.part.state.output,
+      fixtureRoots,
+    );
     invariant(
       readbackPart?.part.state.status === "completed" &&
         normalizedReadbackOutput === expectedReadbackOutput &&
@@ -2033,9 +2043,10 @@ async function verifyScenario(
     const compositionPart = collectToolParts(JSON.parse(compositionExport.stdout) as unknown).find(
       (part) => part.tool === scenario.editTool && part.state.status === "completed",
     );
-    const normalizedCompositionInput = normalizeRendererValue(compositionPart?.state.input, [
-      workspace,
-    ]);
+    const normalizedCompositionInput = normalizeRendererValue(
+      compositionPart?.state.input,
+      fixtureRoots,
+    );
     const expectedCompositionInput = {
       filePath: COMPOSITION_PATH,
       operations: [
@@ -2460,8 +2471,8 @@ async function verifyScenario(
 
     const metadataSnapshot = normalizedRendererSnapshot(
       `${malformedRun.stdout}\n${lifecycleRun.stdout}\n${noClobberRun.stdout}\n${firstRun.stdout}`,
-      [root, workspace],
-      [workspace, await realpath(workspace)],
+      [root, await realpath(root), ...fixtureRoots],
+      fixtureRoots,
     );
     return {
       route: scenario.route,
