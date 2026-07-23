@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.6.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.6.0...v0.6.1) (2026-07-23)
+
+### Added
+
 - Added bounded aggregate issued-coverage diagnostics that report all missing line ranges plus required internal-neighbor, BOF, and EOF evidence while recommending conservative 1,000-line recovery reads.
 
 ### Changed
