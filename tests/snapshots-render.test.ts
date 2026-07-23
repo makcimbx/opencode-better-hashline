@@ -1,12 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { renderSnapshotPage } from "../src/render.js";
-import { SnapshotStore } from "../src/snapshots.js";
+import { NativeAliasSessionRegistry } from "../src/session-protocol.js";
+import { collectMissingIssuedCoverage, SnapshotStore } from "../src/snapshots.js";
 import { decodeTextDocument } from "../src/text.js";
 
 const encoder = new TextEncoder();
 const scope = { sessionId: "session", worktree: "/worktree" };
 const document = (text: string) => decodeTextDocument(encoder.encode(text));
+
+function thrownMessage(run: () => void): string {
+  try {
+    run();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error("Expected the function to throw.");
+}
 
 function options(overrides: Partial<ConstructorParameters<typeof SnapshotStore>[0]> = {}) {
   return {
@@ -34,6 +44,274 @@ describe("snapshot store", () => {
     expect(snapshot.complete).toBe(true);
     expect(() => store.assertComplete(snapshot)).not.toThrow();
     expect(() => store.assertBoundaryIssued(snapshot, 1)).not.toThrow();
+  });
+
+  test("separates process-local snapshot authorities without changing default deduplication", () => {
+    const store = new SnapshotStore(options());
+    const firstAuthority = Symbol("first");
+    const secondAuthority = Symbol("second");
+    const first = store.remember(scope, "/worktree/authority", document("same"), firstAuthority);
+    expect(store.remember(scope, "/worktree/authority", document("same"), firstAuthority)).toBe(
+      first,
+    );
+    const second = store.remember(scope, "/worktree/authority", document("same"), secondAuthority);
+    expect(second).not.toBe(first);
+    expect(second.id).not.toBe(first.id);
+    expect(() => store.assertAuthority(first, firstAuthority)).not.toThrow();
+    expect(() => store.assertAuthority(first, secondAuthority)).toThrow("SNAPSHOT_REQUIRED:");
+
+    const defaultSnapshot = store.remember(scope, "/worktree/default", document("same"));
+    expect(store.remember(scope, "/worktree/default", document("same"))).toBe(defaultSnapshot);
+  });
+
+  test("does not revive retained authority after registry eviction and reattestation", () => {
+    const store = new SnapshotStore(options());
+    const registry = new NativeAliasSessionRegistry(1);
+    const firstCandidate = registry.prepare("session", "fingerprint", "/worktree");
+    expect(registry.commit(firstCandidate)).toBeTrue();
+    const retained = store.remember(
+      scope,
+      "/worktree/retained",
+      document("same"),
+      firstCandidate.authority,
+    );
+    store.issue(retained, { ranges: [{ start: 1, end: 1 }], bof: true, eof: true });
+
+    const evictionCandidate = registry.prepare("other", "fingerprint", "/worktree");
+    expect(registry.commit(evictionCandidate)).toBeTrue();
+    expect(
+      registry.isActive("session", "fingerprint", "/worktree", firstCandidate.authority),
+    ).toBeFalse();
+
+    const replacementCandidate = registry.prepare("session", "fingerprint", "/worktree");
+    expect(registry.commit(replacementCandidate)).toBeTrue();
+    expect(replacementCandidate.authority).not.toBe(firstCandidate.authority);
+    expect(store.peek(scope, retained.id)).toBe(retained);
+    expect(() => store.assertAuthority(retained, replacementCandidate.authority)).toThrow(
+      "SNAPSHOT_REQUIRED:",
+    );
+    const replacement = store.remember(
+      scope,
+      "/worktree/retained",
+      document("same"),
+      replacementCandidate.authority,
+    );
+    expect(replacement.id).not.toBe(retained.id);
+  });
+
+  test("aggregates all missing ranges and edges independently of requirement order", () => {
+    const store = new SnapshotStore(options());
+    const snapshot = store.remember(
+      scope,
+      "/worktree/aggregate",
+      document(Array.from({ length: 12 }, (_, index) => `line-${index + 1}`).join("\n")),
+    );
+    store.issue(snapshot, {
+      ranges: [
+        { start: 2, end: 3 },
+        { start: 7, end: 8 },
+      ],
+      bof: true,
+      eof: false,
+    });
+    const requirements = {
+      ranges: [
+        { start: 7, end: 10 },
+        { start: 1, end: 5 },
+      ],
+      bof: true,
+      eof: true,
+    };
+
+    expect(collectMissingIssuedCoverage(snapshot, requirements)).toEqual({
+      ranges: [
+        { start: 1, end: 1 },
+        { start: 4, end: 5 },
+        { start: 9, end: 10 },
+      ],
+      primaryRanges: [
+        { start: 1, end: 1 },
+        { start: 4, end: 5 },
+        { start: 9, end: 10 },
+      ],
+      boundaryRanges: [],
+      bof: false,
+      eof: true,
+    });
+    const first = thrownMessage(() => store.assertIssuedCoverage(snapshot, requirements));
+    const second = thrownMessage(() =>
+      store.assertIssuedCoverage(snapshot, {
+        ...requirements,
+        ranges: [...requirements.ranges].reverse(),
+      }),
+    );
+    expect(second).toBe(first);
+    expect(first).toContain(
+      "RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 1, 4-5, 9-10; EOF boundary.",
+    );
+    expect(first).toContain("hashline_read(offset=1, limit=1)");
+    expect(first).toContain("hashline_read(offset=4, limit=2)");
+    expect(first).toContain("hashline_read(offset=9, limit=2)");
+    expect(first).toContain("hashline_read(offset=12, limit=1)");
+    expect(first).toContain(
+      "Reuse the old snapshotId only if every suggested read returns that same ID; otherwise replan the full batch from the new snapshot.",
+    );
+    expect(snapshot.issued).toEqual([
+      { start: 2, end: 3 },
+      { start: 7, end: 8 },
+    ]);
+  });
+
+  test("preserves boundary error precedence while retaining every missing range", () => {
+    const store = new SnapshotStore(options());
+    const snapshot = store.remember(
+      scope,
+      "/worktree/boundary-precedence",
+      document("one\ntwo\nthree\nfour\nfive\nsix\n"),
+    );
+    store.issue(snapshot, { ranges: [{ start: 1, end: 1 }], bof: true, eof: false });
+
+    const edgeRequirements = {
+      ranges: [{ start: 1, end: 1 }],
+      boundaryRanges: [{ start: 6, end: 6 }],
+      bof: false,
+      eof: true,
+    };
+    expect(collectMissingIssuedCoverage(snapshot, edgeRequirements)).toEqual({
+      ranges: [{ start: 6, end: 6 }],
+      primaryRanges: [],
+      boundaryRanges: [{ start: 6, end: 6 }],
+      bof: false,
+      eof: true,
+    });
+    expect(thrownMessage(() => store.assertIssuedCoverage(snapshot, edgeRequirements))).toContain(
+      "REF_NOT_ISSUED: Missing issued coverage: line gaps: 6; EOF boundary.",
+    );
+
+    const internalNeighbor = {
+      ranges: [{ start: 1, end: 1 }],
+      boundaryRanges: [{ start: 5, end: 5 }],
+      bof: false,
+      eof: false,
+    };
+    expect(thrownMessage(() => store.assertIssuedCoverage(snapshot, internalNeighbor))).toContain(
+      "RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 5.",
+    );
+
+    const missingPrimaryAtEdge = {
+      ranges: [{ start: 2, end: 2 }],
+      boundaryRanges: [{ start: 6, end: 6 }],
+      bof: false,
+      eof: true,
+    };
+    expect(
+      thrownMessage(() => store.assertIssuedCoverage(snapshot, missingPrimaryAtEdge)),
+    ).toContain("RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 2, 6; EOF boundary.");
+  });
+
+  test("chunks long gaps and bounds sparse-gap diagnostics", () => {
+    const store = new SnapshotStore(options());
+    const snapshot = store.remember(
+      scope,
+      "/worktree/long",
+      document(Array.from({ length: 2505 }, (_, index) => `line-${index + 1}`).join("\n")),
+    );
+    const longGap = thrownMessage(() =>
+      store.assertIssuedCoverage(snapshot, {
+        ranges: [{ start: 1, end: 2505 }],
+        bof: true,
+        eof: true,
+      }),
+    );
+    expect(longGap).toContain("line gaps: 1-2505; BOF boundary; EOF boundary");
+    expect(longGap).toContain("hashline_read(offset=1, limit=1000)");
+    expect(longGap).toContain("hashline_read(offset=1001, limit=1000)");
+    expect(longGap).toContain("hashline_read(offset=2001, limit=505)");
+
+    const sparseRanges = Array.from({ length: 30 }, (_, index) => ({
+      start: index * 2 + 1,
+      end: index * 2 + 1,
+    }));
+    const sparse = thrownMessage(() =>
+      store.assertIssuedCoverage(snapshot, { ranges: sparseRanges, bof: false, eof: false }),
+    );
+    expect(sparse).toContain("... (+18 more gaps), 59");
+    expect(sparse).toContain("... (+18 more calls), hashline_read(offset=59, limit=1)");
+    expect(sparse).toContain(
+      "For omitted calls, use hashline_read(offset=1, limit=59) and follow @more with limit=1000 until line 59 is issued",
+    );
+    expect(sparse.length).toBeLessThan(2000);
+  });
+
+  test("reports edge-only coverage with REF_NOT_ISSUED and handles empty files", () => {
+    const store = new SnapshotStore(options());
+    const edgeSnapshot = store.remember(scope, "/worktree/edge", document("line"));
+    store.issue(edgeSnapshot, { ranges: [{ start: 1, end: 1 }], bof: true, eof: false });
+    const edgeOnly = thrownMessage(() =>
+      store.assertIssuedCoverage(edgeSnapshot, {
+        ranges: [{ start: 1, end: 1 }],
+        bof: true,
+        eof: true,
+      }),
+    );
+    expect(edgeOnly).toContain("REF_NOT_ISSUED: Missing issued coverage: EOF boundary.");
+
+    const empty = store.remember(scope, "/worktree/empty-coverage", document(""));
+    expect(collectMissingIssuedCoverage(empty, { ranges: [], bof: true, eof: true })).toEqual({
+      ranges: [],
+      primaryRanges: [],
+      boundaryRanges: [],
+      bof: true,
+      eof: true,
+    });
+    const bothEdges = thrownMessage(() =>
+      store.assertIssuedCoverage(empty, { ranges: [], bof: true, eof: true }),
+    );
+    expect(bothEdges).toContain(
+      "REF_NOT_ISSUED: Missing issued coverage: BOF boundary; EOF boundary.",
+    );
+    expect(bothEdges.match(/hashline_read\(/g)).toHaveLength(1);
+
+    store.issue(empty, { ranges: [], bof: false, eof: true });
+    const bofOnly = thrownMessage(() =>
+      store.assertIssuedCoverage(empty, { ranges: [], bof: true, eof: true }),
+    );
+    expect(bofOnly).toContain("Missing issued coverage: BOF boundary.");
+    store.issue(empty, { ranges: [], bof: true, eof: false });
+    expect(() =>
+      store.assertIssuedCoverage(empty, { ranges: [], bof: true, eof: true }),
+    ).not.toThrow();
+  });
+
+  test("invalidates equivalent raw worktree spellings for one session and canonical path", () => {
+    const store = new SnapshotStore(options());
+    const canonicalPath = "/canonical/worktree/file.ts";
+    const first = store.remember(
+      { sessionId: "session", worktree: "/raw/worktree" },
+      canonicalPath,
+      document("first"),
+    );
+    const equivalent = store.remember(
+      { sessionId: "session", worktree: "/raw/worktree/." },
+      canonicalPath,
+      document("second"),
+    );
+    const otherSession = store.remember(
+      { sessionId: "other", worktree: "/raw/worktree" },
+      canonicalPath,
+      document("other"),
+    );
+
+    store.invalidateSessionPath("session", canonicalPath);
+    expect(() => store.peek({ sessionId: "session", worktree: "/raw/worktree" }, first.id)).toThrow(
+      "SNAPSHOT_UNKNOWN:",
+    );
+    expect(() =>
+      store.peek({ sessionId: "session", worktree: "/raw/worktree/." }, equivalent.id),
+    ).toThrow("SNAPSHOT_UNKNOWN:");
+    expect(() =>
+      store.peek({ sessionId: "other", worktree: "/raw/worktree" }, otherSession.id),
+    ).not.toThrow();
   });
 
   test("keeps scopes isolated and expires idle snapshots", () => {
@@ -182,6 +460,16 @@ describe("snapshot rendering", () => {
     expect(rendered.output).toContain("line not issued");
     expect(rendered.output).toContain("partial=true");
     expect(rendered.page.ranges).toEqual([]);
+    store.issue(snapshot, rendered.page);
+    const previewOnly = thrownMessage(() =>
+      store.assertIssuedCoverage(snapshot, {
+        ranges: [{ start: 1, end: 1 }],
+        bof: false,
+        eof: false,
+      }),
+    );
+    expect(previewOnly).toContain("Missing issued coverage: line gaps: 1.");
+    expect(previewOnly).toContain("preview-only N!| lines remain unissued");
   });
 
   test("uses byte budgets for multibyte lines and handles empty/out-of-range pages", () => {

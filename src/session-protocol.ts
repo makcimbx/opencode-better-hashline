@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fail } from "./errors.js";
+import { ABSOLUTE_MAX_LOGICAL_LINES } from "./options.js";
 import { exactRelativePath } from "./path-identity.js";
 import {
   canonicalJson,
@@ -12,12 +13,15 @@ import {
   type NativeAliasOperation,
   type NativeAliasSurface,
 } from "./presentation.js";
+import type { SnapshotAuthority } from "./snapshots.js";
 
 export const SESSION_HISTORY_LIMIT = 200;
 export const SESSION_HISTORY_FETCH_LIMIT = SESSION_HISTORY_LIMIT + 1;
 export const SESSION_HISTORY_MAX_PARTS = 2_000;
 export const SESSION_HISTORY_MAX_BYTES = 1_048_576;
 export const SESSION_BINDING_LIMIT = 4_096;
+const DUPLICATE_CALL_IDENTITY_REASON =
+  "OpenCode session history contains a duplicate call identity.";
 
 export type NativeAliasProtocolIdentity = {
   packageVersion: string;
@@ -31,7 +35,7 @@ export class NativeAliasCurrentCallPendingError extends Error {
 
   constructor() {
     super(
-      "SESSION_PROTOCOL_MISMATCH: The current alias call input has not stabilized in session history.",
+      "SESSION_PROTOCOL_MISMATCH: The current alias call input has not stabilized in session history, so the persisted evidence cannot be attested.",
     );
   }
 }
@@ -48,6 +52,19 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 export type NativeAliasBindingStatus = "bound" | "unbound" | "mismatch";
+
+export type NativeAliasSessionCandidate = Readonly<{
+  sessionId: string;
+  fingerprint: string;
+  canonicalWorktree: string;
+  authority: SnapshotAuthority;
+  generation: number;
+}>;
+
+type NativeAliasSessionState = {
+  active: NativeAliasSessionCandidate | undefined;
+  candidate: NativeAliasSessionCandidate;
+};
 
 export type HashlineDisplayPrefixMatch = {
   operationIndex: number;
@@ -115,13 +132,13 @@ export function buildNativeAliasDisplayPrefixRejectionMetadata(
 }
 
 function rejectHistory(reason: string): never {
-  fail("SESSION_PROTOCOL_MISMATCH", `${reason} Start a new session before editing.`);
+  fail("SESSION_PROTOCOL_MISMATCH", `${reason} The persisted evidence cannot be attested.`);
 }
 
 function rejectOversizedHistory(): never {
   fail(
     "SESSION_PROTOCOL_MISMATCH",
-    "OpenCode persisted session history exceeds the bounded inspection window. Start a genuinely new session; do not resume the same task ID.",
+    "OpenCode persisted session history exceeds the bounded inspection window, so the persisted evidence cannot be attested.",
   );
 }
 
@@ -628,7 +645,8 @@ function assertAliasInput(
     (input.readback !== undefined && typeof input.readback !== "boolean") ||
     (input.readbackOffset !== undefined && !validLineNumber(input.readbackOffset)) ||
     (input.readbackLimit !== undefined &&
-      (!validLineNumber(input.readbackLimit) || (input.readbackLimit as number) > 1000)) ||
+      (!validLineNumber(input.readbackLimit) ||
+        (input.readbackLimit as number) > ABSOLUTE_MAX_LOGICAL_LINES)) ||
     ((input.readbackOffset !== undefined || input.readbackLimit !== undefined) &&
       input.readback !== true)
   ) {
@@ -707,23 +725,6 @@ function assertCompletedInput(
   assertAliasInput(toolName, inputValue, completed, directory);
 }
 
-function isKnownNativeShapeRejection(toolName: NativeAliasSurface, state: Record<string, unknown>) {
-  const input = record(state.input);
-  const expectedError = `INVALID_ARGUMENT: Invalid ${toolName} arguments.`;
-  if (!input || state.error !== expectedError || state.metadata !== undefined) return false;
-  if (toolName === "apply_patch") {
-    return exactKeys(input, ["patchText"]) && typeof input.patchText === "string";
-  }
-  return (
-    (exactKeys(input, ["filePath", "newString", "oldString"]) ||
-      exactKeys(input, ["filePath", "newString", "oldString", "replaceAll"])) &&
-    typeof input.filePath === "string" &&
-    typeof input.oldString === "string" &&
-    typeof input.newString === "string" &&
-    (input.replaceAll === undefined || typeof input.replaceAll === "boolean")
-  );
-}
-
 function isAttestedCompletedDisplayPrefixRejection(
   toolName: NativeAliasSurface,
   state: Record<string, unknown>,
@@ -773,13 +774,6 @@ function isAttestedCompletedDisplayPrefixRejection(
     input.allowHashlinePrefixes !== true &&
     state.output === `DISPLAY_PREFIX_REJECTED: ${displayPrefixRejectionMessage(match)}`
   );
-}
-
-function isKnownRejectedAliasCall(
-  toolName: NativeAliasSurface,
-  state: Record<string, unknown>,
-): boolean {
-  return isKnownNativeShapeRejection(toolName, state);
 }
 
 function assertTime(value: unknown, completed: boolean): void {
@@ -858,6 +852,25 @@ function assertToolState(state: Record<string, unknown>): void {
   rejectHistory("OpenCode session history contains an unknown tool state.");
 }
 
+function isInterruptedUnknownDuplicateShadow(
+  part: Record<string, unknown>,
+  state: Record<string, unknown>,
+): boolean {
+  const input = record(state.input);
+  const metadata = record(state.metadata);
+  return (
+    part.tool === "unknown" &&
+    part.metadata === undefined &&
+    state.status === "error" &&
+    state.error === "Tool execution aborted" &&
+    input !== undefined &&
+    exactKeys(input, []) &&
+    metadata !== undefined &&
+    exactKeys(metadata, ["interrupted"]) &&
+    metadata.interrupted === true
+  );
+}
+
 function assertToolPart(part: Record<string, unknown>): void {
   const keys = ["callID", "id", "messageID", "sessionID", "state", "tool", "type"];
   if ("metadata" in part) keys.push("metadata");
@@ -894,7 +907,7 @@ function inspectHistory(
     options.currentCall?.input === undefined ? undefined : canonicalJson(options.currentCall.input);
   const messageIds = new Set<string>();
   const partIds = new Set<string>();
-  const callIds = new Set<string>();
+  const callIds = new Map<string, { ordinaryStatus?: unknown; interruptedUnknown: boolean }>();
   for (const messageValue of messagesValue) {
     const message = record(messageValue);
     const messageInfo = record(message?.info);
@@ -948,11 +961,23 @@ function inspectHistory(
         rejectHistory("OpenCode session history contains an unbound tool call.");
       }
       if (options.sessionId) assertToolState(state);
-      const callIdentity = JSON.stringify([part.messageID, part.callID]);
-      if (options.sessionId && callIds.has(callIdentity)) {
-        rejectHistory("OpenCode session history contains a duplicate call identity.");
+      if (options.sessionId) {
+        const callIdentity = JSON.stringify([part.messageID, part.callID]);
+        const interruptedUnknown = isInterruptedUnknownDuplicateShadow(part, state);
+        const seen = callIds.get(callIdentity);
+        if (!seen) {
+          callIds.set(callIdentity, {
+            ordinaryStatus: interruptedUnknown ? undefined : state.status,
+            interruptedUnknown,
+          });
+        } else {
+          if (interruptedUnknown ? seen.interruptedUnknown : seen.ordinaryStatus !== undefined) {
+            rejectHistory(DUPLICATE_CALL_IDENTITY_REASON);
+          }
+          if (interruptedUnknown) seen.interruptedUnknown = true;
+          else seen.ordinaryStatus = state.status;
+        }
       }
-      if (options.sessionId) callIds.add(callIdentity);
       const activeCurrentCall =
         options.currentCall &&
         part.callID === options.currentCall.id &&
@@ -986,7 +1011,8 @@ function inspectHistory(
       if (part.tool === "hashline_edit" || part.tool === "write") {
         rejectHistory("This session contains the hashline tool surface.");
       }
-      if (state?.status === "error" && isKnownRejectedAliasCall(part.tool, state)) continue;
+      // Error states issue no provenance; every later mutation remains gated by its own snapshot.
+      if (state.status === "error") continue;
       if (
         state?.status === "completed" &&
         isAttestedCompletedDisplayPrefixRejection(part.tool, state, identity)
@@ -1008,6 +1034,16 @@ function inspectHistory(
       completedAliases.push(completed);
     }
     inspectedMessages.push({ ...message, parts: inspectedParts });
+  }
+  for (const seen of callIds.values()) {
+    if (
+      seen.interruptedUnknown &&
+      seen.ordinaryStatus !== undefined &&
+      seen.ordinaryStatus !== "completed" &&
+      seen.ordinaryStatus !== "error"
+    ) {
+      rejectHistory(DUPLICATE_CALL_IDENTITY_REASON);
+    }
   }
   if (options.currentCall && currentMatches !== 1) {
     rejectHistory("The current alias call is missing from session history.");
@@ -1032,31 +1068,99 @@ export function assertNativeAliasHistory(
 }
 
 export class NativeAliasSessionRegistry {
-  readonly #bindings = new Map<string, string>();
+  readonly #sessions = new Map<string, NativeAliasSessionState>();
+  #generation = 0;
+
+  constructor(private readonly limit = SESSION_BINDING_LIMIT) {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new RangeError("Native alias session registry limit must be a positive integer.");
+    }
+  }
 
   status(sessionId: string, fingerprint: string): NativeAliasBindingStatus {
-    const existing = this.#bindings.get(sessionId);
-    if (existing === undefined) return "unbound";
-    return existing === fingerprint ? "bound" : "mismatch";
+    const active = this.#sessions.get(sessionId)?.active;
+    if (!active) return "unbound";
+    return active.fingerprint === fingerprint ? "bound" : "mismatch";
   }
 
-  isBound(sessionId: string, fingerprint: string): boolean {
-    const status = this.status(sessionId, fingerprint);
-    if (status === "mismatch") {
-      rejectHistory("This session is already bound to another Better Hashline protocol.");
+  prepare(
+    sessionId: string,
+    fingerprint: string,
+    canonicalWorktree: string,
+  ): NativeAliasSessionCandidate {
+    const current = this.#sessions.get(sessionId);
+    if (
+      current?.candidate.fingerprint === fingerprint &&
+      current.candidate.canonicalWorktree === canonicalWorktree
+    ) {
+      this.#remember(sessionId, current);
+      return current.candidate;
     }
-    return status === "bound";
+
+    this.#generation += 1;
+    const candidate = Object.freeze({
+      sessionId,
+      fingerprint,
+      canonicalWorktree,
+      authority: Symbol("native-alias-epoch"),
+      generation: this.#generation,
+    });
+    this.#remember(sessionId, { active: undefined, candidate });
+    return candidate;
   }
 
-  bind(sessionId: string, fingerprint: string): void {
-    if (this.isBound(sessionId, fingerprint)) return;
-    this.#bindings.set(sessionId, fingerprint);
-    if (this.#bindings.size <= SESSION_BINDING_LIMIT) return;
-    const oldest = this.#bindings.keys().next().value;
-    if (oldest !== undefined) this.#bindings.delete(oldest);
+  isCandidateCurrent(candidate: NativeAliasSessionCandidate): boolean {
+    return this.#sessions.get(candidate.sessionId)?.candidate === candidate;
+  }
+
+  commit(candidate: NativeAliasSessionCandidate): boolean {
+    const state = this.#sessions.get(candidate.sessionId);
+    if (state?.candidate !== candidate) return false;
+    state.active = candidate;
+    this.#remember(candidate.sessionId, state);
+    return true;
+  }
+
+  isActive(
+    sessionId: string,
+    fingerprint: string,
+    canonicalWorktree: string,
+    authority: SnapshotAuthority,
+  ): boolean {
+    const active = this.#sessions.get(sessionId)?.active;
+    return (
+      active?.fingerprint === fingerprint &&
+      active.canonicalWorktree === canonicalWorktree &&
+      active.authority === authority
+    );
+  }
+
+  activeAuthority(
+    sessionId: string,
+    fingerprint: string,
+    canonicalWorktree: string,
+  ): SnapshotAuthority | undefined {
+    const active = this.#sessions.get(sessionId)?.active;
+    return active?.fingerprint === fingerprint && active.canonicalWorktree === canonicalWorktree
+      ? active.authority
+      : undefined;
+  }
+
+  unbind(sessionId: string): void {
+    this.#sessions.delete(sessionId);
   }
 
   clear(): void {
-    this.#bindings.clear();
+    this.#sessions.clear();
+  }
+
+  #remember(sessionId: string, state: NativeAliasSessionState): void {
+    this.#sessions.delete(sessionId);
+    this.#sessions.set(sessionId, state);
+    while (this.#sessions.size > this.limit) {
+      const oldest = this.#sessions.keys().next().value;
+      if (oldest === undefined) return;
+      this.#sessions.delete(oldest);
+    }
   }
 }

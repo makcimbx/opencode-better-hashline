@@ -56,7 +56,9 @@ function renderSnapshotPagePass(
   const { snapshot, offset, limit, maxOutputBytes } = input;
   const total = snapshot.document.lines.length;
   const header = `@hashline snapshot=${snapshot.id} sha256=${snapshot.digest.slice(0, 12)} lines=${total}`;
-  const rendered = [reservePartialMarker ? `${header} partial=true` : header];
+  const firstLine = reservePartialMarker ? `${header} partial=true` : header;
+  const rendered = [firstLine];
+  let renderedBytes = byteLength(firstLine);
   const ranges: IssuedRange[] = [];
   let cursor = Math.min(offset - 1, total);
   let displayedLines = 0;
@@ -69,13 +71,16 @@ function renderSnapshotPagePass(
     const suffix = "... [preview only; line not issued]";
     const nextCursor = cursor + 1;
     const footer = nextCursor >= total ? "@eof" : `@more offset=${nextCursor + 1}`;
-    const proposed = [...rendered, full, footer].join("\n");
+    const fullBytes = byteLength(full);
+    const footerBytes = byteLength(footer);
+    const proposedBytes = renderedBytes + 1 + fullBytes + 1 + footerBytes;
 
-    if (byteLength(proposed) > maxOutputBytes) {
+    if (proposedBytes > maxOutputBytes) {
       if (displayedLines > 0) break;
-      const surrounding = `${rendered.join("\n")}\n\n${footer}\n@note lines marked ! cannot be edited by line reference`;
+      const note = "@note lines marked ! cannot be edited by line reference";
+      const surroundingBytes = renderedBytes + 2 + footerBytes + 1 + byteLength(note);
       rendered.push(
-        fitPreview(`${line.number}!|`, line.text, suffix, maxOutputBytes - byteLength(surrounding)),
+        fitPreview(`${line.number}!|`, line.text, suffix, maxOutputBytes - surroundingBytes),
       );
       hasPreviewOnlyLine = true;
       cursor = nextCursor;
@@ -84,6 +89,7 @@ function renderSnapshotPagePass(
     }
 
     rendered.push(full);
+    renderedBytes += 1 + fullBytes;
     addIssuedLine(ranges, line.number);
     cursor = nextCursor;
     displayedLines += 1;

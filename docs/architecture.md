@@ -11,7 +11,7 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/render.ts` | Byte-bounded `N|content` pages and preview-only oversized lines |
 | `src/presentation.ts` | `native-aliases/v2` renderer metadata, operation/path fingerprints, and serialized-size measurement |
 | `src/native-alias.ts` | Bounded exact-host detection through OpenCode's configured SDK transport |
-| `src/session-protocol.ts` | Bounded v2 history validation, lifecycle path correlation, attested rejection markers, and instance-local alias session binding |
+| `src/session-protocol.ts` | Offline bounded v2 history validation, lifecycle path correlation, attested rejection markers, and instance-local live-epoch binding |
 | `src/session-export.ts` | Strict bounded export identity and independently bound worktree-locator attestation |
 | `src/model-trace.ts` | Shared trace/export correlation, lifecycle mutation evidence, and native-alias benchmark oracle |
 | `src/path-identity.ts` | Exact canonical path equality, containment, and filesystem-root identity |
@@ -33,13 +33,15 @@ The model addresses logical lines by ordinary one-based numbers. Authority comes
 
 ### Read provenance is explicit
 
-The snapshot store distinguishes bytes retained by the process from line references actually issued to a model. A range cannot be edited when an interior line was omitted or rendered preview-only. Issuance occurs after the host's generic truncation layer, not when the tool initially constructs output.
+The snapshot store distinguishes bytes retained by the process from line references actually issued to a model. A range cannot be edited when an interior line was omitted or rendered preview-only. Issuance occurs after the host's generic truncation layer, not when the tool initially constructs output. Requested `hashline_read.limit` accepts `1..100,000` and defaults to 1,000, but `maxOutputBytes` remains authoritative (40 KiB by default, configurable to at most 45 KiB); a byte-limited partial page ends in `@more`. Complete-coverage diagnostics aggregate bounded missing ranges and boundary requirements, while recovery suggestions deliberately cap each read at a conservative 1,000 lines.
 
 ### Planning is pure where the operation is textual
 
 `planEdits` receives base and current immutable text documents and returns final text/bytes or a
 stable rejection. It performs no I/O and asks no permission. This makes exhaustive and property
 testing possible without weakening the filesystem path.
+
+`replace` removes the exact one-based inclusive `startLine..endLine` range, and its `lines` payload is the complete replacement; outside neighbors remain. Every operation in a batch uses coordinates from the immutable original snapshot, not an intermediate result or a line created by another operation.
 
 Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy
 reads retained pre-edit logical texts and inserts them with destination-local EOL rules, even when
@@ -101,22 +103,28 @@ The plugin keeps native `read` and adds `hashline_read`, `hashline_edit`, and `h
 
 The explicit native-alias preview instead registers Better Hashline's shared executor as `edit` and
 `apply_patch`, lets OpenCode retain one by model route, and preserves unique read/create tools.
-Activation uses the host-configured SDK transport, exact observed host and schema fingerprints,
-`native-aliases/v2` operation/path markers, bounded session-history validation, double argument
-parsing, and native renderer metadata. V1 history is incompatible by design. Registry ownership
-still cannot be attested, so this surface does not replace the unique-ID recommendation.
-The marker string remains v2 across the current schema expansion, but canonical schema SHA-256 and
-protocol fingerprint are exact identity. An older v2 session therefore fails closed and requires a
-restart plus a new session rather than schema fallback.
+Activation uses the host-configured SDK transport to observe exact host and schema fingerprints,
+`native-aliases/v2` operation/path markers, delivered-read live-epoch attestation, double argument
+parsing, and native renderer metadata. Registry ownership still cannot be attested, so this surface
+does not replace the unique-ID recommendation.
 
-Before process-local session binding, alias calls remain sequential so history validation sees at
-most one active native-looking call. A bound session skips repeated history inspection for the same
-exact package/schema/host/worktree fingerprint. Calls may overlap only when their full canonical
-source/destination path sets are disjoint; sorted path locks serialize every overlap. Locks are
-acquired sequentially in canonical order, and cancellation while queued releases already acquired
-locks without reserving later independent paths. Each approval and publication remains independent.
-A partial move publication poisons the binding, forcing inspection and a new session rather than
-permitting unsafe continuation.
+Persisted v1 and v2 history remains subject to bounded exact validation in offline verifier,
+model-trace, and evidence paths. The live executor does not fetch that history to admit edits. The
+marker string remains v2 across the current schema expansion, but canonical schema SHA-256 and the
+protocol fingerprint are exact identity. An identity change invalidates the process-local epoch;
+restart the plugin as required and use a fresh delivered `hashline_read` to rebind in the same
+session. Old snapshot IDs remain unusable.
+
+Preparing a read for the same fingerprint and canonical worktree may reuse the current candidate authority. Preparing a differing identity retires active authority immediately. Only the current candidate delivered and attested by `tool.execute.after` can commit, and each snapshot token must match the active authority; stale, reordered, and ABA completions cannot bind or revive old IDs.
+
+Before a delivered and attested `hashline_read` establishes or replaces that exact epoch, native-alias
+`edit` and `apply_patch` calls are rejected. Once bound, alias calls may overlap only when their
+complete canonical source/destination path sets are disjoint; sorted path locks serialize every
+overlap. Locks are acquired sequentially in canonical order, and cancellation while queued releases
+already acquired locks without reserving later independent paths. Each approval and publication
+remains independent. A partial move or parent publication invalidates affected snapshots and unbinds
+the epoch. After inspecting and repairing the paths, a fresh delivered read can rebind in the same
+session; old snapshot IDs cannot be revived.
 
 ## State and Eviction
 
@@ -127,12 +135,16 @@ path. Successful output explicitly reports that transition through
 `@hashline-edit previous=consumed successor=none|attached|unavailable`. Text edits require a reread
 by default; with explicit `readback: true`, post-rename verification bytes may instead create a new
 pending snapshot with one contiguous page. `readbackOffset` selects a one-based post-edit start,
-defaulting to the first hunk; `readbackLimit` is `1..1000`, defaulting to 1,000. Both require
-`readback:true`. Only refs on the page attested by the after-hook are issued; there is no ID-only
-successor, and failed delivery reports `unavailable`. Continuation never changes the
-already-completed write into a reported mutation failure. Lifecycle operations reject readback
+defaulting to the first hunk; requested `readbackLimit` accepts `1..100,000` and defaults to 1,000.
+The same authoritative `maxOutputBytes` budget may stop that page earlier with `partial=true` and
+`@more`. Both window fields require `readback:true`. Only refs on the page attested by the after-hook
+are issued; there is no ID-only successor, and failed delivery reports `unavailable`. Continuation
+never changes the already-completed write into a reported mutation failure. Lifecycle operations
+reject readback
 requests and window fields. Delete invalidates the source; move invalidates source and destination
-immediately before link publication, including when the result becomes `PARTIAL_PUBLICATION`.
+immediately before link publication, including when the result becomes `PARTIAL_PUBLICATION`. A
+partial parent publication invalidates affected target snapshots. On the native-alias surface, either
+partial outcome also unbinds the live epoch.
 Multiple exact reads can reuse one retained snapshot only when digest and bytes both match, and
 their issued pages can accumulate complete coverage.
 
@@ -160,8 +172,8 @@ one filesystem; it never overwrites or creates directories.
 
 Process-global lock keys are canonical physical paths, case-folded on Windows. A call reserves its
 deduplicated sorted path set, so delete/text calls lock one path and move locks both source and
-destination. Disjoint path sets can progress concurrently after native session requirements are
-satisfied; any overlap serializes. These locks cannot coordinate another OpenCode process, editor,
+destination. Disjoint complete path sets can progress concurrently after native live-epoch admission;
+any overlap serializes. These locks cannot coordinate another OpenCode process, editor,
 formatter, daemon, or network client.
 
 ## Testing Strategy
@@ -172,8 +184,8 @@ The test suite has separate layers:
 - snapshot provenance, complete-coverage, TTL, pinning, invalidation, and byte-budget tests;
 - renderer truncation and UTF-8 budget tests;
 - real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, fixed parent chains, exclusive directory creation, deterministic path-set locks, no-replace creation and movement, and partial publication;
-- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including readback windows/issuance, deterministic conflict pairs, lifecycle and parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, poisoned bindings, and bound/unbound alias concurrency;
-- packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/restart recovery;
+- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including readback windows/issuance, deterministic conflict pairs, lifecycle and parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
+- packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/fresh-read restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
 - deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current deterministic runner is retained as immutable schema-v7 model-free evidence; schema-v6 and pilot-v7 evidence remain immutable.
 

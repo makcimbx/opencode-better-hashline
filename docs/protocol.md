@@ -25,12 +25,12 @@ host. It exposes `hashline_read`, create-only `hashline_write`, and
 both Better Hashline edit definitions under `edit` and `apply_patch`; OpenCode's model-family filter
 retains exactly one alias. It does not register `hashline_edit` and never aliases native `write`.
 Host versions are recorded in protocol identity rather than allowlisted. Missing or incompatible
-transport, health, schema, or session-history capabilities remain diagnostic and fail closed without
-changing surfaces.
+transport, health, or schema capabilities remain diagnostic and fail closed without changing
+surfaces.
 
 All three edit IDs use the same strict schema and snapshot-bound executor. Alias executors parse a
 second time, so native `oldString`/`newString` and `patchText` shapes reject with `INVALID_ARGUMENT`
-before history, permission, or filesystem work.
+before live-epoch admission, permission, or filesystem work.
 
 ## Snapshot Scope
 
@@ -92,6 +92,8 @@ Output grammar:
 
 `lines` is the file's total logical-line count, not the number rendered in this result. The optional `partial=true` token means this rendered page does not itself cover complete editable BOF-to-EOF evidence; pagination, preview-only lines, and bounded edit readback can all produce it. A header without the token means this one page covers the complete file. Multiple attested partial pages for the same unchanged snapshot may cumulatively issue complete coverage.
 
+`offset` is one-based and defaults to 1. Requested `limit` accepts `1..100,000` and defaults to 1,000. `maxOutputBytes` is the authoritative page bound: it defaults to 40 KiB and is configurable only up to 45 KiB. A byte-limited partial page can therefore stop before the requested line count and ends with `@more`.
+
 `N|` lines become editable only after `tool.execute.after` confirms that OpenCode did not generically truncate the custom-tool result. A line is rendered as preview-only `N!|` only when its complete annotated form cannot fit in one configured output page; preview-only lines never become issued. Marker loss, host truncation, or output mutation issues no new refs; previously issued refs on a reused snapshot remain valid. Cache eviction and publication still invalidate affected snapshots rather than guessing what the model received.
 
 ## Edit
@@ -132,9 +134,10 @@ runtime validation accepts only these exact combinations and rejects every unlis
 
 At the top level, the source remains `filePath` plus `snapshotId`; `destinationPath` belongs only to
 the sole `move_file` operation. `rebase` is optional and defaults to `"none"`.
-`readbackOffset` is an optional one-based post-edit text line and `readbackLimit` is an optional
-integer from 1 through 1,000. Both require `readback:true`; neither is valid for a lifecycle
-operation. The offset defaults to the first new-file hunk line and the limit defaults to 1,000.
+`readbackOffset` is an optional one-based post-edit text line, and requested `readbackLimit` accepts
+integers from 1 through 100,000. Both require `readback:true`; neither is valid for a lifecycle
+operation. The offset defaults to the first new-file hunk line, and the limit defaults to 1,000.
+The authoritative `maxOutputBytes` budget may stop the page earlier with `partial=true` and `@more`.
 `allowHashlinePrefixes` is optional and defaults to `false`. Before any path lookup or permission,
 the executor rejects literal `replace`, `insert`, and `replace_file` lines beginning in column zero
 with a positive non-zero decimal annotation (`17|` or `17!|`) or the exact markers `@hashline`,
@@ -146,14 +149,16 @@ never strips or rewrites bytes.
 A rejection identifies the exact `operations[i].lines[j]` coordinate and a bounded prefix kind. On
 the default surface, no snapshot is consumed and the call throws normally. Native aliases instead
 return a completed non-mutating terminal result so supported OpenCode hosts persist its exact
-protocol/package/schema/host/worktree/surface/input marker. The same process can continue from its
-binding; after restart, continuation requires that exact unsanitized result. Text matching alone
-never makes a rejected native-looking call compatible.
+protocol/package/schema/host/worktree/surface/input marker for offline verifier and model-trace
+evidence. It never establishes or restores the live epoch. An already bound process may continue;
+after restart, live continuation requires a fresh delivered and attested `hashline_read`. Text
+matching alone never makes a rejected native-looking call compatible.
 
 `readback` is optional and defaults to `false` for text edits. Use it for structural verification or
 a dependent follow-up edit. It renders exactly one contiguous successor page using the explicit
-offset/limit or the first-hunk/1,000-line defaults. File lifecycle operations reject
-`readback:true`, `readbackOffset`, and `readbackLimit`, and never attach a successor. A
+offset/limit or the first-hunk/1,000-line defaults; requesting more lines never creates a second
+page, and `maxOutputBytes` may end a byte-limited partial page with `@more`. File lifecycle operations
+reject `readback:true`, `readbackOffset`, and `readbackLimit`, and never attach a successor. A
 successful text edit begins with `Applied N operations.`; lifecycle success begins with `Deleted
 <source>.` or `Moved <source> to <destination>.`. Every successful mutation then includes one
 snapshot lifecycle receipt:
@@ -171,16 +176,18 @@ truncation checks used by `hashline_read`. The protocol never returns a successo
 without its page. If delivery checks fail, the write remains successful but the after-hook replaces
 the result with `unavailable`; the pending successor issues nothing and is not exposed by ID.
 
-A bounded readback that starts after line 1, stops before EOF, or contains a preview-only line is
-explicitly marked `partial=true` in its header. Its displayed `N|` refs remain usable. Whole-file
-replacement still requires cumulative issued coverage of all lines plus BOF and EOF; read missing
-pages for the same unchanged snapshot or perform a fresh complete read.
-For `replace_file`, `delete_file`, or `move_file`, incomplete coverage reports concise recovery:
-`Read the file from offset=1 through @eof with the same snapshotId, then retry.`
+A bounded readback that starts after line 1, stops before EOF, reaches the byte budget, or contains a
+preview-only line is explicitly marked `partial=true` in its header. A byte-limited partial page ends
+with `@more`; its displayed `N|` refs remain usable. Whole-file replacement still requires cumulative
+issued coverage of all lines plus BOF and EOF. Coverage diagnostics aggregate every bounded missing
+line gap plus required internal-neighbor, BOF, and EOF evidence. Their recovery calls deliberately
+request at most 1,000 lines and follow `@more`; 1,000 is a conservative recovery chunk, not the public
+requested-limit ceiling. For `replace_file`, `delete_file`, or `move_file`, incomplete coverage reports
+concise recovery: `Read the file from offset=1 through @eof with the same snapshotId, then retry.`
 
 ### Replace
 
-`startLine` and `endLine` are one-based and inclusive. Every line in the range must have been issued from the same snapshot. Range endpoints alone are never sufficient.
+`replace` removes the exact one-based inclusive `startLine..endLine` range. `lines` is the complete replacement, and lines immediately outside the range remain; do not repeat retained neighbors unless intentional. Every selected line must have been issued from the same snapshot, because endpoints alone are never sufficient. Every operation in the batch uses coordinates from the immutable original snapshot, not an intermediate result or a line created by another operation.
 
 ### Insert
 
@@ -282,7 +289,8 @@ bytes, and a link count of two, then unlinks the source and verifies the destina
 count of one. This is intentionally nontransactional. Once the destination link exists, any source
 unlink or final-verification failure returns `PARTIAL_PUBLICATION`; both exact names may remain.
 The plugin invalidates source and destination snapshots, does not attempt an unsafe rollback, and
-poisons the bound native-alias session. Inspect both paths and begin a new session before any retry.
+unbinds the native-alias live epoch. Inspect both paths and repair them as needed; a fresh delivered
+and attested `hashline_read` can rebind in the same session, while old snapshot IDs remain unusable.
 After a successful move, read the destination to obtain a snapshot for that path.
 
 ## Rebase Modes
@@ -317,12 +325,12 @@ For example, suppose a retained snapshot contains `alpha`, `target`, `omega`, an
 
 Native aliases use protocol marker `native-aliases/v2`. The marker records `operation` as `update`,
 `delete_file`, or `move_file`; a move also records the destination canonical-path SHA-256. Exact
-persisted `native-aliases/v1` history is deliberately incompatible and fails closed with
-`SESSION_PROTOCOL_MISMATCH` rather than being interpreted under v2.
+persisted `native-aliases/v1` history is deliberately incompatible with offline history/evidence
+validation and fails closed with `SESSION_PROTOCOL_MISMATCH` rather than being interpreted under v2.
 The marker string does not imply schema compatibility. Every canonical schema SHA-256 and protocol
 fingerprint is exact identity; the current expanded contracts change both while retaining the v2
-marker name. A session carrying an older v2 identity therefore fails closed and requires a plugin
-restart plus a new session.
+marker name. An identity change invalidates the process-local live epoch. Restart as required and use
+a fresh delivered `hashline_read` to rebind in the same session; old snapshot IDs remain unusable.
 
 Completed `edit` metadata contains the exact unified diff in both `diff` and `filediff.patch`.
 Completed `apply_patch` metadata contains exactly one source-correlated entry whose type is
@@ -339,18 +347,30 @@ supported OpenCode hosts persist returned result metadata, but do not persist a 
 discarded before a throw. Its separate `betterHashlineRejection` marker contains exact
 protocol/package/schema/host/worktree/surface identity, canonical input SHA-256, payload coordinate,
 and bounded prefix kind. It attests only that this exact input stopped before path access,
-permission, and mutation; it is never successful provenance.
+permission, and mutation; it is never successful provenance or live-epoch authority.
 
-Each plugin instance binds a session to one v2 protocol fingerprint. Before the first edit it reads
-a bounded history of at most 200 messages, 2,000 parts, and 1 MiB, then validates every historical
-mutator. Message, part, call, session, input path, lifecycle operation, move destination, metadata
+Offline verifier, model-trace, and evidence paths validate persisted history of at most 200 messages,
+2,000 parts, and 1 MiB. The live executor never fetches that history for edit admission. In offline
+validation, message, part, call, session, input path, lifecycle operation, move destination, metadata
 keys, unified-diff path headers and hunks, counts, renderer path, and source/destination digests must
-agree exactly. Native `write`, `hashline_edit`, unknown fields, malformed or v1 markers, and any
-terminal rejection except exact native-shaped `INVALID_ARGUMENT` errors or an exact completed
-`DISPLAY_PREFIX_REJECTED` result are incompatible. Unmarked, sanitized, conflicting, unreadable,
-cross-worktree, or cross-surface history returns `SESSION_PROTOCOL_MISMATCH`.
+agree exactly. Every ordinary call identity is unique. OpenCode 1.18.4 can persist one cleanup
+shadow beside a settled tool part with the same message and call IDs; only an exact second part with
+`tool: "unknown"`, empty input, no part metadata, error `Tool execution aborted`, and exact
+`interrupted: true` metadata is accepted as that host artifact. A second ordinary part, a second
+shadow, an altered shadow field, or a shadow beside a pending/running call remains incompatible.
 
-The history transport admits at most 1,114,112 response bytes so the protocol validator can enforce
+Native `write`, `hashline_edit`, unknown fields, malformed or v1 markers, and unproven completed
+results remain incompatible with offline evidence. Exact completed `DISPLAY_PREFIX_REJECTED` results
+are known non-mutating terminals. Historical `edit` and `apply_patch` error states issue no
+provenance and do not invalidate offline evidence solely because their input is incomplete or their
+structurally valid metadata records uncertainty. Neither history nor an uncertain terminal can
+authorize live mutation, which requires an exact bound epoch and delivered snapshot. Bytes changed by
+an uncertain call therefore produce `TARGET_CHANGED` under strict snapshot checks and require a fresh
+`hashline_read` of that path. Structurally malformed error states, unmarked completions, conflicting
+or unreadable history, cross-worktree history, and cross-surface history return
+`SESSION_PROTOCOL_MISMATCH` during offline validation.
+
+The offline history transport admits at most 1,114,112 response bytes so its validator can enforce
 the stricter 1 MiB persisted-history limit without accepting an unbounded envelope. The initial
 history read has one 2,000 ms total deadline, at most four attempts, a 500 ms per-attempt cap, and
 10/25/50 ms backoff. Only timeout/network failures and HTTP 408, 425, 429, 500, 502, 503, or 504 are
@@ -358,29 +378,45 @@ retried. Unavailable or unexpected transport, other HTTP statuses, an oversized 
 JSON, and an invalid top-level shape fail immediately. Diagnostics retain only that safe category,
 HTTP status/class, and bounded attempt/deadline facts; they never include the request URL, headers,
 response body, credentials, private paths, or raw transport error text. Exhausted transient failures
-can be retried in the same session after restoring the host. History beyond either bounded inspection
-window requires a genuinely new session; resuming the same task ID cannot reduce persisted history.
+can be retried for the same offline evidence after restoring the host. History beyond either bounded
+inspection window is unusable for that offline evidence artifact; it does not gate live editing or
+require abandoning the current OpenCode transcript or task ID. None of these history rules establishes
+or repairs the process-local live epoch.
 
-Only the exact current running call is excluded. OpenCode can expose that call before its persisted
-input has caught up with parsed before-hook arguments. For the same exact call ID and tool, the
-plugin may reread bounded local history five times under one 160 ms stabilization deadline after
-the initial bounded read. Each reread gives transport retries only the time remaining on that same
-160 ms deadline; it does not receive another 2 seconds. Exclusion still requires exact input
-equality. A different call ID, tool, path, snapshot, operation, destination, permanently different
-input, or more than one active alias remains incompatible before binding.
+For bounded offline evidence collection, only the exact current running call is excluded. OpenCode can
+expose that call before its persisted input has caught up with parsed arguments. For the same exact
+call ID and tool, the transport may reread local history five times under one 160 ms stabilization
+deadline after the initial bounded read. Each reread gives transport retries only the time remaining
+on that same 160 ms deadline; it does not receive another 2 seconds. Exclusion still requires exact
+input equality. A different call ID, tool, path, snapshot, operation, destination, permanently
+different input, or more than one active alias remains incompatible with that offline evidence.
 
 System guidance reports the process-local state as `native-alias-session=unbound`, `bound`, or
-`mismatch`. Unbound sessions must serialize calls until one exact before-hook attestation binds the
-session. Once bound to the current package/schema/host/worktree fingerprint, calls may overlap only
-when their complete canonical source/destination path sets are disjoint. Any shared source or
-destination path serializes through deterministic path locks; each call still has an independent
-approval/publication outcome. This is not a multi-file transaction. A `PARTIAL_PUBLICATION` move
-poisons that binding and reports `mismatch` for the rest of the session.
+`mismatch`. While unbound or mismatched, native-alias `edit` and `apply_patch` calls are rejected. A
+`hashline_read` establishes or replaces the live epoch only when its exact result is delivered and
+attested by `tool.execute.after`; edit admission then also requires the supplied snapshot to have been
+delivered. Live admission never fetches persisted history.
 
-A restart clears snapshots and process bindings. Resume requires compatible unsanitized v2 history
-plus a fresh `hashline_read`, and calls remain serialized until the new process binds. Binding
-eviction has the same effect. A mismatched or poisoned binding fails closed and requires a new
-session. Changing surfaces or configuration requires a restart and a new session.
+Reads prepared for the same fingerprint and canonical worktree may reuse the current candidate authority. Preparing a differing identity retires active authority immediately. Only the current candidate delivered and attested by `tool.execute.after` can commit, and a snapshot's authority token must equal the active authority. Stale, reordered, and ABA completions therefore cannot bind or revive old IDs.
+
+Once bound to the current package/schema/host/worktree fingerprint, alias calls may overlap only when
+their complete canonical source/destination path sets are disjoint. Any shared source or destination
+path serializes through deterministic path locks; each call still has an independent approval and
+publication outcome. This is not a multi-file transaction. A partial move or parent publication
+invalidates affected snapshots and unbinds the epoch. After inspecting and repairing the paths, a
+fresh delivered `hashline_read` can rebind in the same session; old snapshot IDs remain unusable.
+
+A restart clears snapshots and process bindings, and binding eviction returns the state to unbound.
+Changing configuration, schema, host, or surface requires a plugin or host restart as applicable. In
+every case, a fresh delivered `hashline_read` in the same OpenCode session/task can establish the
+current epoch; persisted history cannot, and there is no silent fallback.
+
+No Better Hashline failure or Better Hashline resource limit requires abandoning the OpenCode
+transcript or task ID. Recovery in the same task may retry, obtain a fresh delivered read, repair paths
+or configuration, restart the plugin or host as applicable and reread, or explicitly configure
+`enforce:true` with `toolSurface:"hashline"` and restart. That surface switch is explicit, not a
+fallback. This invariant is scoped to Better Hashline and does not cover loss of OpenCode's own session
+database.
 
 ## Permission and Publication Order
 
@@ -400,7 +436,7 @@ For a text edit:
 8. Request standard `edit` permission with that exact approved patch.
 9. Create an exclusive same-directory temporary file, write, flush, and preserve supported metadata.
 10. Reread the destination and recheck exact bytes, identity, and alias target after the permission wait.
-11. Invalidate all snapshots for this session/path immediately before publication.
+11. At the approved publication's consume boundary, immediately before publication, invalidate every snapshot for this session/path; consumption remains final after partial or failed publication.
 12. Attempt one rename over the canonical target.
 13. Reread and verify the resulting bytes.
 14. When `readback: true`, retain those verified bytes as a pending snapshot and render the one
@@ -417,7 +453,7 @@ For a file lifecycle operation:
 5. Freeze one immutable lifecycle plan containing the operation, canonical paths, stable source and parent identities, and exact delete/move patch and metadata.
 6. Request standard `edit` permission for the complete source/destination path set and that exact patch.
 7. Reread and revalidate the approved source, terminal binding, parent identities, destination absence, and same-filesystem constraint without replanning or changing metadata.
-8. Invalidate relevant snapshots immediately before publication.
+8. At the approved publication's consume boundary, immediately before publication, invalidate every relevant source/destination snapshot; consumption remains final after partial or failed publication.
 9. Delete revalidates the direct terminal binding, unlinks the exact source, and verifies absence.
 10. Move publishes a no-clobber destination hard link, verifies exact inode/bytes/link count, unlinks the source, and verifies the final destination.
 
@@ -446,8 +482,10 @@ attempt retain their ordinary prepublication code and leave no created state. If
 `mkdir` reports failure but either planned name appeared, publication is conservatively ambiguous.
 From that point, every cancellation, race, staging, linking, readback, or final verification failure
 returns `PARTIAL_PUBLICATION`; created directories and any committed file are intentionally retained
-and never rolled back. Partial errors omit canonical host paths, and native-alias sessions are
-poisoned. `move_file` does not use this path and never creates parents.
+and never rolled back. Partial errors omit canonical host paths, invalidate affected snapshots, and
+unbind the native-alias live epoch. After inspecting and repairing the paths, a fresh delivered
+`hashline_read` can rebind in the same session; old snapshot IDs remain unusable. `move_file` does not
+use this path and never creates parents.
 
 ## Batch Semantics
 
@@ -510,7 +548,7 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `NO_CHANGE` | The final result, or an individually invalid identity move, changes no bytes |
 | `NATIVE_TOOL_DISABLED` | Enforcement rejected a hidden native mutator |
 | `TOOL_SURFACE_UNAVAILABLE` | The requested alias surface cannot be safely activated on this host |
-| `SESSION_PROTOCOL_MISMATCH` | Session history or its bound protocol is missing, unreadable, or incompatible |
+| `SESSION_PROTOCOL_MISMATCH` | Offline history/evidence, pending tool identity, or current worktree identity is missing, unreadable, or incompatible |
 | `PATH_NOT_FOUND` | Requested source path or a parent required under strict creation/move behavior does not exist |
 | `TARGET_EXISTS` | Create-only or move publication found an existing destination, including a symlink |
 | `SNAPSHOT_REQUIRED` | No valid issued snapshot is available |
@@ -531,7 +569,42 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `PARTIAL_PUBLICATION` | A move published its destination link, or parent creation created or may have created a directory, but publication could not safely complete or verify |
 | `UNSUPPORTED_FILE` | File type, metadata, encoding, size, filesystem relation, or policy is unsupported |
 
-Consumers must treat every `CODE: message` as failure. The native-alias `DISPLAY_PREFIX_REJECTED` result is completed only at the host transport layer so its attestation persists; it never reports `Applied`, requests permission, or changes a file.
+Consumers must treat every `CODE: message` as failure. The native-alias `DISPLAY_PREFIX_REJECTED` result is completed only at the host transport layer so its offline attestation persists; it never reports `Applied`, requests permission, changes a file, or establishes a live epoch.
+
+## Migration From 0.6.0
+
+Requested `hashline_read.limit` and text `readbackLimit` values now accept `1..100,000`; both still
+default to 1,000, and edit readback remains exactly one contiguous page. `maxOutputBytes` remains
+authoritative at 40 KiB by default and no more than 45 KiB when configured, so generated clients must
+accept `partial=true` pages that stop before the requested line count and end with `@more`. Coverage
+recovery diagnostics intentionally suggest conservative calls of at most 1,000 lines.
+
+Provider guidance now makes replacement and batch semantics explicit: `replace` removes the exact
+inclusive range, `lines` is its complete replacement while outside neighbors remain, and every batch
+coordinate belongs to the immutable original snapshot. These description and requested-limit schema
+changes intentionally change provider contracts, raw/projected schema identities, and the native-alias
+protocol fingerprint.
+
+The native-alias marker remains `native-aliases/v2`. Live admission no longer fetches persisted
+history; a delivered and attested read establishes a process-local epoch, with candidate and snapshot
+authority fencing described above. Restart the plugin or host as applicable, then obtain a fresh
+delivered `hashline_read` in the same OpenCode session/task. Existing snapshot IDs remain unusable and
+cannot revive. Partial publication is recoverable in that same task after path repair and a fresh
+delivered read.
+
+Exact provider-contract and identity evidence, measured by `tests/presentation.test.ts`, is:
+
+| Evidence | 0.6.0 | Current |
+| --- | --- | --- |
+| `hashline` provider-contract UTF-8 bytes | 4,947 | 5,419 (+472) |
+| `hashline` serialized SHA-256 | `224fefe0bfd0627de1b92ff0b2582c39f4803e949a5478e5bc204f33c23031da` | `6f0117915adb249ea88f4d1d0b436fedf542e1bd1de4fdc12c0e518e8afca1b7` |
+| `hashline` canonical SHA-256 | `5ced662a4b2d067aa8a1292971c4c28ce12555a6aad4b3271ff6349aedd6a4d8` | `9775663d85332b76ecb2d81a387da04ba59036b72d9f18ef74b3db4d5f5ef1da` |
+| Native-alias provider-contract UTF-8 bytes | 5,164 | 5,657 (+493) |
+| Native-alias serialized SHA-256 | `36a8fa471188441d7538a0367b84e7b7d6811426aae34ccdc17c9bf6a8ac0b5b` | `6bf154201bf8b923ba5c4a7e42f68c9f15580d51e4a559fa5171fbb172bb92d9` |
+| Native-alias canonical SHA-256 | `25b909a1100d87bd4600b352bab8782723cd0710b6665ca7d1057288254d1024` | `0f350867e7862085697f137b1faf7f699b9a9ffbfa32af2304a12dcb89d22646` |
+| Raw schema SHA-256 | `00e306434e4706856a1c695139f073ec502b2e8b006ba0285f88da7df69bc11f` | `859f5f343d9c619905fe8c372e1bec0585c7d7a99cbaa1c32191d2f9c12ee6bf` |
+| Provider schema SHA-256 | `ab2453d1318683c058b5678487cdde587095d49322548e32a7e996bc061e6231` | `34e5f363d573efb8b954a6a473e149822a2946de8b7689f29f94ce808b49a1fa` |
+| Protocol fingerprint | `c68b13e37ec4288a90a93b9af10d2104c6304a7821db281dfb4544b389e3dce7` | `e7b07656905d8acfa3d92cedfb9db30a0c86a21f90bd83d02e2ff2dd1068eebb` |
 
 ## Migration From 0.5.0
 
@@ -542,9 +615,10 @@ plugin versions reject the new enum values and must not receive these calls.
 
 Native-alias protocol identity changes from `native-aliases/v1` to `native-aliases/v2`. The v2
 marker adds operation identity and, for moves, a destination-path digest; renderer metadata also
-adds exact delete/move source and destination correlation. Existing v1 history is not migrated or
-silently accepted. Restart the plugin and begin a new session with a fresh `hashline_read` after
-upgrading.
+adds exact delete/move source and destination correlation. Existing v1 persisted history is not
+migrated or silently accepted for offline evidence. Upgrading invalidates the process-local live
+epoch; restart the plugin and use a fresh delivered `hashline_read` to rebind in the same session.
+Old snapshot IDs remain unusable.
 
 The text-edit top level adds `readbackOffset` and `readbackLimit`, both conditional on
 `readback:true`; generated clients must not send them to lifecycle operations. `hashline_write` adds
@@ -558,8 +632,9 @@ deterministic zero-based operation-pair suffix. Exact EOL-only unique-relocation
 `TARGET_CHANGED` and only add diagnostic guidance.
 
 The v2 marker name remains unchanged across these schema additions, but the canonical schema SHA and
-protocol fingerprint do not. Sessions created by an earlier v2 development build are incompatible,
-fail closed, and require a restart plus a new session. The retained deterministic
+protocol fingerprint do not. A live epoch created by an earlier v2 development build is incompatible
+and fails closed; restart and use a fresh delivered `hashline_read` to rebind in the same session.
+Earlier snapshot IDs remain unusable. The retained deterministic
 [schema-v7 result](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json) records:
 `hashline_edit` schema `3686 -> 5033`
 (+1347, 36.54%), `hashline_write` schema `282 -> 548` (+266, 94.33%), readback call `181 -> 218`
@@ -572,12 +647,12 @@ Snapshot headers can now append `partial=true`. Parsers must accept this optiona
 
 Successful edit output now includes the `@hashline-edit` lifecycle line. On the fixed fixture, no-readback output grows from 49 to 87 bytes and unavailable-readback output from 92 to 94 bytes. The attached prefix, measured through its trailing separator before the snapshot header, grows from 21 to 73 bytes.
 
-Provider-contract evidence now measures the actual OpenCode-projected schema separately for each description. After removing duplicated guidance, the hashline contract shrinks from 3,646 to 3,326 UTF-8 bytes (-320, 8.8%); the native-alias contract shrinks from 3,812 to 3,496 bytes (-316, 8.3%). The schema and native protocol fingerprints change, so experimental native-alias users must restart the plugin and begin a new session after upgrading.
+Provider-contract evidence now measures the actual OpenCode-projected schema separately for each description. After removing duplicated guidance, the hashline contract shrinks from 3,646 to 3,326 UTF-8 bytes (-320, 8.8%); the native-alias contract shrinks from 3,812 to 3,496 bytes (-316, 8.3%). The schema and native protocol fingerprints change, so experimental native-alias users must restart the plugin and obtain a fresh delivered same-session `hashline_read`; old snapshot IDs remain unusable.
 
-The display-prefix guard now gives exact payload coordinates, recognizes `@hashline-edit`, ignores renderer-impossible zero/zero-padded line numbers, bounds arbitrary decimal annotations to `N|` or `N!|`, and returns an exact worktree-bound native-alias rejection that compatible history can resume. Models must set `allowHashlinePrefixes:true` in the initial call when matched text is intentional.
-`pack:check` verifies this path through two pinned OpenCode processes sharing one persisted session: reject without mutation, restart, reread, and retry successfully.
+The display-prefix guard now gives exact payload coordinates, recognizes `@hashline-edit`, ignores renderer-impossible zero/zero-padded line numbers, bounds arbitrary decimal annotations to `N|` or `N!|`, and persists an exact worktree-bound rejection for offline evidence. It never restores live admission. Models must set `allowHashlinePrefixes:true` in the initial call when matched text is intentional.
+`pack:check` verifies this path through two pinned OpenCode processes sharing one persisted session: reject without mutation, restart, reread to establish the new live epoch, and retry successfully.
 
-Native-alias calls remain sequential while session guidance reports `unbound`. After exact process-local binding, guidance reports `bound` and permits concurrent calls only for independent files; same-path calls remain serialized and outcomes are not transactional.
+Native-alias mutation is rejected while session guidance reports `unbound` or `mismatch`. After exact delivered-read process binding, guidance reports `bound` and permits concurrent alias calls only when their complete source/destination path sets are disjoint; overlapping path sets serialize and outcomes are not transactional.
 
 Mixed `replace_file` batches now return `INVALID_ARGUMENT`, while duplicate insert/copy destinations return the new `INSERTION_BOUNDARY_CONFLICT`. Genuine spatial intersections retain `OPERATIONS_OVERLAP`. Consumers that branched on the previous broad overlap code should accept the new classification.
 

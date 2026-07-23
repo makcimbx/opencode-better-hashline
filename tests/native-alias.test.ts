@@ -24,9 +24,9 @@ import {
   buildNativeAliasDisplayPrefixRejectionMetadata,
   displayPrefixRejectionMessage,
   findHashlineDisplayPrefix,
+  NativeAliasCurrentCallPendingError,
   type NativeAliasProtocolIdentity,
   NativeAliasSessionRegistry,
-  SESSION_BINDING_LIMIT,
   SESSION_HISTORY_LIMIT,
   SESSION_HISTORY_MAX_BYTES,
   SESSION_HISTORY_MAX_PARTS,
@@ -734,6 +734,40 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
+  test("classifies a current-call input mismatch for bounded forensic retry", () => {
+    let caught: unknown;
+    try {
+      assertNativeAliasHistory(
+        [
+          {
+            parts: [
+              {
+                type: "tool",
+                tool: "edit",
+                callID: "current",
+                state: { status: "running", input: { filePath: "different.txt" } },
+              },
+            ],
+          },
+        ],
+        identity,
+        {
+          currentCall: {
+            id: "current",
+            tool: "edit",
+            input: { filePath: "expected.txt" },
+          },
+        },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(NativeAliasCurrentCallPendingError);
+    expect((caught as Error).message).toBe(
+      "SESSION_PROTOCOL_MISMATCH: The current alias call input has not stabilized in session history, so the persisted evidence cannot be attested.",
+    );
+  });
+
   test("scopes provider call IDs to their assistant messages", () => {
     const sessionID = "session";
     const input = {
@@ -797,53 +831,131 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
-  test("accepts only known pre-execution native-shape rejections", () => {
+  test("accepts only exact interrupted unknown duplicate shadows", () => {
+    const sessionID = "session";
+    const messageID = "message-write";
+    const callID = "call-write";
+    const part = (
+      id: string,
+      tool: string,
+      state: Record<string, unknown>,
+    ): Record<string, unknown> => ({
+      id,
+      sessionID,
+      messageID,
+      type: "tool",
+      tool,
+      callID,
+      state,
+    });
+    const completed = part("part-write", "hashline_write", {
+      status: "completed",
+      input: { filePath: "test_dir/file1.txt", content: "content", createParents: true },
+      output: "Created the file.",
+      title: "test_dir/file1.txt",
+      metadata: { created: true, truncated: false },
+      time: { start: 1, end: 2 },
+    });
+    const interruptedUnknown = part("part-shadow", "unknown", {
+      status: "error",
+      input: {},
+      error: "Tool execution aborted",
+      metadata: { interrupted: true },
+      time: { start: 3, end: 4 },
+    });
+    const history = (parts: Record<string, unknown>[]) => [
+      { info: { id: messageID, sessionID }, parts },
+    ];
+    const options = { sessionId: sessionID };
+
+    expect(() =>
+      assertNativeAliasHistory(history([completed, interruptedUnknown]), identity, options),
+    ).not.toThrow();
+
+    const mutations = [
+      (shadow: Record<string, unknown>) => Object.assign(shadow, { tool: "read" }),
+      (shadow: Record<string, unknown>) =>
+        Object.assign(shadow.state as Record<string, unknown>, { error: "Aborted" }),
+      (shadow: Record<string, unknown>) =>
+        Object.assign((shadow.state as Record<string, unknown>).input as Record<string, unknown>, {
+          unexpected: true,
+        }),
+      (shadow: Record<string, unknown>) =>
+        Object.assign(
+          (shadow.state as Record<string, unknown>).metadata as Record<string, unknown>,
+          { interrupted: false },
+        ),
+      (shadow: Record<string, unknown>) =>
+        Object.assign(shadow, { metadata: { providerExecuted: true } }),
+    ];
+    for (const mutate of mutations) {
+      const shadow = structuredClone(interruptedUnknown) as Record<string, unknown>;
+      mutate(shadow);
+      expect(() =>
+        assertNativeAliasHistory(history([completed, shadow]), identity, options),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    }
+
+    const errorOrdinary = part("part-error", "hashline_write", {
+      status: "error",
+      input: { filePath: "test_dir/file1.txt", content: "content" },
+      error: "TARGET_EXISTS: The target already exists.",
+      time: { start: 5, end: 6 },
+    });
+    expect(() =>
+      assertNativeAliasHistory(history([errorOrdinary, interruptedUnknown]), identity, options),
+    ).not.toThrow();
+
+    const runningOrdinary = part("part-running", "hashline_write", {
+      status: "running",
+      input: { filePath: "test_dir/file1.txt", content: "content" },
+      time: { start: 5 },
+    });
+    expect(() =>
+      assertNativeAliasHistory(history([runningOrdinary, interruptedUnknown]), identity, options),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+
+    const duplicateShadow = {
+      ...structuredClone(interruptedUnknown),
+      id: "part-shadow-duplicate",
+    };
     expect(() =>
       assertNativeAliasHistory(
-        [
-          {
-            parts: [
-              {
-                type: "tool",
-                tool: "edit",
-                state: {
-                  status: "error",
-                  input: { filePath: "src/a.ts", oldString: "old", newString: "new" },
-                  error: "INVALID_ARGUMENT: Invalid edit arguments.",
-                },
-              },
-            ],
-          },
-        ],
+        history([completed, interruptedUnknown, duplicateShadow]),
+        identity,
+        options,
+      ),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("accepts snapshot-gated alias errors with arbitrary metadata", () => {
+    const history = (state: Record<string, unknown>) => [
+      { parts: [{ type: "tool", tool: "edit", state }] },
+    ];
+    const rejected = {
+      status: "error",
+      input: {},
+      error:
+        "SESSION_PROTOCOL_MISMATCH: OpenCode session history contains a duplicate call identity, so the persisted evidence cannot be attested.",
+    };
+
+    expect(() => assertNativeAliasHistory(history(rejected), identity)).not.toThrow();
+    expect(() =>
+      assertNativeAliasHistory(
+        history({
+          ...rejected,
+          error: "Tool execution aborted",
+          metadata: { progress: { completed: 1 }, interrupted: true },
+        }),
         identity,
       ),
     ).not.toThrow();
-
     expect(() =>
       assertNativeAliasHistory(
-        [
-          {
-            parts: [
-              {
-                type: "tool",
-                tool: "edit",
-                state: {
-                  status: "error",
-                  input: {
-                    filePath: "src/a.ts",
-                    oldString: "old",
-                    newString: "new",
-                    unexpected: true,
-                  },
-                  error: "INVALID_ARGUMENT: Invalid edit arguments.",
-                },
-              },
-            ],
-          },
-        ],
+        history({ ...rejected, metadata: { publication: "uncertain" } }),
         identity,
       ),
-    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    ).not.toThrow();
   });
 
   test("accepts only exact completed display-prefix rejections", () => {
@@ -1290,7 +1402,7 @@ describe("native alias session protocol", () => {
         Array.from({ length: SESSION_HISTORY_LIMIT + 1 }, () => ({ parts: [] })),
         identity,
       ),
-    ).toThrow("Start a genuinely new session; do not resume the same task ID.");
+    ).toThrow("the persisted evidence cannot be attested");
     expect(() =>
       assertNativeAliasHistory(
         Array.from({ length: SESSION_HISTORY_LIMIT }, () => ({ parts: [] })),
@@ -1308,24 +1420,61 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
-  test("reports binding states, evicts entries, and clears on disposal", () => {
-    const registry = new NativeAliasSessionRegistry();
+  test("fences candidates and active authorities across replacement, eviction, and unbind", () => {
+    const registry = new NativeAliasSessionRegistry(3);
     expect(registry.status("session", "fingerprint-a")).toBe("unbound");
-    expect(registry.isBound("session", "fingerprint-a")).toBeFalse();
-    registry.bind("session", "fingerprint-a");
-    expect(registry.status("session", "fingerprint-a")).toBe("bound");
-    expect(registry.status("session", "fingerprint-b")).toBe("mismatch");
-    expect(registry.isBound("session", "fingerprint-a")).toBeTrue();
-    expect(() => registry.isBound("session", "fingerprint-b")).toThrow(
-      "SESSION_PROTOCOL_MISMATCH:",
+
+    const firstA = registry.prepare("session", "fingerprint-a", "/worktree-a");
+    expect(registry.isCandidateCurrent(firstA)).toBeTrue();
+    expect(registry.status("session", "fingerprint-a")).toBe("unbound");
+    expect(registry.commit(firstA)).toBeTrue();
+    expect(
+      registry.isActive("session", "fingerprint-a", "/worktree-a", firstA.authority),
+    ).toBeTrue();
+    expect(registry.activeAuthority("session", "fingerprint-a", "/worktree-a")).toBe(
+      firstA.authority,
     );
 
-    for (let index = 0; index < SESSION_BINDING_LIMIT + 1; index += 1) {
-      registry.bind(`session-${index}`, "fingerprint-a");
-    }
+    const sharedA = registry.prepare("session", "fingerprint-a", "/worktree-a");
+    expect(sharedA).toBe(firstA);
+    expect(
+      registry.isActive("session", "fingerprint-a", "/worktree-a", firstA.authority),
+    ).toBeTrue();
+
+    const candidateB = registry.prepare("session", "fingerprint-b", "/worktree-b");
+    expect(candidateB).not.toBe(firstA);
     expect(registry.status("session", "fingerprint-a")).toBe("unbound");
-    expect(registry.status(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBe("bound");
+    expect(registry.commit(firstA)).toBeFalse();
+    expect(registry.commit(candidateB)).toBeTrue();
+    expect(
+      registry.isActive("session", "fingerprint-b", "/worktree-b", candidateB.authority),
+    ).toBeTrue();
+
+    const secondA = registry.prepare("session", "fingerprint-a", "/worktree-a");
+    expect(secondA).not.toBe(firstA);
+    expect(secondA.authority).not.toBe(firstA.authority);
+    expect(registry.commit(firstA)).toBeFalse();
+    expect(registry.commit(secondA)).toBeTrue();
+    expect(
+      registry.isActive("session", "fingerprint-a", "/worktree-a", firstA.authority),
+    ).toBeFalse();
+    registry.unbind("session");
+    expect(registry.status("session", "fingerprint-a")).toBe("unbound");
+    expect(registry.commit(secondA)).toBeFalse();
+
+    for (const sessionId of ["one", "two", "three"]) {
+      const candidate = registry.prepare(sessionId, "fingerprint", "/worktree");
+      expect(registry.commit(candidate)).toBeTrue();
+    }
+    registry.prepare("one", "fingerprint", "/worktree");
+    const overflow = registry.prepare("overflow", "fingerprint", "/worktree");
+    expect(registry.commit(overflow)).toBeTrue();
+    expect(registry.status("two", "fingerprint")).toBe("unbound");
+    expect(registry.status("one", "fingerprint")).toBe("bound");
+    expect(registry.status("overflow", "fingerprint")).toBe("bound");
+
     registry.clear();
-    expect(registry.status(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBe("unbound");
+    expect(registry.status("one", "fingerprint")).toBe("unbound");
+    expect(registry.commit(overflow)).toBeFalse();
   });
 });

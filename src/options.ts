@@ -1,5 +1,7 @@
 import { fail } from "./errors.js";
 
+export const ABSOLUTE_MAX_LOGICAL_LINES = 100_000;
+
 export interface BetterHashlineOptions {
   /** Hide and reject OpenCode's built-in file-writing tools. Defaults to true. */
   enforce?: boolean;
@@ -43,7 +45,7 @@ const DEFAULTS: ResolvedOptions = {
   enforce: true,
   toolSurface: "hashline",
   maxFileBytes: 8 * 1024 * 1024,
-  maxLines: 100_000,
+  maxLines: ABSOLUTE_MAX_LOGICAL_LINES,
   maxCacheBytes: 64 * 1024 * 1024,
   maxSnapshots: 64,
   maxSnapshotsPerPath: 4,
@@ -106,7 +108,8 @@ export function resolveOptions(input: Record<string, unknown> | undefined): Reso
     maxFileBytes:
       integerOption(value.maxFileBytes, "maxFileBytes", 1024, 16 * 1024 * 1024) ??
       DEFAULTS.maxFileBytes,
-    maxLines: integerOption(value.maxLines, "maxLines", 1, 100_000) ?? DEFAULTS.maxLines,
+    maxLines:
+      integerOption(value.maxLines, "maxLines", 1, ABSOLUTE_MAX_LOGICAL_LINES) ?? DEFAULTS.maxLines,
     maxCacheBytes:
       integerOption(value.maxCacheBytes, "maxCacheBytes", 1024, 1024 * 1024 * 1024) ??
       DEFAULTS.maxCacheBytes,

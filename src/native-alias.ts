@@ -70,7 +70,9 @@ export class OpenCodeSessionHistoryError extends Error {
     category: OpenCodeSessionHistoryErrorCategory,
     options: OpenCodeSessionHistoryErrorOptions = {},
   ) {
-    super(sessionHistoryErrorMessage(category, options.status, options.statusClass));
+    super(
+      `${sessionHistoryErrorMessage(category, options.status, options.statusClass)} The persisted evidence cannot be attested.`,
+    );
     this.category = category;
     this.retryable = options.retryable ?? false;
     this.status = options.status;

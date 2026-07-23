@@ -14,9 +14,12 @@ export interface IssuedRange {
   end: number;
 }
 
+export type SnapshotAuthority = symbol;
+
 export interface Snapshot {
   readonly id: string;
   readonly scope: SnapshotScope;
+  readonly authority: SnapshotAuthority | undefined;
   readonly canonicalPath: string;
   readonly digest: string;
   readonly document: TextDocument;
@@ -27,6 +30,7 @@ export interface Snapshot {
   issuedBof: boolean;
   issuedEof: boolean;
   complete: boolean;
+  delivered: boolean;
   pins: number;
   invalid: boolean;
 }
@@ -37,6 +41,29 @@ export interface IssuedPage {
   eof: boolean;
 }
 
+export interface IssuedCoverageRequirements {
+  ranges: readonly IssuedRange[];
+  boundaryRanges?: readonly IssuedRange[];
+  bof: boolean;
+  eof: boolean;
+}
+
+export interface MissingIssuedCoverage {
+  ranges: readonly IssuedRange[];
+  primaryRanges: readonly IssuedRange[];
+  boundaryRanges: readonly IssuedRange[];
+  bof: boolean;
+  eof: boolean;
+}
+
+const HASHLINE_READ_MAX_LINES = 1000;
+const MAX_DIAGNOSTIC_ITEMS = 12;
+
+type SuggestedRead = {
+  offset: number;
+  limit: number;
+};
+
 function scopeMatches(left: SnapshotScope, right: SnapshotScope): boolean {
   return left.sessionId === right.sessionId && left.worktree === right.worktree;
 }
@@ -44,7 +71,7 @@ function scopeMatches(left: SnapshotScope, right: SnapshotScope): boolean {
 function mergeRanges(ranges: readonly IssuedRange[]): IssuedRange[] {
   const sorted = ranges
     .filter((range) => range.start <= range.end)
-    .toSorted((left, right) => left.start - right.start);
+    .toSorted((left, right) => left.start - right.start || left.end - right.end);
   const merged: IssuedRange[] = [];
   for (const range of sorted) {
     const previous = merged.at(-1);
@@ -55,6 +82,156 @@ function mergeRanges(ranges: readonly IssuedRange[]): IssuedRange[] {
     }
   }
   return merged;
+}
+
+function subtractRanges(
+  required: readonly IssuedRange[],
+  issued: readonly IssuedRange[],
+): IssuedRange[] {
+  const missing: IssuedRange[] = [];
+  let issuedIndex = 0;
+  for (const requirement of required) {
+    while (issued[issuedIndex] && (issued[issuedIndex]?.end ?? 0) < requirement.start) {
+      issuedIndex += 1;
+    }
+    let cursor: number | undefined = requirement.start;
+    let index = issuedIndex;
+    while (cursor !== undefined) {
+      const coverage = issued[index];
+      if (!coverage || coverage.start > requirement.end) break;
+      if (coverage.end < cursor) {
+        index += 1;
+        continue;
+      }
+      if (coverage.start > cursor) {
+        missing.push({ start: cursor, end: Math.min(requirement.end, coverage.start - 1) });
+      }
+      if (coverage.end >= requirement.end) {
+        cursor = undefined;
+        break;
+      }
+      cursor = Math.max(cursor, coverage.end + 1);
+      index += 1;
+    }
+    if (cursor !== undefined) missing.push({ start: cursor, end: requirement.end });
+    issuedIndex = index;
+  }
+  return missing;
+}
+
+export function collectMissingIssuedCoverage(
+  snapshot: Snapshot,
+  requirements: IssuedCoverageRequirements,
+): MissingIssuedCoverage {
+  if (typeof requirements.bof !== "boolean" || typeof requirements.eof !== "boolean") {
+    fail("INVALID_ARGUMENT", "BOF and EOF coverage requirements must be boolean values.");
+  }
+  const lineCount = snapshot.document.lines.length;
+  const boundaryRanges = requirements.boundaryRanges ?? [];
+  for (const range of [...requirements.ranges, ...boundaryRanges]) {
+    if (
+      !Number.isSafeInteger(range.start) ||
+      !Number.isSafeInteger(range.end) ||
+      range.start < 1 ||
+      range.end < range.start ||
+      range.end > lineCount
+    ) {
+      fail("INVALID_ARGUMENT", `Lines ${range.start}-${range.end} are outside the snapshot.`);
+    }
+  }
+  const issued = mergeRanges(snapshot.issued);
+  const primaryRanges = subtractRanges(mergeRanges(requirements.ranges), issued);
+  const missingBoundaryRanges = subtractRanges(mergeRanges(boundaryRanges), issued);
+  return {
+    ranges: mergeRanges([...primaryRanges, ...missingBoundaryRanges]),
+    primaryRanges,
+    boundaryRanges: missingBoundaryRanges,
+    bof: requirements.bof && !snapshot.issuedBof,
+    eof: requirements.eof && !snapshot.issuedEof,
+  };
+}
+
+function formatRange(range: IssuedRange): string {
+  return range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
+}
+
+function formatMissingRanges(ranges: readonly IssuedRange[]): string {
+  if (ranges.length <= MAX_DIAGNOSTIC_ITEMS) return ranges.map(formatRange).join(", ");
+  const head = ranges.slice(0, MAX_DIAGNOSTIC_ITEMS - 1).map(formatRange);
+  const omitted = ranges.length - MAX_DIAGNOSTIC_ITEMS;
+  const last = ranges.at(-1);
+  if (!last) return "";
+  return `${head.join(", ")}, ... (+${omitted} more ${omitted === 1 ? "gap" : "gaps"}), ${formatRange(last)}`;
+}
+
+function suggestedReads(
+  snapshot: Snapshot,
+  missing: MissingIssuedCoverage,
+): {
+  first: SuggestedRead[];
+  last: SuggestedRead | undefined;
+  total: number;
+  sweepStart: number | undefined;
+  sweepEnd: number | undefined;
+} {
+  const targets = [...missing.ranges];
+  if (missing.bof) targets.push({ start: 1, end: 1 });
+  if (missing.eof) {
+    const eofLine = Math.max(1, snapshot.document.lines.length);
+    targets.push({ start: eofLine, end: eofLine });
+  }
+
+  const mergedTargets = mergeRanges(targets);
+  const first: SuggestedRead[] = [];
+  let last: SuggestedRead | undefined;
+  let total = 0;
+  for (const target of mergedTargets) {
+    let offset = target.start;
+    while (offset <= target.end) {
+      const limit = Math.min(HASHLINE_READ_MAX_LINES, target.end - offset + 1);
+      const call = { offset, limit };
+      if (first.length < MAX_DIAGNOSTIC_ITEMS) first.push(call);
+      last = call;
+      total += 1;
+      offset += limit;
+    }
+  }
+  return {
+    first,
+    last,
+    total,
+    sweepStart: mergedTargets[0]?.start,
+    sweepEnd: mergedTargets.at(-1)?.end,
+  };
+}
+
+function formatSuggestedRead(call: SuggestedRead): string {
+  return `hashline_read(offset=${call.offset}, limit=${call.limit})`;
+}
+
+function formatSuggestedReads(snapshot: Snapshot, missing: MissingIssuedCoverage): string {
+  const reads = suggestedReads(snapshot, missing);
+  if (reads.total <= MAX_DIAGNOSTIC_ITEMS) {
+    return reads.first.map(formatSuggestedRead).join(", ");
+  }
+  const head = reads.first.slice(0, MAX_DIAGNOSTIC_ITEMS - 1).map(formatSuggestedRead);
+  const omitted = reads.total - MAX_DIAGNOSTIC_ITEMS;
+  if (reads.last === undefined || reads.sweepStart === undefined || reads.sweepEnd === undefined) {
+    return head.join(", ");
+  }
+  const listed = `${head.join(", ")}, ... (+${omitted} more ${omitted === 1 ? "call" : "calls"}), ${formatSuggestedRead(reads.last)}`;
+  const sweepLimit = Math.min(HASHLINE_READ_MAX_LINES, reads.sweepEnd - reads.sweepStart + 1);
+  return `${listed}. For omitted calls, use hashline_read(offset=${reads.sweepStart}, limit=${sweepLimit}) and follow @more with limit=1000 until line ${reads.sweepEnd} is issued`;
+}
+
+function issuedCoverageError(snapshot: Snapshot, missing: MissingIssuedCoverage): string {
+  const parts: string[] = [];
+  if (missing.ranges.length > 0) {
+    parts.push(`line gaps: ${formatMissingRanges(missing.ranges)}`);
+  }
+  if (missing.bof) parts.push("BOF boundary");
+  if (missing.eof) parts.push("EOF boundary");
+  return `Missing issued coverage: ${parts.join("; ")}. Suggested reads: ${formatSuggestedReads(snapshot, missing)}. Only fully rendered N| lines issue coverage; preview-only N!| lines remain unissued. Reuse the old snapshotId only if every suggested read returns that same ID; otherwise replan the full batch from the new snapshot.`;
 }
 
 export function sha256(bytes: Uint8Array): string {
@@ -77,19 +254,30 @@ export class SnapshotStore {
     private readonly now: () => number = Date.now,
   ) {}
 
-  remember(scope: SnapshotScope, canonicalPath: string, document: TextDocument): Snapshot {
+  remember(
+    scope: SnapshotScope,
+    canonicalPath: string,
+    document: TextDocument,
+    authority?: SnapshotAuthority,
+  ): Snapshot {
     const digest = sha256(document.bytes);
-    const existing = [...this.#snapshots.values()].find(
-      (snapshot) =>
-        !snapshot.invalid &&
-        scopeMatches(snapshot.scope, scope) &&
-        snapshot.canonicalPath === canonicalPath &&
-        snapshot.digest === digest &&
-        bytesEqual(snapshot.document.bytes, document.bytes),
-    );
-    if (existing) {
-      this.#touch(existing);
-      return existing;
+    const timestamp = this.now();
+    for (const snapshot of [...this.#snapshots.values()]) {
+      if (
+        snapshot.invalid ||
+        !scopeMatches(snapshot.scope, scope) ||
+        snapshot.authority !== authority ||
+        snapshot.canonicalPath !== canonicalPath ||
+        snapshot.digest !== digest ||
+        !bytesEqual(snapshot.document.bytes, document.bytes)
+      ) {
+        continue;
+      }
+      if (timestamp - snapshot.lastUsedAt <= this.options.snapshotTtlMs) {
+        this.#touch(snapshot);
+        return snapshot;
+      }
+      if (snapshot.pins === 0) this.#remove(snapshot.id);
     }
 
     const weight =
@@ -112,11 +300,11 @@ export class SnapshotStore {
       id = `s_${randomBytes(16).toString("base64url")}`;
     } while (this.#snapshots.has(id));
 
-    const timestamp = this.now();
     const snapshot: Snapshot = {
       id,
       scope: { ...scope },
       canonicalPath,
+      authority,
       digest,
       document,
       createdAt: timestamp,
@@ -126,6 +314,7 @@ export class SnapshotStore {
       issuedBof: false,
       issuedEof: false,
       complete: false,
+      delivered: false,
       pins: 0,
       invalid: false,
     };
@@ -144,7 +333,10 @@ export class SnapshotStore {
 
   issue(snapshot: Snapshot, page: IssuedPage): void {
     if (snapshot.invalid || this.#snapshots.get(snapshot.id) !== snapshot) {
-      fail("SNAPSHOT_UNKNOWN", "The snapshot is no longer usable.");
+      fail(
+        "SNAPSHOT_UNKNOWN",
+        "The snapshot is no longer usable. Rerun hashline_read in this same session and use only the snapshot ID it returns; old IDs cannot be revived.",
+      );
     }
     snapshot.issued = mergeRanges([...snapshot.issued, ...page.ranges]);
     snapshot.issuedBof ||= page.bof;
@@ -157,7 +349,24 @@ export class SnapshotStore {
         (snapshot.issued.length === 1 &&
           snapshot.issued[0]?.start === 1 &&
           snapshot.issued[0]?.end === lineCount));
+    snapshot.delivered = true;
     this.#touch(snapshot);
+  }
+
+  assertDelivered(snapshot: Snapshot): void {
+    if (snapshot.delivered) return;
+    fail(
+      "SNAPSHOT_REQUIRED",
+      "This snapshot has not received delivered issued evidence. Rerun hashline_read in this same session and use only the snapshot ID it returns; old IDs cannot be revived.",
+    );
+  }
+
+  assertAuthority(snapshot: Snapshot, authority: SnapshotAuthority): void {
+    if (snapshot.authority === authority) return;
+    fail(
+      "SNAPSHOT_REQUIRED",
+      "This snapshot does not belong to the active native-alias process epoch. Rerun hashline_read in this same session and use only the snapshot ID it returns; old IDs cannot be revived.",
+    );
   }
 
   peek(scope: SnapshotScope, id: string): Snapshot {
@@ -216,6 +425,18 @@ export class SnapshotStore {
     }
   }
 
+  assertIssuedCoverage(snapshot: Snapshot, requirements: IssuedCoverageRequirements): void {
+    const missing = collectMissingIssuedCoverage(snapshot, requirements);
+    if (missing.ranges.length === 0 && !missing.bof && !missing.eof) return;
+    const code =
+      missing.primaryRanges.length > 0
+        ? "RANGE_NOT_FULLY_ISSUED"
+        : missing.bof || missing.eof
+          ? "REF_NOT_ISSUED"
+          : "RANGE_NOT_FULLY_ISSUED";
+    fail(code, issuedCoverageError(snapshot, missing));
+  }
+
   assertComplete(snapshot: Snapshot, operation = "replace_file"): void {
     if (!snapshot.complete) {
       fail(
@@ -236,6 +457,15 @@ export class SnapshotStore {
     }
   }
 
+  invalidateSessionPath(sessionId: string, canonicalPath: string): void {
+    for (const snapshot of [...this.#snapshots.values()]) {
+      if (snapshot.scope.sessionId === sessionId && snapshot.canonicalPath === canonicalPath) {
+        snapshot.invalid = true;
+        this.#remove(snapshot.id);
+      }
+    }
+  }
+
   clear(): void {
     this.#snapshots.clear();
     this.#weight = 0;
@@ -244,11 +474,17 @@ export class SnapshotStore {
   #get(scope: SnapshotScope, id: string, pin: boolean): Snapshot {
     const snapshot = this.#snapshots.get(id);
     if (!snapshot || snapshot.invalid || !scopeMatches(snapshot.scope, scope)) {
-      fail("SNAPSHOT_UNKNOWN", "Reread the file with hashline_read.");
+      fail(
+        "SNAPSHOT_UNKNOWN",
+        "Rerun hashline_read in this same session and use only the snapshot ID it returns; old IDs cannot be revived.",
+      );
     }
     if (this.now() - snapshot.lastUsedAt > this.options.snapshotTtlMs) {
       if (snapshot.pins === 0) this.#remove(snapshot.id);
-      fail("SNAPSHOT_EXPIRED", "Reread the file with hashline_read.");
+      fail(
+        "SNAPSHOT_EXPIRED",
+        "Rerun hashline_read in this same session and use only the snapshot ID it returns; old IDs cannot be revived.",
+      );
     }
     if (pin) snapshot.pins += 1;
     this.#touch(snapshot);
