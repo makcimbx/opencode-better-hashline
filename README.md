@@ -5,7 +5,11 @@
 <h1 align="center">OpenCode Better Hashline</h1>
 
 <p align="center">
-  A fail-closed, snapshot-bound editing protocol for OpenCode agents.
+  <strong>Exact snapshots. Compact line refs. Edits that fail closed.</strong>
+</p>
+
+<p align="center">
+  A safety-oriented editing protocol for OpenCode agents that binds every mutation to the exact bytes the agent actually read.
 </p>
 
 <p align="center">
@@ -15,7 +19,56 @@
   <a href="SECURITY.md"><img alt="Security policy" src="https://img.shields.io/badge/security-policy-9db2cc" /></a>
 </p>
 
-Most line-hash tools put a tiny checksum next to every line, then trust that checksum when writing. Better Hashline takes a different approach: the model gets compact native line numbers, while the plugin retains the exact bytes behind an opaque snapshot ID. Short hashes are display hints in many implementations; here they are never the authority.
+<p align="center">
+  <a href="README.md"><strong>English</strong></a> ·
+  <a href="README.ru.md">Русский</a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#evidence">Evidence</a> ·
+  <a href="#project-docs">Docs</a>
+</p>
+
+| Exact freshness | Conservative by default | OpenCode-native controls | Guarded publication |
+| :--- | :--- | :--- | :--- |
+| Retained file bytes, not tiny per-line checksums | Stale or ambiguous edits are rejected | Existing read, edit, and external-directory permissions | Plan once, recheck identity, publish without overwrite |
+
+> [!IMPORTANT]
+> Better Hashline is an editing transport, not a filesystem transaction or a security sandbox. Shell commands and hostile external writers remain outside its guarantees. Read the [threat model](docs/threat-model.md) before relying on it in sensitive environments.
+
+## Quick Start
+
+**Requirements:** [OpenCode](https://opencode.ai/) `>=1.18.3 <2` and Bun `>=1.3.0`.
+
+```sh
+opencode plugin opencode-better-hashline
+```
+
+Or add the package to `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-better-hashline"]
+}
+```
+
+Restart OpenCode after changing plugin configuration. Conservative defaults are enabled automatically; no options are required.
+
+Verify that the package loaded before relying on enforcement:
+
+```sh
+opencode debug agent build --tool hashline_read --params '{"filePath":"README.md","limit":1}'
+```
+
+The output must start with `@hashline snapshot=`. OpenCode may continue without the plugin if the package itself cannot be imported, in which case native mutators remain available. Diagnostic fail-closed behavior begins only after the plugin module has loaded.
+
+## Why Exact Snapshots?
+
+Most line-hash tools place a tiny checksum next to every line and trust it when writing. Better Hashline keeps model-facing addresses compact while retaining the exact file bytes behind an opaque snapshot ID. Short hashes may be useful display hints; here they are never freshness authority.
 
 | Property | Better Hashline behavior |
 | --- | --- |
@@ -26,35 +79,6 @@ Most line-hash tools put a tiny checksum next to every line, then trust that che
 | Permissions | Reuses OpenCode's `read`, `edit`, and `external_directory` permissions |
 | Publication | Same-directory temporary file, flush, identity recheck, one rename attempt |
 | Native tools | Keeps native `read`; hides and blocks `edit`, `write`, and `apply_patch` by default |
-
-> [!IMPORTANT]
-> This is a safety-oriented editing transport, not a filesystem transaction or a security sandbox. Shell commands and hostile external writers remain outside the guarantees. Read the [threat model](docs/threat-model.md) before relying on it in sensitive environments.
-
-## Install
-
-Requirements: [OpenCode](https://opencode.ai/) `>=1.18.3 <2` and Bun `>=1.3.0`.
-
-```sh
-opencode plugin opencode-better-hashline
-```
-
-Or add the package to `opencode.json`:
-
-```json
-{
-  "plugin": ["opencode-better-hashline"]
-}
-```
-
-Restart OpenCode after changing plugin configuration. Better Hashline is enabled with conservative defaults and no required options.
-
-Verify the loaded package before relying on enforcement:
-
-```sh
-opencode debug agent build --tool hashline_read --params '{"filePath":"README.md","limit":1}'
-```
-
-The output must start with `@hashline snapshot=`. OpenCode may continue without this plugin if the package itself cannot be imported, in which case native mutators remain available. Diagnostic fail-closed behavior begins only after the plugin module has loaded.
 
 ## How It Works
 
