@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.6.0...v0.6.1) (2026-07-23)
+
+
+### Fixed
+
+* preserve native alias sessions across recovery ([#35](https://github.com/makcimbx/opencode-better-hashline/issues/35)) ([b727324](https://github.com/makcimbx/opencode-better-hashline/commit/b7273240c0060fc47b6e6d26abbf2228b0c25415))
+
 ## [Unreleased]
 
 ### Added
