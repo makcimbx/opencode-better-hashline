@@ -797,53 +797,131 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
-  test("accepts only known pre-execution native-shape rejections", () => {
+  test("accepts only exact interrupted unknown duplicate shadows", () => {
+    const sessionID = "session";
+    const messageID = "message-write";
+    const callID = "call-write";
+    const part = (
+      id: string,
+      tool: string,
+      state: Record<string, unknown>,
+    ): Record<string, unknown> => ({
+      id,
+      sessionID,
+      messageID,
+      type: "tool",
+      tool,
+      callID,
+      state,
+    });
+    const completed = part("part-write", "hashline_write", {
+      status: "completed",
+      input: { filePath: "test_dir/file1.txt", content: "content", createParents: true },
+      output: "Created the file.",
+      title: "test_dir/file1.txt",
+      metadata: { created: true, truncated: false },
+      time: { start: 1, end: 2 },
+    });
+    const interruptedUnknown = part("part-shadow", "unknown", {
+      status: "error",
+      input: {},
+      error: "Tool execution aborted",
+      metadata: { interrupted: true },
+      time: { start: 3, end: 4 },
+    });
+    const history = (parts: Record<string, unknown>[]) => [
+      { info: { id: messageID, sessionID }, parts },
+    ];
+    const options = { sessionId: sessionID };
+
+    expect(() =>
+      assertNativeAliasHistory(history([completed, interruptedUnknown]), identity, options),
+    ).not.toThrow();
+
+    const mutations = [
+      (shadow: Record<string, unknown>) => Object.assign(shadow, { tool: "read" }),
+      (shadow: Record<string, unknown>) =>
+        Object.assign(shadow.state as Record<string, unknown>, { error: "Aborted" }),
+      (shadow: Record<string, unknown>) =>
+        Object.assign((shadow.state as Record<string, unknown>).input as Record<string, unknown>, {
+          unexpected: true,
+        }),
+      (shadow: Record<string, unknown>) =>
+        Object.assign(
+          (shadow.state as Record<string, unknown>).metadata as Record<string, unknown>,
+          { interrupted: false },
+        ),
+      (shadow: Record<string, unknown>) =>
+        Object.assign(shadow, { metadata: { providerExecuted: true } }),
+    ];
+    for (const mutate of mutations) {
+      const shadow = structuredClone(interruptedUnknown) as Record<string, unknown>;
+      mutate(shadow);
+      expect(() =>
+        assertNativeAliasHistory(history([completed, shadow]), identity, options),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    }
+
+    const errorOrdinary = part("part-error", "hashline_write", {
+      status: "error",
+      input: { filePath: "test_dir/file1.txt", content: "content" },
+      error: "TARGET_EXISTS: The target already exists.",
+      time: { start: 5, end: 6 },
+    });
+    expect(() =>
+      assertNativeAliasHistory(history([errorOrdinary, interruptedUnknown]), identity, options),
+    ).not.toThrow();
+
+    const runningOrdinary = part("part-running", "hashline_write", {
+      status: "running",
+      input: { filePath: "test_dir/file1.txt", content: "content" },
+      time: { start: 5 },
+    });
+    expect(() =>
+      assertNativeAliasHistory(history([runningOrdinary, interruptedUnknown]), identity, options),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+
+    const duplicateShadow = {
+      ...structuredClone(interruptedUnknown),
+      id: "part-shadow-duplicate",
+    };
     expect(() =>
       assertNativeAliasHistory(
-        [
-          {
-            parts: [
-              {
-                type: "tool",
-                tool: "edit",
-                state: {
-                  status: "error",
-                  input: { filePath: "src/a.ts", oldString: "old", newString: "new" },
-                  error: "INVALID_ARGUMENT: Invalid edit arguments.",
-                },
-              },
-            ],
-          },
-        ],
+        history([completed, interruptedUnknown, duplicateShadow]),
+        identity,
+        options,
+      ),
+    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+  });
+
+  test("accepts snapshot-gated alias errors with arbitrary metadata", () => {
+    const history = (state: Record<string, unknown>) => [
+      { parts: [{ type: "tool", tool: "edit", state }] },
+    ];
+    const rejected = {
+      status: "error",
+      input: {},
+      error:
+        "SESSION_PROTOCOL_MISMATCH: OpenCode session history contains a duplicate call identity. Start a new session before editing.",
+    };
+
+    expect(() => assertNativeAliasHistory(history(rejected), identity)).not.toThrow();
+    expect(() =>
+      assertNativeAliasHistory(
+        history({
+          ...rejected,
+          error: "Tool execution aborted",
+          metadata: { progress: { completed: 1 }, interrupted: true },
+        }),
         identity,
       ),
     ).not.toThrow();
-
     expect(() =>
       assertNativeAliasHistory(
-        [
-          {
-            parts: [
-              {
-                type: "tool",
-                tool: "edit",
-                state: {
-                  status: "error",
-                  input: {
-                    filePath: "src/a.ts",
-                    oldString: "old",
-                    newString: "new",
-                    unexpected: true,
-                  },
-                  error: "INVALID_ARGUMENT: Invalid edit arguments.",
-                },
-              },
-            ],
-          },
-        ],
+        history({ ...rejected, metadata: { publication: "uncertain" } }),
         identity,
       ),
-    ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    ).not.toThrow();
   });
 
   test("accepts only exact completed display-prefix rejections", () => {

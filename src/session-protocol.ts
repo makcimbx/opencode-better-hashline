@@ -18,6 +18,8 @@ export const SESSION_HISTORY_FETCH_LIMIT = SESSION_HISTORY_LIMIT + 1;
 export const SESSION_HISTORY_MAX_PARTS = 2_000;
 export const SESSION_HISTORY_MAX_BYTES = 1_048_576;
 export const SESSION_BINDING_LIMIT = 4_096;
+const DUPLICATE_CALL_IDENTITY_REASON =
+  "OpenCode session history contains a duplicate call identity.";
 
 export type NativeAliasProtocolIdentity = {
   packageVersion: string;
@@ -707,23 +709,6 @@ function assertCompletedInput(
   assertAliasInput(toolName, inputValue, completed, directory);
 }
 
-function isKnownNativeShapeRejection(toolName: NativeAliasSurface, state: Record<string, unknown>) {
-  const input = record(state.input);
-  const expectedError = `INVALID_ARGUMENT: Invalid ${toolName} arguments.`;
-  if (!input || state.error !== expectedError || state.metadata !== undefined) return false;
-  if (toolName === "apply_patch") {
-    return exactKeys(input, ["patchText"]) && typeof input.patchText === "string";
-  }
-  return (
-    (exactKeys(input, ["filePath", "newString", "oldString"]) ||
-      exactKeys(input, ["filePath", "newString", "oldString", "replaceAll"])) &&
-    typeof input.filePath === "string" &&
-    typeof input.oldString === "string" &&
-    typeof input.newString === "string" &&
-    (input.replaceAll === undefined || typeof input.replaceAll === "boolean")
-  );
-}
-
 function isAttestedCompletedDisplayPrefixRejection(
   toolName: NativeAliasSurface,
   state: Record<string, unknown>,
@@ -773,13 +758,6 @@ function isAttestedCompletedDisplayPrefixRejection(
     input.allowHashlinePrefixes !== true &&
     state.output === `DISPLAY_PREFIX_REJECTED: ${displayPrefixRejectionMessage(match)}`
   );
-}
-
-function isKnownRejectedAliasCall(
-  toolName: NativeAliasSurface,
-  state: Record<string, unknown>,
-): boolean {
-  return isKnownNativeShapeRejection(toolName, state);
 }
 
 function assertTime(value: unknown, completed: boolean): void {
@@ -858,6 +836,25 @@ function assertToolState(state: Record<string, unknown>): void {
   rejectHistory("OpenCode session history contains an unknown tool state.");
 }
 
+function isInterruptedUnknownDuplicateShadow(
+  part: Record<string, unknown>,
+  state: Record<string, unknown>,
+): boolean {
+  const input = record(state.input);
+  const metadata = record(state.metadata);
+  return (
+    part.tool === "unknown" &&
+    part.metadata === undefined &&
+    state.status === "error" &&
+    state.error === "Tool execution aborted" &&
+    input !== undefined &&
+    exactKeys(input, []) &&
+    metadata !== undefined &&
+    exactKeys(metadata, ["interrupted"]) &&
+    metadata.interrupted === true
+  );
+}
+
 function assertToolPart(part: Record<string, unknown>): void {
   const keys = ["callID", "id", "messageID", "sessionID", "state", "tool", "type"];
   if ("metadata" in part) keys.push("metadata");
@@ -894,7 +891,7 @@ function inspectHistory(
     options.currentCall?.input === undefined ? undefined : canonicalJson(options.currentCall.input);
   const messageIds = new Set<string>();
   const partIds = new Set<string>();
-  const callIds = new Set<string>();
+  const callIds = new Map<string, { ordinaryStatus?: unknown; interruptedUnknown: boolean }>();
   for (const messageValue of messagesValue) {
     const message = record(messageValue);
     const messageInfo = record(message?.info);
@@ -948,11 +945,23 @@ function inspectHistory(
         rejectHistory("OpenCode session history contains an unbound tool call.");
       }
       if (options.sessionId) assertToolState(state);
-      const callIdentity = JSON.stringify([part.messageID, part.callID]);
-      if (options.sessionId && callIds.has(callIdentity)) {
-        rejectHistory("OpenCode session history contains a duplicate call identity.");
+      if (options.sessionId) {
+        const callIdentity = JSON.stringify([part.messageID, part.callID]);
+        const interruptedUnknown = isInterruptedUnknownDuplicateShadow(part, state);
+        const seen = callIds.get(callIdentity);
+        if (!seen) {
+          callIds.set(callIdentity, {
+            ordinaryStatus: interruptedUnknown ? undefined : state.status,
+            interruptedUnknown,
+          });
+        } else {
+          if (interruptedUnknown ? seen.interruptedUnknown : seen.ordinaryStatus !== undefined) {
+            rejectHistory(DUPLICATE_CALL_IDENTITY_REASON);
+          }
+          if (interruptedUnknown) seen.interruptedUnknown = true;
+          else seen.ordinaryStatus = state.status;
+        }
       }
-      if (options.sessionId) callIds.add(callIdentity);
       const activeCurrentCall =
         options.currentCall &&
         part.callID === options.currentCall.id &&
@@ -986,7 +995,8 @@ function inspectHistory(
       if (part.tool === "hashline_edit" || part.tool === "write") {
         rejectHistory("This session contains the hashline tool surface.");
       }
-      if (state?.status === "error" && isKnownRejectedAliasCall(part.tool, state)) continue;
+      // Error states issue no provenance; every later mutation remains gated by its own snapshot.
+      if (state.status === "error") continue;
       if (
         state?.status === "completed" &&
         isAttestedCompletedDisplayPrefixRejection(part.tool, state, identity)
@@ -1008,6 +1018,16 @@ function inspectHistory(
       completedAliases.push(completed);
     }
     inspectedMessages.push({ ...message, parts: inspectedParts });
+  }
+  for (const seen of callIds.values()) {
+    if (
+      seen.interruptedUnknown &&
+      seen.ordinaryStatus !== undefined &&
+      seen.ordinaryStatus !== "completed" &&
+      seen.ordinaryStatus !== "error"
+    ) {
+      rejectHistory(DUPLICATE_CALL_IDENTITY_REASON);
+    }
   }
   if (options.currentCall && currentMatches !== 1) {
     rejectHistory("The current alias call is missing from session history.");

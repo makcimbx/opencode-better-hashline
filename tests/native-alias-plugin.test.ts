@@ -1127,6 +1127,50 @@ describe("native alias continuation safety", () => {
     expect(await readFile(join(root, "transient.txt"), "utf8")).toBe("one\nRECOVERED\n");
   });
 
+  test("recovers an uncertain historical alias error after a fresh read", async () => {
+    const sessionID = "uncertain-history";
+    const filePath = "uncertain.txt";
+    const { value } = await aliasHarness({
+      history: [
+        {
+          parts: [
+            {
+              type: "tool",
+              tool: "edit",
+              state: {
+                status: "error",
+                input: replaceArgs(filePath, "s_0000000000000000000000"),
+                error: "RACE_AFTER_WRITE: The result could not be attested.",
+                metadata: { publication: "uncertain" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const toolContext = context({ sessionID });
+    const { edit } = aliasRegistry(value);
+    await writeFile(join(root, filePath), "one\ntwo\n");
+    const stale = await issueSnapshot(value, toolContext, filePath);
+    await writeFile(join(root, filePath), "one\nchanged\n");
+
+    await expect(
+      edit.execute(
+        replaceArgs(filePath, String(stale.metadata.snapshotId), "RECOVERED"),
+        toolContext,
+      ),
+    ).rejects.toThrow("TARGET_CHANGED:");
+
+    const fresh = await issueSnapshot(value, toolContext, filePath);
+    await edit.execute(
+      replaceArgs(filePath, String(fresh.metadata.snapshotId), "RECOVERED"),
+      toolContext,
+    );
+
+    expect(await systemGuidance(value, sessionID)).toContain("native-alias-session=bound");
+    expect(await readFile(join(root, filePath), "utf8")).toBe("one\nRECOVERED\n");
+  });
+
   test("retains the safe HTTP category after bounded retry exhaustion", async () => {
     const sessionID = "exhausted-history";
     const { value, historyCalls } = await aliasHarness({

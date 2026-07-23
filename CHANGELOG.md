@@ -13,6 +13,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed native aliases rejecting OpenCode 1.18.4 interrupted `unknown` cleanup shadows as duplicate call identities, and made non-proven alias errors snapshot-gated history instead of permanent session poison.
+
 ## [0.6.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.5.0...v0.6.0) (2026-07-22)
 
 ### Added

@@ -345,10 +345,21 @@ Each plugin instance binds a session to one v2 protocol fingerprint. Before the 
 a bounded history of at most 200 messages, 2,000 parts, and 1 MiB, then validates every historical
 mutator. Message, part, call, session, input path, lifecycle operation, move destination, metadata
 keys, unified-diff path headers and hunks, counts, renderer path, and source/destination digests must
-agree exactly. Native `write`, `hashline_edit`, unknown fields, malformed or v1 markers, and any
-terminal rejection except exact native-shaped `INVALID_ARGUMENT` errors or an exact completed
-`DISPLAY_PREFIX_REJECTED` result are incompatible. Unmarked, sanitized, conflicting, unreadable,
-cross-worktree, or cross-surface history returns `SESSION_PROTOCOL_MISMATCH`.
+agree exactly. Every ordinary call identity is unique. OpenCode 1.18.4 can persist one cleanup
+shadow beside a settled tool part with the same message and call IDs; only an exact second part with
+`tool: "unknown"`, empty input, no part metadata, error `Tool execution aborted`, and exact
+`interrupted: true` metadata is accepted as that host artifact. A second ordinary part, a second
+shadow, an altered shadow field, or a shadow beside a pending/running call remains incompatible.
+
+Native `write`, `hashline_edit`, unknown fields, malformed or v1 markers, and unproven completed
+results remain incompatible. Exact completed `DISPLAY_PREFIX_REJECTED` results are known
+non-mutating terminals. Historical `edit` and `apply_patch` error states issue no provenance and do
+not poison the session, even when their input is incomplete or their structurally valid metadata
+records uncertainty. Every later mutation still requires exact snapshot evidence. Bytes changed by
+an uncertain call therefore produce `TARGET_CHANGED` and require a fresh `hashline_read` of that path
+rather than a new session. Structurally malformed error states, unmarked completions, conflicting or
+unreadable history, cross-worktree history, and cross-surface history return
+`SESSION_PROTOCOL_MISMATCH`.
 
 The history transport admits at most 1,114,112 response bytes so the protocol validator can enforce
 the stricter 1 MiB persisted-history limit without accepting an unbounded envelope. The initial
