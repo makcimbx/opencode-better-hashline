@@ -22,8 +22,8 @@ Better Hashline is designed to prevent these failures during cooperative agent e
 - returning success when post-publication bytes or path state differ from the plan;
 - rolling back a partially published move in a way that could delete a newer writer's entry;
 - writing model-facing line annotations that were copied into an edit payload;
-- claiming native-alias concurrency before exact binding or across overlapping path sets;
-- continuing a bound alias session after `PARTIAL_PUBLICATION`.
+- admitting native-alias mutation before exact delivered-read binding, or concurrency for calls whose complete path sets overlap;
+- continuing native-alias mutation after `PARTIAL_PUBLICATION` without path inspection, repair, and a fresh delivered same-session read.
 
 ## Trusted Components
 
@@ -67,15 +67,15 @@ adversarial workloads.
 OpenCode's V1 plugin API does not expose final executable ownership. A later configured plugin,
 directory tool, or MCP tool can replace `edit` or `apply_patch`; a later after-hook can remove or
 rewrite a valid result marker. Matching schemas are not proof of matching executors, and historical
-`native-aliases/v2` markers are evidence only for the exact persisted completed or attested rejected
-call. Process-local session binding proves a stable protocol/history identity, including lifecycle
-operation and source/destination correlation, not ongoing registry ownership. Alias mode therefore
-trusts plugin ordering, requires Better Hashline to be the last external collider, and must be
-reverified after configuration changes. It cannot provide the default unique IDs' collision
-isolation or continuous-ownership claim. V1 history is incompatible and cannot bind a v2 session.
-The current schema expansion retains the `native-aliases/v2` marker string but changes canonical
-schema/fingerprint identity; older v2 sessions also fail closed and require restart into a new
-session.
+`native-aliases/v2` markers are offline evidence only for the exact persisted completed or attested
+rejected call. Live alias admission does not fetch persisted history. A delivered and attested
+`hashline_read` establishes or replaces a process-local epoch for the exact observed protocol and
+worktree identity, but does not prove ongoing registry ownership. Alias mode therefore trusts plugin
+ordering, requires Better Hashline to be the last external collider, and must be reverified after
+configuration changes. It cannot provide the default unique IDs' collision isolation or
+continuous-ownership claim. Persisted v1 or fingerprint-mismatched v2 history is incompatible with
+offline evidence validation. An identity change invalidates the live epoch; restart as required and a
+fresh delivered `hashline_read` can rebind in the same session, while old snapshot IDs remain unusable.
 
 ### Privileged filesystem attacks
 
@@ -98,13 +98,13 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | Text-batch validation | One immutable pre-batch file, declared read/write effects checked before mutation, stable conflict codes with deterministic zero-based pair evidence |
 | Permission binding | Exact planned patch and complete source/destination or parent-chain path set before approval |
 | New file safety | Existing-parent strict default; staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
-| Parent creation safety | Explicit opt-in, at most 64 fixed missing directories, all-path authorization/locks, exclusive root-to-leaf creation, and no rollback after a directory exists or creation becomes ambiguous |
+| Parent creation safety | Explicit opt-in, at most 64 fixed missing directories, all-path authorization/locks, exclusive root-to-leaf creation, and no rollback after a directory exists or creation becomes ambiguous; a partial outcome invalidates affected snapshots and unbinds the alias epoch |
 | Delete safety | Direct regular single-link source revalidated before exact unlink and absence verification |
 | Move safety | Existing stable parents, same filesystem, absent destination, no-clobber hard link, exact inode/byte/link-count verification, then source unlink |
-| Partial move safety | No destructive rollback; affected snapshots invalidated, explicit `PARTIAL_PUBLICATION`, and bound alias session poisoned |
+| Partial move safety | No destructive rollback; affected snapshots invalidated, explicit `PARTIAL_PUBLICATION`, and alias epoch unbound until inspection/repair plus a fresh delivered same-session read; old IDs stay unusable |
 | Memory bounds | Global, session, path, byte, and TTL limits |
-| Alias history | Bounded v2 completed/rejected-call validation with exact operation and source/destination metadata correlation |
-| Alias concurrency | Sequential before binding; after binding, deterministic locks serialize overlapping canonical path sets |
+| Offline alias history | Bounded v2 completed/rejected-call validation with exact operation and source/destination metadata correlation; never live admission |
+| Alias concurrency | Mutation rejected before delivered-read binding; after binding, only complete disjoint path sets may overlap and deterministic locks serialize every overlap |
 | Alias renderer metadata | Exact contract measured before publication and capped at 1 MiB |
 
 Transfer operations are source-referenced compound text edits. Copy requires complete source
@@ -134,7 +134,8 @@ missing directories before permission, authorizes and locks every directory plus
 uses exclusive root-to-leaf creation before existing staged no-clobber publication. Once the first
 directory exists, or a failed `mkdir` leaves its outcome ambiguous, a failure is reported as
 `PARTIAL_PUBLICATION` with no automatic rollback. The error omits requested and canonical host roots,
-and a bound native-alias session is poisoned.
+and the native-alias live epoch is unbound. After inspecting and repairing the paths, a fresh delivered
+`hashline_read` can rebind in the same session; old snapshot IDs remain unusable.
 
 ## Metadata
 
@@ -153,7 +154,7 @@ the drive designator of an absolute path may contain `:`.
 Snapshots retain complete file bytes in memory for up to the configured TTL and cache limits. Tool
 output is subject to OpenCode's own transcript/history handling. Native alias completion metadata
 contains source and destination paths as applicable, relative paths, exact unified diff, operation,
-canonical source digest, and move destination digest because stock renderers and v2 history
+canonical source digest, and move destination digest because stock renderers and offline v2 history
 validation require those fields. Delete diffs can contain the complete deleted fixture; path-only
 moves can be zero-hunk. A completed non-mutating `DISPLAY_PREFIX_REJECTED` result contains no file
 payload or diff, but records protocol identity, canonical input and worktree digests, payload
@@ -161,7 +162,8 @@ coordinate, and a bounded prefix kind.
 
 Ordinary exports retain this metadata; OpenCode's sanitized export removes the tool metadata but
 retains a safe root-relative session locator. Review even sanitized exports before disclosure.
-Removing a completion or rejection marker makes that history unusable for alias continuation.
+Removing a completion or rejection marker makes persisted history fail offline evidence validation;
+history never establishes or restores live alias authority.
 Benchmark model traces may contain fixture or model output and are ignored by Git by default under
 `benchmarks/results/model/`; review and redact them before publication.
 

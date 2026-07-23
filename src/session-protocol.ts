@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fail } from "./errors.js";
+import { ABSOLUTE_MAX_LOGICAL_LINES } from "./options.js";
 import { exactRelativePath } from "./path-identity.js";
 import {
   canonicalJson,
@@ -12,6 +13,7 @@ import {
   type NativeAliasOperation,
   type NativeAliasSurface,
 } from "./presentation.js";
+import type { SnapshotAuthority } from "./snapshots.js";
 
 export const SESSION_HISTORY_LIMIT = 200;
 export const SESSION_HISTORY_FETCH_LIMIT = SESSION_HISTORY_LIMIT + 1;
@@ -33,7 +35,7 @@ export class NativeAliasCurrentCallPendingError extends Error {
 
   constructor() {
     super(
-      "SESSION_PROTOCOL_MISMATCH: The current alias call input has not stabilized in session history.",
+      "SESSION_PROTOCOL_MISMATCH: The current alias call input has not stabilized in session history, so the persisted evidence cannot be attested.",
     );
   }
 }
@@ -50,6 +52,19 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 export type NativeAliasBindingStatus = "bound" | "unbound" | "mismatch";
+
+export type NativeAliasSessionCandidate = Readonly<{
+  sessionId: string;
+  fingerprint: string;
+  canonicalWorktree: string;
+  authority: SnapshotAuthority;
+  generation: number;
+}>;
+
+type NativeAliasSessionState = {
+  active: NativeAliasSessionCandidate | undefined;
+  candidate: NativeAliasSessionCandidate;
+};
 
 export type HashlineDisplayPrefixMatch = {
   operationIndex: number;
@@ -117,13 +132,13 @@ export function buildNativeAliasDisplayPrefixRejectionMetadata(
 }
 
 function rejectHistory(reason: string): never {
-  fail("SESSION_PROTOCOL_MISMATCH", `${reason} Start a new session before editing.`);
+  fail("SESSION_PROTOCOL_MISMATCH", `${reason} The persisted evidence cannot be attested.`);
 }
 
 function rejectOversizedHistory(): never {
   fail(
     "SESSION_PROTOCOL_MISMATCH",
-    "OpenCode persisted session history exceeds the bounded inspection window. Start a genuinely new session; do not resume the same task ID.",
+    "OpenCode persisted session history exceeds the bounded inspection window, so the persisted evidence cannot be attested.",
   );
 }
 
@@ -630,7 +645,8 @@ function assertAliasInput(
     (input.readback !== undefined && typeof input.readback !== "boolean") ||
     (input.readbackOffset !== undefined && !validLineNumber(input.readbackOffset)) ||
     (input.readbackLimit !== undefined &&
-      (!validLineNumber(input.readbackLimit) || (input.readbackLimit as number) > 1000)) ||
+      (!validLineNumber(input.readbackLimit) ||
+        (input.readbackLimit as number) > ABSOLUTE_MAX_LOGICAL_LINES)) ||
     ((input.readbackOffset !== undefined || input.readbackLimit !== undefined) &&
       input.readback !== true)
   ) {
@@ -1052,31 +1068,99 @@ export function assertNativeAliasHistory(
 }
 
 export class NativeAliasSessionRegistry {
-  readonly #bindings = new Map<string, string>();
+  readonly #sessions = new Map<string, NativeAliasSessionState>();
+  #generation = 0;
+
+  constructor(private readonly limit = SESSION_BINDING_LIMIT) {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new RangeError("Native alias session registry limit must be a positive integer.");
+    }
+  }
 
   status(sessionId: string, fingerprint: string): NativeAliasBindingStatus {
-    const existing = this.#bindings.get(sessionId);
-    if (existing === undefined) return "unbound";
-    return existing === fingerprint ? "bound" : "mismatch";
+    const active = this.#sessions.get(sessionId)?.active;
+    if (!active) return "unbound";
+    return active.fingerprint === fingerprint ? "bound" : "mismatch";
   }
 
-  isBound(sessionId: string, fingerprint: string): boolean {
-    const status = this.status(sessionId, fingerprint);
-    if (status === "mismatch") {
-      rejectHistory("This session is already bound to another Better Hashline protocol.");
+  prepare(
+    sessionId: string,
+    fingerprint: string,
+    canonicalWorktree: string,
+  ): NativeAliasSessionCandidate {
+    const current = this.#sessions.get(sessionId);
+    if (
+      current?.candidate.fingerprint === fingerprint &&
+      current.candidate.canonicalWorktree === canonicalWorktree
+    ) {
+      this.#remember(sessionId, current);
+      return current.candidate;
     }
-    return status === "bound";
+
+    this.#generation += 1;
+    const candidate = Object.freeze({
+      sessionId,
+      fingerprint,
+      canonicalWorktree,
+      authority: Symbol("native-alias-epoch"),
+      generation: this.#generation,
+    });
+    this.#remember(sessionId, { active: undefined, candidate });
+    return candidate;
   }
 
-  bind(sessionId: string, fingerprint: string): void {
-    if (this.isBound(sessionId, fingerprint)) return;
-    this.#bindings.set(sessionId, fingerprint);
-    if (this.#bindings.size <= SESSION_BINDING_LIMIT) return;
-    const oldest = this.#bindings.keys().next().value;
-    if (oldest !== undefined) this.#bindings.delete(oldest);
+  isCandidateCurrent(candidate: NativeAliasSessionCandidate): boolean {
+    return this.#sessions.get(candidate.sessionId)?.candidate === candidate;
+  }
+
+  commit(candidate: NativeAliasSessionCandidate): boolean {
+    const state = this.#sessions.get(candidate.sessionId);
+    if (state?.candidate !== candidate) return false;
+    state.active = candidate;
+    this.#remember(candidate.sessionId, state);
+    return true;
+  }
+
+  isActive(
+    sessionId: string,
+    fingerprint: string,
+    canonicalWorktree: string,
+    authority: SnapshotAuthority,
+  ): boolean {
+    const active = this.#sessions.get(sessionId)?.active;
+    return (
+      active?.fingerprint === fingerprint &&
+      active.canonicalWorktree === canonicalWorktree &&
+      active.authority === authority
+    );
+  }
+
+  activeAuthority(
+    sessionId: string,
+    fingerprint: string,
+    canonicalWorktree: string,
+  ): SnapshotAuthority | undefined {
+    const active = this.#sessions.get(sessionId)?.active;
+    return active?.fingerprint === fingerprint && active.canonicalWorktree === canonicalWorktree
+      ? active.authority
+      : undefined;
+  }
+
+  unbind(sessionId: string): void {
+    this.#sessions.delete(sessionId);
   }
 
   clear(): void {
-    this.#bindings.clear();
+    this.#sessions.clear();
+  }
+
+  #remember(sessionId: string, state: NativeAliasSessionState): void {
+    this.#sessions.delete(sessionId);
+    this.#sessions.set(sessionId, state);
+    while (this.#sessions.size > this.limit) {
+      const oldest = this.#sessions.keys().next().value;
+      if (oldest === undefined) return;
+      this.#sessions.delete(oldest);
+    }
   }
 }

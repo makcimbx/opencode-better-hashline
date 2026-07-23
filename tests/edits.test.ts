@@ -52,6 +52,53 @@ describe("line edit planning", () => {
     ).toBe("ONE\nTWO\n");
   });
 
+  test("treats replacement lines as complete content for the selected range", () => {
+    const base = "block {\n  old();\n}\nafter();\n";
+    expect(
+      plan(base, base, [{ op: "replace", startLine: 2, endLine: 2, lines: ["  new();", "}"] }])
+        .text,
+    ).toBe("block {\n  new();\n}\n}\nafter();\n");
+    expect(
+      plan(base, base, [{ op: "replace", startLine: 2, endLine: 3, lines: ["  new();"] }]).text,
+    ).toBe("block {\n  new();\nafter();\n");
+  });
+
+  test("uses original immutable coordinates for every operation in a batch", () => {
+    const base = "one\ntwo\nthree\nfour\n";
+    expect(
+      plan(base, base, [
+        { op: "replace", startLine: 1, endLine: 1, lines: ["ONE", "inserted"] },
+        { op: "replace", startLine: 3, endLine: 3, lines: ["THREE"] },
+      ]).text,
+    ).toBe("ONE\ninserted\ntwo\nTHREE\nfour\n");
+    expect(
+      plan(base, base, [
+        { op: "replace", startLine: 1, endLine: 1, lines: ["ONE", "inserted"] },
+        { op: "replace", startLine: 4, endLine: 4, lines: ["intended-for-three"] },
+      ]).text,
+    ).toBe("ONE\ninserted\ntwo\nthree\nintended-for-three\n");
+  });
+
+  test("accepts intentional adjacent delimiters at a replacement endpoint", () => {
+    const base = "block {\nold\nnext\n";
+    const operations: EditOperation[] = [
+      { op: "replace", startLine: 2, endLine: 2, lines: ["}"] },
+      { op: "insert", afterLine: 2, lines: ["}"] },
+    ];
+    expect(plan(base, base, operations).text).toBe("block {\n}\n}\nnext\n");
+    expect(plan(base, base, [...operations].reverse()).text).toBe("block {\n}\n}\nnext\n");
+  });
+
+  test("copies from the immutable pre-edit source", () => {
+    const base = "source\ntarget\nend\n";
+    expect(
+      plan(base, base, [
+        { op: "replace", startLine: 1, endLine: 1, lines: ["changed"] },
+        { op: "copy_range", startLine: 1, endLine: 1, afterLine: 2 },
+      ]).text,
+    ).toBe("changed\ntarget\nsource\nend\n");
+  });
+
   test("distinguishes deletion from a blank line", () => {
     expect(
       plan("one\ntwo\nthree\n", "one\ntwo\nthree\n", [
@@ -180,6 +227,33 @@ describe("line edit planning", () => {
     expect(() =>
       plan("a\n", "a\n", [{ op: "replace", startLine: 1, endLine: 1, lines: ["x\ny"] }]),
     ).toThrow("INVALID_ARGUMENT:");
+  });
+
+  test("explains immutable coordinates for out-of-range operations", () => {
+    const base = "a\nb\n";
+    const cases: Array<{ operation: EditOperation; message: string }> = [
+      {
+        operation: { op: "replace", startLine: 3, endLine: 3, lines: ["x"] },
+        message: "The replacement range is outside the snapshot.",
+      },
+      {
+        operation: { op: "insert", afterLine: 3, lines: ["x"] },
+        message: "The insertion boundary is outside the snapshot.",
+      },
+      {
+        operation: { op: "copy_range", startLine: 3, endLine: 3, afterLine: 0 },
+        message: "The transfer source range is outside the snapshot.",
+      },
+      {
+        operation: { op: "copy_range", startLine: 1, endLine: 1, afterLine: 3 },
+        message: "The transfer destination boundary is outside the snapshot.",
+      },
+    ];
+    for (const { operation, message } of cases) {
+      expect(failureMessage(() => plan(base, base, [operation]))).toBe(
+        `INVALID_ARGUMENT: ${message} Every operation uses original immutable pre-batch coordinates.`,
+      );
+    }
   });
 
   test("allows insertions at destructive range boundaries independent of array order", () => {

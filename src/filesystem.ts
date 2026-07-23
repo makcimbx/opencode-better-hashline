@@ -879,8 +879,9 @@ export async function publishNewFile(input: {
   resolved: ResolvedNewFile;
   bytes: Uint8Array;
   signal: AbortSignal;
+  consume?: () => void;
 }): Promise<void> {
-  const { resolved, bytes, signal } = input;
+  const { resolved, bytes, signal, consume } = input;
   throwIfAborted(signal);
   await assertNewParentStable(resolved, "PATH_MISMATCH");
 
@@ -913,6 +914,7 @@ export async function publishNewFile(input: {
     }
     await assertNewParentStable(resolved, "PATH_MISMATCH");
     throwIfAborted(signal);
+    consume?.();
     try {
       await link(temporaryPath, resolved.canonicalPath);
     } catch (error) {
@@ -1049,7 +1051,7 @@ function failBeforeParentCreation(error: unknown): never {
 function failPartialParentCreation(): never {
   fail(
     "PARTIAL_PUBLICATION",
-    "Parent creation started but could not complete safely. Inspect the requested tree and target before retrying in a new session; created directories are intentionally retained.",
+    "Parent creation started but could not complete safely. Inspect and repair the requested tree and target, restart the plugin or host if necessary, then rerun hashline_read and resume this same session; created directories are intentionally retained.",
   );
 }
 
@@ -1057,11 +1059,18 @@ export async function publishNewFileWithParents(input: {
   plan: NewFileParentPlan;
   bytes: Uint8Array;
   signal: AbortSignal;
+  consume?: () => void;
 }): Promise<void> {
   const { plan, signal } = input;
   const bytes = input.bytes.slice();
   const createdStats: Stats[] = [];
   let createdAnyDirectory = false;
+  let consumed = false;
+  const consume = (): void => {
+    if (consumed) return;
+    consumed = true;
+    input.consume?.();
+  };
 
   try {
     throwIfAborted(signal);
@@ -1072,6 +1081,7 @@ export async function publishNewFileWithParents(input: {
       await assertPlannedPathsAbsent([directory.requestedPath, directory.canonicalPath], false);
       throwIfAborted(signal);
       try {
+        consume();
         await mkdir(directory.canonicalPath, { recursive: false, mode: 0o777 });
       } catch (error) {
         try {
@@ -1101,7 +1111,7 @@ export async function publishNewFileWithParents(input: {
       parentStats,
       canonicalPath: plan.canonicalPath,
     };
-    await publishNewFile({ resolved, bytes, signal });
+    await publishNewFile({ resolved, bytes, signal, consume });
 
     if (createdStats.length > 0) {
       throwIfAborted(signal);
@@ -1220,7 +1230,10 @@ export async function publishMovedFile(input: {
       linkedDestination.nlink !== 2 ||
       !bytesEqual(expected.bytes, linkedSource.bytes)
     ) {
-      fail("PARTIAL_PUBLICATION", "The linked move state changed before source removal.");
+      fail(
+        "PARTIAL_PUBLICATION",
+        "The linked move state changed before source removal. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+      );
     }
     await assertMutableStable(source, "RACE_AFTER_WRITE");
 
@@ -1229,7 +1242,7 @@ export async function publishMovedFile(input: {
     } catch {
       fail(
         "PARTIAL_PUBLICATION",
-        "The destination was linked, but the source could not be removed. Inspect both paths before retrying in a new session.",
+        "The destination was linked, but the source could not be removed. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
       );
     }
     const directories = [...new Set([source.canonicalParent, destination.canonicalParent])];
@@ -1237,7 +1250,10 @@ export async function publishMovedFile(input: {
 
     try {
       await lstat(source.canonicalPath);
-      fail("PARTIAL_PUBLICATION", "The source still exists after move publication.");
+      fail(
+        "PARTIAL_PUBLICATION",
+        "The source still exists after move publication. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+      );
     } catch (error) {
       if (errorCode(error) !== "ENOENT") throw error;
     }
@@ -1247,7 +1263,10 @@ export async function publishMovedFile(input: {
       verified.stats.nlink !== 1 ||
       !bytesEqual(expected.bytes, verified.bytes)
     ) {
-      fail("PARTIAL_PUBLICATION", "The destination changed after move publication.");
+      fail(
+        "PARTIAL_PUBLICATION",
+        "The destination changed after move publication. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+      );
     }
     await Promise.all([
       assertNewParentStable(source, "RACE_AFTER_WRITE"),
@@ -1260,7 +1279,7 @@ export async function publishMovedFile(input: {
     }
     fail(
       "PARTIAL_PUBLICATION",
-      "Move publication started but could not be verified. Inspect both paths before retrying in a new session.",
+      "Move publication started but could not be verified. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
     );
   }
 }

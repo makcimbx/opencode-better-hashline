@@ -9,11 +9,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added bounded aggregate issued-coverage diagnostics that report all missing line ranges plus required internal-neighbor, BOF, and EOF evidence while recommending conservative 1,000-line recovery reads.
+
 ### Changed
+
+- Raised requested `hashline_read.limit` and text `readbackLimit` ceilings from 1,000 to 100,000 while retaining 1,000 defaults, one contiguous readback page, and authoritative byte pagination (`maxOutputBytes` defaults to 40 KiB and is capped at 45 KiB) with `@more` on byte-limited partial pages.
+- Clarified that `replace` removes the exact inclusive range, `lines` is the complete replacement while outside neighbors remain, and every operation uses immutable original-snapshot coordinates rather than sequential batch coordinates.
+- Made snapshot page rendering linear in emitted content. The expanded public schemas and descriptions intentionally change raw/projected schema identities and the native-alias fingerprint while retaining the `native-aliases/v2` marker.
 
 ### Fixed
 
-- Fixed native aliases rejecting OpenCode 1.18.4 interrupted `unknown` cleanup shadows as duplicate call identities, and made non-proven alias errors snapshot-gated history instead of permanent session poison.
+- Fixed offline evidence to accept OpenCode 1.18.4's exact interrupted `unknown` cleanup shadow, while native-alias live admission now uses delivered and attested process-local epochs without fetching persisted history.
+- Fenced candidate and snapshot authority so same-identity reads may reuse the current candidate, differing fingerprint/worktree preparation retires active authority, and stale, reordered, or ABA completions cannot bind or revive old IDs.
+- Fixed partial move and parent publication to invalidate affected snapshots and unbind the live epoch instead of permanently poisoning it; after path repair, a fresh delivered read recovers in the same OpenCode task without reviving old snapshot IDs.
+- Fixed lifecycle readback-window arguments to return lifecycle-specific errors even without `readback:true`, and aligned native-alias descriptions, complete path-set concurrency guidance, and current documentation with the live runtime.
 
 ## [0.6.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.5.0...v0.6.0) (2026-07-22)
 

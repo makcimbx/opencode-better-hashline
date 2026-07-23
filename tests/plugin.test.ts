@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,6 +126,15 @@ async function activateRead(value: Hooks, result: StructuredResult): Promise<voi
   );
 }
 
+async function rejectedMessage(result: Promise<unknown>): Promise<string> {
+  try {
+    await result;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new Error("Expected the promise to reject.");
+}
+
 describe("OpenCode plugin protocol", () => {
   test("keeps the production registry on unique tool IDs", async () => {
     const value = await hooks();
@@ -192,6 +202,35 @@ describe("OpenCode plugin protocol", () => {
         toolContext,
       ),
     ).rejects.toThrow("SNAPSHOT_UNKNOWN:");
+    await value.dispose?.();
+  });
+
+  test("reports preview-only lines as aggregate unissued coverage before mutation", async () => {
+    const file = join(root, "preview.txt");
+    const initial = "x".repeat(3000);
+    await writeFile(file, initial);
+    const value = await hooks({ maxOutputBytes: 1024 });
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "preview.txt" }, toolContext),
+    );
+    expect(readResult.output).toContain("1!|");
+    await activateRead(value, readResult);
+
+    const message = await rejectedMessage(
+      hashlineEdit.execute(
+        {
+          filePath: "preview.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["changed"] }],
+        },
+        toolContext,
+      ),
+    );
+    expect(message).toContain("RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 1.");
+    expect(message).toContain("preview-only N!| lines remain unissued");
+    expect(await readFile(file, "utf8")).toBe(initial);
     await value.dispose?.();
   });
 
@@ -402,7 +441,7 @@ describe("OpenCode plugin protocol", () => {
         toolContext,
       ),
     ).rejects.toThrow(
-      "RANGE_NOT_FULLY_ISSUED: replace_file needs a complete snapshot. Read the file from offset=1 through @eof with the same snapshotId, then retry.",
+      "RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 1-6; BOF boundary. Suggested reads: hashline_read(offset=1, limit=6).",
     );
     await value.dispose?.();
   });
@@ -550,6 +589,81 @@ describe("OpenCode plugin protocol", () => {
     ).rejects.toThrow("UNSUPPORTED_FILE:");
     expect(await readFile(file, "utf8")).toBe("one");
     expect(asks.map(({ permission }) => permission)).toEqual(["read"]);
+  });
+
+  test("accepts requested read limits above 1000 up to the absolute ceiling", async () => {
+    const file = join(root, "many-lines.txt");
+    await writeFile(file, `${Array.from({ length: 1500 }, () => "x").join("\n")}\n`);
+    const value = await hooks({ maxOutputBytes: 46_080 });
+    const { hashlineRead } = registry(value);
+    const toolContext = context();
+    const readShape = hashlineRead.args;
+    if (!readShape) throw new Error("hashline_read schema is unavailable");
+    const schema = z.toJSONSchema(z.object(readShape).strict()) as {
+      properties?: { limit?: { description?: string; maximum?: number } };
+    };
+
+    expect(schema.properties?.limit?.maximum).toBe(100_000);
+    expect(schema.properties?.limit?.description).toContain("maxOutputBytes");
+    expect(schema.properties?.limit?.description).toContain("@more");
+    const result = structured(
+      await hashlineRead.execute({ filePath: "many-lines.txt", limit: 2000 }, toolContext),
+    );
+    expect(result.metadata.displayedLines).toBe(1500);
+    expect(result.output.split("\n").filter((line) => /^\d+\|x$/u.test(line))).toHaveLength(1500);
+    expect(result.output).toContain("@eof");
+    await expect(
+      hashlineRead.execute({ filePath: "many-lines.txt", limit: 100_001 }, toolContext),
+    ).rejects.toThrow("INVALID_ARGUMENT: Invalid hashline_read arguments.");
+    await value.dispose?.();
+  });
+
+  test("keeps very large requested read limits byte bounded", async () => {
+    const file = join(root, "byte-bounded.txt");
+    await writeFile(file, `${Array.from({ length: 5000 }, () => "x").join("\n")}\n`);
+    const value = await hooks({ maxOutputBytes: 1024 });
+    const { hashlineRead } = registry(value);
+    const result = structured(
+      await hashlineRead.execute({ filePath: "byte-bounded.txt", limit: 100_000 }, context()),
+    );
+
+    expect(Buffer.byteLength(result.output, "utf8")).toBeLessThanOrEqual(1024);
+    expect(result.output).toContain("partial=true");
+    expect(result.output).toContain("@more offset=");
+    expect(result.metadata.displayedLines).toBeLessThan(5000);
+    await value.dispose?.();
+  });
+
+  test("accepts readback limits above 1000 while keeping the result byte bounded", async () => {
+    const file = join(root, "bounded-readback.txt");
+    await writeFile(file, `${Array.from({ length: 2000 }, () => "x").join("\n")}\n`);
+    const value = await hooks({ maxOutputBytes: 1024 });
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "bounded-readback.txt", limit: 1 }, toolContext),
+    );
+    await activateRead(value, readResult);
+
+    const editResult = structured(
+      await hashlineEdit.execute(
+        {
+          filePath: "bounded-readback.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          readback: true,
+          readbackOffset: 1,
+          readbackLimit: 2000,
+          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["changed"] }],
+        },
+        toolContext,
+      ),
+    );
+
+    expect(Buffer.byteLength(editResult.output, "utf8")).toBeLessThanOrEqual(1024);
+    expect(editResult.output).toContain("partial=true");
+    expect(editResult.output).toContain("@more offset=");
+    expect(await readFile(file, "utf8")).toStartWith("changed\n");
+    await value.dispose?.();
   });
 
   test("enforces issued pages and complete-file reads", async () => {
@@ -1017,6 +1131,22 @@ describe("OpenCode plugin protocol", () => {
         args: {
           ...common,
           readbackOffset: 1,
+          operations: [{ op: "move_file", destinationPath: "other.txt" }],
+        },
+        message: "move_file does not support readback.",
+      },
+      {
+        args: {
+          ...common,
+          readbackLimit: 1,
+          operations: [{ op: "delete_file" }],
+        },
+        message: "delete_file does not support readback.",
+      },
+      {
+        args: {
+          ...common,
+          readbackOffset: 1,
           operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
         },
         message: "readbackOffset and readbackLimit require readback:true.",
@@ -1221,7 +1351,7 @@ describe("OpenCode plugin protocol", () => {
   });
 
   test("publishes the intended flat transfer schema and coordinate guidance", () => {
-    type SchemaProperty = { description?: string; enum?: string[] };
+    type SchemaProperty = { description?: string; enum?: string[]; maximum?: number };
     const schema = z.toJSONSchema(hashlineEditArgumentsSchema) as {
       additionalProperties?: boolean;
       required?: string[];
@@ -1296,16 +1426,39 @@ describe("OpenCode plugin protocol", () => {
     expect(schema.properties?.readbackOffset?.description).toContain("first hunk");
     expect(schema.properties?.readbackLimit?.description).toContain("contiguous successor page");
     expect(schema.properties?.readbackLimit?.description).toContain("defaults to 1000");
-    expect(hashlineEditDescription).toContain("immutable pre-batch snapshot");
+    expect(schema.properties?.readbackLimit?.maximum).toBe(100_000);
+    expect(schema.properties?.readbackLimit?.description).toContain("maxOutputBytes");
+    expect(schema.properties?.readbackLimit?.description).toContain("@more");
+    const validEditArguments = {
+      filePath: "file.txt",
+      snapshotId: "s_0000000000000000000000",
+      readback: true,
+      operations: [{ op: "replace" as const, startLine: 1, endLine: 1, lines: ["new"] }],
+    };
+    expect(
+      hashlineEditArgumentsSchema.safeParse({ ...validEditArguments, readbackLimit: 100_000 })
+        .success,
+    ).toBe(true);
+    expect(
+      hashlineEditArgumentsSchema.safeParse({ ...validEditArguments, readbackLimit: 100_001 })
+        .success,
+    ).toBe(false);
+    expect(hashlineEditDescription).toContain(
+      "replace removes the one-based inclusive startLine..endLine range; lines is the complete replacement; neighboring lines outside the range remain, so do not repeat retained context such as a closing delimiter unless intentional.",
+    );
+    expect(hashlineEditDescription).toContain(
+      "Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.",
+    );
     expect(hashlineEditDescription).toContain("copy reads pre-edit source");
     expect(hashlineEditDescription).toContain("may touch a destructive endpoint");
     expect(hashlineEditDescription).toContain("readback:true returns one contiguous");
     expect(hashlineEditDescription).toContain(
       "readbackOffset selects its one-based post-edit start",
     );
+    expect(hashlineEditDescription).toContain("maxOutputBytes");
     expect(hashlineEditDescription).toContain("partial=true");
+    expect(hashlineEditDescription).toContain("@more");
     expect(hashlineEditDescription).toContain("cannot revive a consumed or unknown snapshot");
-    expect(hashlineEditDescription).toContain("afterLine is never adjusted");
     expect(hashlineEditDescription).toContain("finalNewline is replace_file-only");
     expect(hashlineEditDescription).toContain("replace lines:[] deletes");
   });
@@ -1505,7 +1658,9 @@ describe("OpenCode plugin protocol", () => {
         },
         toolContext,
       ),
-    ).rejects.toThrow("REF_NOT_ISSUED:");
+    ).rejects.toThrow(
+      "REF_NOT_ISSUED: Missing issued coverage: line gaps: 6; EOF boundary. Suggested reads: hashline_read(offset=6, limit=1).",
+    );
 
     const fourth = structured(
       await hashlineRead.execute({ filePath: "file.txt", offset: 4, limit: 1 }, toolContext),
@@ -1520,7 +1675,9 @@ describe("OpenCode plugin protocol", () => {
         },
         toolContext,
       ),
-    ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
+    ).rejects.toThrow(
+      "RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 5. Suggested reads: hashline_read(offset=5, limit=1).",
+    );
 
     const fifth = structured(
       await hashlineRead.execute({ filePath: "file.txt", offset: 5, limit: 1 }, toolContext),
@@ -1537,9 +1694,92 @@ describe("OpenCode plugin protocol", () => {
     expect(await readFile(file, "utf8")).toBe("one\ntwo\nthree\nfour\none\nfive\nsix\n");
   });
 
-  test("checks transfer-batch provenance in canonical order", async () => {
+  test("preserves exact edge codes for insert, copy, and move coverage", async () => {
+    await writeFile(join(root, "edge-bof.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n");
+    await writeFile(join(root, "edge-eof.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const diagnosticSuffix =
+      " Only fully rendered N| lines issue coverage; preview-only N!| lines remain unissued. Reuse the old snapshotId only if every suggested read returns that same ID; otherwise replan the full batch from the new snapshot.";
+
+    const bofSource = structured(
+      await hashlineRead.execute({ filePath: "edge-bof.txt", offset: 2, limit: 1 }, toolContext),
+    );
+    await activateRead(value, bofSource);
+    const bofSnapshotId = String(bofSource.metadata.snapshotId);
+    for (const operation of [
+      { op: "insert" as const, afterLine: 0, lines: ["inserted"] },
+      { op: "copy_range" as const, startLine: 2, endLine: 2, afterLine: 0 },
+    ]) {
+      const message = await rejectedMessage(
+        hashlineEdit.execute(
+          { filePath: "edge-bof.txt", snapshotId: bofSnapshotId, operations: [operation] },
+          toolContext,
+        ),
+      );
+      expect(message).toBe(
+        `REF_NOT_ISSUED: Missing issued coverage: line gaps: 1; BOF boundary. Suggested reads: hashline_read(offset=1, limit=1).${diagnosticSuffix}`,
+      );
+    }
+
+    const bofMoveSource = structured(
+      await hashlineRead.execute({ filePath: "edge-bof.txt", offset: 6, limit: 1 }, toolContext),
+    );
+    await activateRead(value, bofMoveSource);
+    const bofMoveMessage = await rejectedMessage(
+      hashlineEdit.execute(
+        {
+          filePath: "edge-bof.txt",
+          snapshotId: bofSnapshotId,
+          operations: [{ op: "move_range", startLine: 6, endLine: 6, afterLine: 0 }],
+        },
+        toolContext,
+      ),
+    );
+    expect(bofMoveMessage).toBe(
+      `RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 1, 3-5; BOF boundary. Suggested reads: hashline_read(offset=1, limit=1), hashline_read(offset=3, limit=3).${diagnosticSuffix}`,
+    );
+
+    const eofSource = structured(
+      await hashlineRead.execute({ filePath: "edge-eof.txt", offset: 1, limit: 1 }, toolContext),
+    );
+    await activateRead(value, eofSource);
+    const eofSnapshotId = String(eofSource.metadata.snapshotId);
+    for (const operation of [
+      { op: "insert" as const, afterLine: 6, lines: ["inserted"] },
+      { op: "copy_range" as const, startLine: 1, endLine: 1, afterLine: 6 },
+    ]) {
+      const message = await rejectedMessage(
+        hashlineEdit.execute(
+          { filePath: "edge-eof.txt", snapshotId: eofSnapshotId, operations: [operation] },
+          toolContext,
+        ),
+      );
+      expect(message).toBe(
+        `REF_NOT_ISSUED: Missing issued coverage: line gaps: 6; EOF boundary. Suggested reads: hashline_read(offset=6, limit=1).${diagnosticSuffix}`,
+      );
+    }
+
+    const eofMoveMessage = await rejectedMessage(
+      hashlineEdit.execute(
+        {
+          filePath: "edge-eof.txt",
+          snapshotId: eofSnapshotId,
+          operations: [{ op: "move_range", startLine: 1, endLine: 1, afterLine: 6 }],
+        },
+        toolContext,
+      ),
+    );
+    expect(eofMoveMessage).toBe(
+      `RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 2-6; EOF boundary. Suggested reads: hashline_read(offset=2, limit=5).${diagnosticSuffix}`,
+    );
+  });
+
+  test("reports all transfer-batch gaps in canonical order", async () => {
     const file = join(root, "file.txt");
-    await writeFile(file, "a\nb\nc\nd\n");
+    const initial = `${Array.from({ length: 12 }, (_, index) => `line-${index + 1}`).join("\n")}\n`;
+    await writeFile(file, initial);
     const value = await hooks();
     const { hashlineRead, hashlineEdit } = registry(value);
     const toolContext = context();
@@ -1548,18 +1788,30 @@ describe("OpenCode plugin protocol", () => {
     );
     await activateRead(value, readResult);
     const snapshotId = String(readResult.metadata.snapshotId);
-    const first = { op: "copy_range" as const, startLine: 1, endLine: 1, afterLine: 4 };
-    const second = { op: "copy_range" as const, startLine: 3, endLine: 3, afterLine: 1 };
+    const first = { op: "copy_range" as const, startLine: 3, endLine: 3, afterLine: 1 };
+    const second = { op: "copy_range" as const, startLine: 10, endLine: 10, afterLine: 6 };
+    const third = { op: "replace" as const, startLine: 12, endLine: 12, lines: ["LAST"] };
+    const messages: string[] = [];
 
     for (const operations of [
-      [first, second],
-      [second, first],
+      [first, second, third],
+      [third, second, first],
     ]) {
-      await expect(
-        hashlineEdit.execute({ filePath: "file.txt", snapshotId, operations }, toolContext),
-      ).rejects.toThrow("RANGE_NOT_FULLY_ISSUED:");
+      messages.push(
+        await rejectedMessage(
+          hashlineEdit.execute({ filePath: "file.txt", snapshotId, operations }, toolContext),
+        ),
+      );
     }
-    expect(await readFile(file, "utf8")).toBe("a\nb\nc\nd\n");
+    expect(messages[1]).toBe(messages[0]);
+    expect(messages[0]).toContain(
+      "RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 2-3, 6-7, 10, 12. Suggested reads: hashline_read(offset=2, limit=2), hashline_read(offset=6, limit=2), hashline_read(offset=10, limit=1), hashline_read(offset=12, limit=1).",
+    );
+    expect(messages[0]).toContain(
+      "Reuse the old snapshotId only if every suggested read returns that same ID; otherwise replan the full batch from the new snapshot.",
+    );
+    expect(await readFile(file, "utf8")).toBe(initial);
+    await value.dispose?.();
   });
 
   test("requires the complete move corridor and reports identity moves as no-ops", async () => {
@@ -1584,7 +1836,7 @@ describe("OpenCode plugin protocol", () => {
       operations: [{ op: "move_range" as const, startLine: 5, endLine: 5, afterLine: 2 }],
     };
     await expect(hashlineEdit.execute(move, toolContext)).rejects.toThrow(
-      "RANGE_NOT_FULLY_ISSUED:",
+      "RANGE_NOT_FULLY_ISSUED: Missing issued coverage: line gaps: 4. Suggested reads: hashline_read(offset=4, limit=1).",
     );
 
     const corridor = structured(
@@ -2058,6 +2310,12 @@ describe("OpenCode hooks", () => {
     const system = { system: [] as string[] };
     await value["experimental.chat.system.transform"]?.({} as never, system);
     expect(system.system.join("\n")).toContain("Native edit, write, and apply_patch are disabled");
+    expect(system.system.join("\n")).toContain(
+      "neighboring lines outside the range remain, so do not repeat retained context such as a closing delimiter unless intentional.",
+    );
+    expect(system.system.join("\n")).toContain(
+      "Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.",
+    );
 
     const definition = { description: "Read a file", parameters: {} };
     await value["tool.definition"]?.({ toolID: "read" }, definition as never);

@@ -24,9 +24,9 @@ import {
   buildNativeAliasDisplayPrefixRejectionMetadata,
   displayPrefixRejectionMessage,
   findHashlineDisplayPrefix,
+  NativeAliasCurrentCallPendingError,
   type NativeAliasProtocolIdentity,
   NativeAliasSessionRegistry,
-  SESSION_BINDING_LIMIT,
   SESSION_HISTORY_LIMIT,
   SESSION_HISTORY_MAX_BYTES,
   SESSION_HISTORY_MAX_PARTS,
@@ -734,6 +734,40 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
+  test("classifies a current-call input mismatch for bounded forensic retry", () => {
+    let caught: unknown;
+    try {
+      assertNativeAliasHistory(
+        [
+          {
+            parts: [
+              {
+                type: "tool",
+                tool: "edit",
+                callID: "current",
+                state: { status: "running", input: { filePath: "different.txt" } },
+              },
+            ],
+          },
+        ],
+        identity,
+        {
+          currentCall: {
+            id: "current",
+            tool: "edit",
+            input: { filePath: "expected.txt" },
+          },
+        },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(NativeAliasCurrentCallPendingError);
+    expect((caught as Error).message).toBe(
+      "SESSION_PROTOCOL_MISMATCH: The current alias call input has not stabilized in session history, so the persisted evidence cannot be attested.",
+    );
+  });
+
   test("scopes provider call IDs to their assistant messages", () => {
     const sessionID = "session";
     const input = {
@@ -902,7 +936,7 @@ describe("native alias session protocol", () => {
       status: "error",
       input: {},
       error:
-        "SESSION_PROTOCOL_MISMATCH: OpenCode session history contains a duplicate call identity. Start a new session before editing.",
+        "SESSION_PROTOCOL_MISMATCH: OpenCode session history contains a duplicate call identity, so the persisted evidence cannot be attested.",
     };
 
     expect(() => assertNativeAliasHistory(history(rejected), identity)).not.toThrow();
@@ -1368,7 +1402,7 @@ describe("native alias session protocol", () => {
         Array.from({ length: SESSION_HISTORY_LIMIT + 1 }, () => ({ parts: [] })),
         identity,
       ),
-    ).toThrow("Start a genuinely new session; do not resume the same task ID.");
+    ).toThrow("the persisted evidence cannot be attested");
     expect(() =>
       assertNativeAliasHistory(
         Array.from({ length: SESSION_HISTORY_LIMIT }, () => ({ parts: [] })),
@@ -1386,24 +1420,61 @@ describe("native alias session protocol", () => {
     ).toThrow("SESSION_PROTOCOL_MISMATCH:");
   });
 
-  test("reports binding states, evicts entries, and clears on disposal", () => {
-    const registry = new NativeAliasSessionRegistry();
+  test("fences candidates and active authorities across replacement, eviction, and unbind", () => {
+    const registry = new NativeAliasSessionRegistry(3);
     expect(registry.status("session", "fingerprint-a")).toBe("unbound");
-    expect(registry.isBound("session", "fingerprint-a")).toBeFalse();
-    registry.bind("session", "fingerprint-a");
-    expect(registry.status("session", "fingerprint-a")).toBe("bound");
-    expect(registry.status("session", "fingerprint-b")).toBe("mismatch");
-    expect(registry.isBound("session", "fingerprint-a")).toBeTrue();
-    expect(() => registry.isBound("session", "fingerprint-b")).toThrow(
-      "SESSION_PROTOCOL_MISMATCH:",
+
+    const firstA = registry.prepare("session", "fingerprint-a", "/worktree-a");
+    expect(registry.isCandidateCurrent(firstA)).toBeTrue();
+    expect(registry.status("session", "fingerprint-a")).toBe("unbound");
+    expect(registry.commit(firstA)).toBeTrue();
+    expect(
+      registry.isActive("session", "fingerprint-a", "/worktree-a", firstA.authority),
+    ).toBeTrue();
+    expect(registry.activeAuthority("session", "fingerprint-a", "/worktree-a")).toBe(
+      firstA.authority,
     );
 
-    for (let index = 0; index < SESSION_BINDING_LIMIT + 1; index += 1) {
-      registry.bind(`session-${index}`, "fingerprint-a");
-    }
+    const sharedA = registry.prepare("session", "fingerprint-a", "/worktree-a");
+    expect(sharedA).toBe(firstA);
+    expect(
+      registry.isActive("session", "fingerprint-a", "/worktree-a", firstA.authority),
+    ).toBeTrue();
+
+    const candidateB = registry.prepare("session", "fingerprint-b", "/worktree-b");
+    expect(candidateB).not.toBe(firstA);
     expect(registry.status("session", "fingerprint-a")).toBe("unbound");
-    expect(registry.status(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBe("bound");
+    expect(registry.commit(firstA)).toBeFalse();
+    expect(registry.commit(candidateB)).toBeTrue();
+    expect(
+      registry.isActive("session", "fingerprint-b", "/worktree-b", candidateB.authority),
+    ).toBeTrue();
+
+    const secondA = registry.prepare("session", "fingerprint-a", "/worktree-a");
+    expect(secondA).not.toBe(firstA);
+    expect(secondA.authority).not.toBe(firstA.authority);
+    expect(registry.commit(firstA)).toBeFalse();
+    expect(registry.commit(secondA)).toBeTrue();
+    expect(
+      registry.isActive("session", "fingerprint-a", "/worktree-a", firstA.authority),
+    ).toBeFalse();
+    registry.unbind("session");
+    expect(registry.status("session", "fingerprint-a")).toBe("unbound");
+    expect(registry.commit(secondA)).toBeFalse();
+
+    for (const sessionId of ["one", "two", "three"]) {
+      const candidate = registry.prepare(sessionId, "fingerprint", "/worktree");
+      expect(registry.commit(candidate)).toBeTrue();
+    }
+    registry.prepare("one", "fingerprint", "/worktree");
+    const overflow = registry.prepare("overflow", "fingerprint", "/worktree");
+    expect(registry.commit(overflow)).toBeTrue();
+    expect(registry.status("two", "fingerprint")).toBe("unbound");
+    expect(registry.status("one", "fingerprint")).toBe("bound");
+    expect(registry.status("overflow", "fingerprint")).toBe("bound");
+
     registry.clear();
-    expect(registry.status(`session-${SESSION_BINDING_LIMIT}`, "fingerprint-a")).toBe("unbound");
+    expect(registry.status("one", "fingerprint")).toBe("unbound");
+    expect(registry.commit(overflow)).toBeFalse();
   });
 });

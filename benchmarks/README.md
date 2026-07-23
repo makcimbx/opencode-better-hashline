@@ -42,8 +42,9 @@ bun run bench:model --native-alias-pilot
 identity for the v2 operation and source/destination metadata contract. Neither identity has a paid
 model result.
 The marker name remains `native-aliases/v2` after the current schema additions, but canonical schema
-SHA/fingerprint identity changes. Old v2 sessions fail closed and require a restart plus a new
-session; they are not compatible pilot continuations.
+SHA/fingerprint identity changes. For live plugin use, restart the plugin or host as applicable and
+obtain a fresh delivered `hashline_read` in the same OpenCode session/task; old snapshot IDs cannot
+revive. The changed identity is not a compatible pilot continuation.
 
 A model-free adapter/package check is available separately:
 

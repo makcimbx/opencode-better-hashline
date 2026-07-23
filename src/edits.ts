@@ -622,14 +622,20 @@ export function validateEditOperations(
         operation.endLine < operation.startLine ||
         operation.endLine > base.lines.length
       ) {
-        fail("INVALID_ARGUMENT", "The replacement range is outside the snapshot.");
+        fail(
+          "INVALID_ARGUMENT",
+          "The replacement range is outside the snapshot. Every operation uses original immutable pre-batch coordinates.",
+        );
       }
       continue;
     }
     if (operation.op === "insert") {
       assertLineNumber(operation.afterLine, "afterLine");
       if (operation.afterLine < 0 || operation.afterLine > base.lines.length) {
-        fail("INVALID_ARGUMENT", "The insertion boundary is outside the snapshot.");
+        fail(
+          "INVALID_ARGUMENT",
+          "The insertion boundary is outside the snapshot. Every operation uses original immutable pre-batch coordinates.",
+        );
       }
       continue;
     }
@@ -643,10 +649,16 @@ export function validateEditOperations(
       operation.endLine < operation.startLine ||
       operation.endLine > base.lines.length
     ) {
-      fail("INVALID_ARGUMENT", "The transfer source range is outside the snapshot.");
+      fail(
+        "INVALID_ARGUMENT",
+        "The transfer source range is outside the snapshot. Every operation uses original immutable pre-batch coordinates.",
+      );
     }
     if (operation.afterLine < 0 || operation.afterLine > base.lines.length) {
-      fail("INVALID_ARGUMENT", "The transfer destination boundary is outside the snapshot.");
+      fail(
+        "INVALID_ARGUMENT",
+        "The transfer destination boundary is outside the snapshot. Every operation uses original immutable pre-batch coordinates.",
+      );
     }
   }
 

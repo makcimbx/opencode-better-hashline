@@ -29,15 +29,8 @@ import {
   withPathLock,
   withPathLocks,
 } from "./filesystem.js";
-import {
-  detectOpenCodeVersion,
-  OpenCodeSessionHistoryError,
-  openCodeProviderSchema,
-  readOpenCodeSessionHistory,
-  SESSION_HISTORY_TIMEOUT_MS,
-  SESSION_HISTORY_TRANSPORT_MAX_BYTES,
-} from "./native-alias.js";
-import { type ResolvedOptions, resolveOptions } from "./options.js";
+import { detectOpenCodeVersion, openCodeProviderSchema } from "./native-alias.js";
+import { ABSOLUTE_MAX_LOGICAL_LINES, type ResolvedOptions, resolveOptions } from "./options.js";
 import { exactRelativePath, sameFilesystemRoot } from "./path-identity.js";
 import {
   buildNativeAliasMetadata,
@@ -49,20 +42,20 @@ import {
 } from "./presentation.js";
 import { renderSnapshotPage } from "./render.js";
 import {
-  assertNativeAliasHistory,
   buildNativeAliasDisplayPrefixRejectionMetadata,
   displayPrefixRejectionMessage,
   findHashlineDisplayPrefix,
   type HashlineDisplayPrefixMatch,
   type NativeAliasBindingStatus,
-  NativeAliasCurrentCallPendingError,
   type NativeAliasProtocolIdentity,
+  type NativeAliasSessionCandidate,
   NativeAliasSessionRegistry,
-  SESSION_HISTORY_FETCH_LIMIT,
 } from "./session-protocol.js";
 import {
   type IssuedPage,
+  type IssuedRange,
   type Snapshot,
+  type SnapshotAuthority,
   type SnapshotScope,
   SnapshotStore,
   sha256,
@@ -71,6 +64,8 @@ import { assertLineLimit, bytesEqual, decodeTextDocument, encodeNewText } from "
 import { PACKAGE_VERSION } from "./version.js";
 
 const NATIVE_MUTATORS = new Set(["edit", "write", "apply_patch"]);
+const EDIT_SEMANTICS_GUIDANCE =
+  "replace removes the one-based inclusive startLine..endLine range; lines is the complete replacement; neighboring lines outside the range remain, so do not repeat retained context such as a closing delimiter unless intentional. Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.";
 
 const readArgumentShape = {
   filePath: tool.schema.string().min(1).describe("Path relative to the session directory"),
@@ -79,9 +74,11 @@ const readArgumentShape = {
     .number()
     .int()
     .min(1)
-    .max(1000)
+    .max(ABSOLUTE_MAX_LOGICAL_LINES)
     .optional()
-    .describe("Maximum rendered lines; defaults to 1000"),
+    .describe(
+      "Maximum rendered lines; defaults to 1000. Output remains bounded by maxOutputBytes; partial pages end with @more.",
+    ),
 };
 const readArguments = tool.schema.object(readArgumentShape).strict();
 
@@ -123,7 +120,7 @@ function createEditSchema() {
         ),
       lines: tool.schema
         .array(tool.schema.string().max(16 * 1024 * 1024))
-        .max(100_000)
+        .max(ABSOLUTE_MAX_LOGICAL_LINES)
         .optional()
         .describe(
           "Only for replace, insert, and replace_file. replace accepts 0..20,000; insert 1..20,000. Each item is one logical line without CR, LF, NUL, or invalid Unicode.",
@@ -179,10 +176,10 @@ function createEditSchema() {
       .number()
       .int()
       .min(1)
-      .max(1000)
+      .max(ABSOLUTE_MAX_LOGICAL_LINES)
       .optional()
       .describe(
-        "Only with readback:true for text edits. Maximum rendered lines in the one contiguous successor page; defaults to 1000.",
+        "Only with readback:true for text edits. Maximum rendered lines in the one contiguous successor page; defaults to 1000. Output remains bounded by maxOutputBytes; partial pages end with @more.",
       ),
     operations: tool.schema.array(editOperation).min(1).max(100),
   };
@@ -196,10 +193,9 @@ const editSchema = createEditSchema();
 const editArgumentShape = editSchema.argumentShape;
 export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 
-export const hashlineEditDescription =
-  'Atomically mutate one exact hashline_read snapshot. Batch text changes to this file, or use one sole file lifecycle operation. Pass top-level snapshotId and operations JSON; do not encode arguments as text. Operations use one immutable pre-batch snapshot: copy reads pre-edit source, and afterLine is never adjusted. replace_file, delete_file, and move_file require rebase:none and complete issued coverage. delete_file removes the source; move_file requires destinationPath, an existing parent, and an absent same-filesystem destination. File lifecycle operations reject readback and never overwrite. Destructive writes may be adjacent but not overlap, except one move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor still requires exact issued freshness. Insert/copy destinations may touch a destructive endpoint, but may not lie inside a destructive span or share a destination. replace lines:[] deletes; insert forbids []; an empty file uses replace_file with lines:[],finalNewline:false. finalNewline is replace_file-only. lines:[""] is one empty logical line and may change only EOL bytes. Text readback:true returns one contiguous attested successor page for verification/follow-up; readbackOffset selects its one-based post-edit start, readbackLimit defaults to 1000, and partial pages say partial=true. unique exactly relocates a still-retained snapshot after external changes; it cannot revive a consumed or unknown snapshot.';
+export const hashlineEditDescription = `Atomically mutate one exact hashline_read snapshot. Batch text changes to this file, or use one sole file lifecycle operation. Pass top-level snapshotId and operations JSON; do not encode arguments as text. ${EDIT_SEMANTICS_GUIDANCE} copy reads pre-edit source. replace_file, delete_file, and move_file require rebase:none and complete issued coverage. delete_file removes the source; move_file requires destinationPath, an existing parent, and an absent same-filesystem destination. File lifecycle operations reject readback and never overwrite. Destructive writes may be adjacent but not overlap, except one move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor still requires exact issued freshness. Insert/copy destinations may touch a destructive endpoint, but may not lie inside a destructive span or share a destination. replace lines:[] deletes; insert forbids []; an empty file uses replace_file with lines:[],finalNewline:false. finalNewline is replace_file-only. lines:[""] is one empty logical line and may change only EOL bytes. Text readback:true returns one contiguous attested successor page for verification/follow-up; readbackOffset selects its one-based post-edit start, readbackLimit defaults to 1000; output remains bounded by maxOutputBytes, and partial pages say partial=true and end with @more. unique exactly relocates a still-retained snapshot after external changes; it cannot revive a consumed or unknown snapshot.`;
 
-export const nativeAliasEditDescription = `${hashlineEditDescription} Native aliases: serialize while system guidance says native-alias-session=unbound; when bound, operations touching different source and destination paths may run concurrently, but overlapping paths remain serialized.`;
+export const nativeAliasEditDescription = `${hashlineEditDescription} Native aliases: edit and apply_patch require a delivered, attested hashline_read and native-alias-session=bound. When bound, calls with disjoint complete source/destination path sets may run concurrently; overlapping path sets serialize.`;
 
 type SnapshotEditToolName = "hashline_edit" | "edit" | "apply_patch";
 
@@ -239,14 +235,33 @@ const writeArgumentShape = {
 const writeArguments = tool.schema.object(writeArgumentShape).strict();
 export const hashlineWriteArgumentsSchema = writeArguments;
 
-type PendingSnapshot = {
-  kind: "read" | "edit";
+interface PendingSnapshotBase {
   snapshotId: string;
   scope: SnapshotScope;
+  directory: string;
   page: IssuedPage;
   outputDigest: string;
   createdAt: number;
   fallbackOutput?: string;
+}
+
+type PendingSnapshot =
+  | (PendingSnapshotBase & {
+      kind: "read";
+      candidate: NativeAliasSessionCandidate | undefined;
+    })
+  | (PendingSnapshotBase & {
+      kind: "edit";
+      authority: SnapshotAuthority | undefined;
+      canonicalWorktree: string | undefined;
+      fingerprint: string | undefined;
+    });
+
+type NativeAliasAdmission = {
+  authority: SnapshotAuthority;
+  canonicalWorktree: string;
+  fingerprint: string;
+  identity: NativeAliasProtocolIdentity;
 };
 
 type RawEditOperation = {
@@ -509,64 +524,63 @@ function assertIssued(
   operations: readonly EditOperation[],
   rebase: RebaseMode,
 ): void {
-  const hasTransfer = operations.some(
-    (operation) => operation.op === "copy_range" || operation.op === "move_range",
-  );
-  if (hasTransfer) {
-    const ranges = new Map<string, { startLine: number; endLine: number }>();
-    const boundaries = new Set<number>();
-    const addRange = (startLine: number, endLine: number): void => {
-      ranges.set(`${startLine}:${endLine}`, { startLine, endLine });
-    };
-    for (const operation of operations) {
-      if (operation.op === "replace") {
-        addRange(operation.startLine, operation.endLine);
-      } else if (operation.op === "insert") {
-        boundaries.add(operation.afterLine);
-      } else if (operation.op === "copy_range") {
-        addRange(operation.startLine, operation.endLine);
-        boundaries.add(operation.afterLine);
-      } else if (operation.op === "move_range") {
-        addRange(operation.startLine, operation.endLine);
-        const corridor = moveCorridor(operation);
-        addRange(corridor.startLine, corridor.endLine);
-        boundaries.add(operation.afterLine);
-      }
-    }
-    const orderedRanges = [...ranges.values()].sort(
-      (left, right) => left.startLine - right.startLine || left.endLine - right.endLine,
-    );
-    for (const range of orderedRanges) {
-      store.assertRangeIssued(snapshot, range.startLine, range.endLine);
-    }
-    for (const boundary of [...boundaries].sort((left, right) => left - right)) {
-      store.assertBoundaryIssued(snapshot, boundary);
-    }
-    return;
-  }
+  const lineCount = snapshot.document.lines.length;
+  const ranges: IssuedRange[] = [];
+  const boundaryRanges: IssuedRange[] = [];
+  let bof = false;
+  let eof = false;
+  const addRange = (start: number, end: number): void => {
+    ranges.push({ start, end });
+  };
+  const addBoundary = (position: number): void => {
+    if (position === 0) bof = true;
+    if (position === lineCount) eof = true;
+    if (position > 0) boundaryRanges.push({ start: position, end: position });
+    if (position < lineCount) boundaryRanges.push({ start: position + 1, end: position + 1 });
+  };
 
-  const legacyOperations = operations as readonly Extract<
-    EditOperation,
-    { op: "replace" | "insert" | "replace_file" }
-  >[];
-  for (const operation of legacyOperations) {
+  for (const operation of operations) {
     if (operation.op === "replace") {
-      store.assertRangeIssued(snapshot, operation.startLine, operation.endLine);
+      addRange(operation.startLine, operation.endLine);
     } else if (operation.op === "insert") {
-      store.assertBoundaryIssued(snapshot, operation.afterLine);
-    } else {
+      addBoundary(operation.afterLine);
+    } else if (operation.op === "replace_file") {
       if (rebase !== "none") {
         fail("INVALID_ARGUMENT", "replace_file does not support unique rebase.");
       }
-      store.assertComplete(snapshot);
+      bof = true;
+      eof = true;
+      if (lineCount > 0) addRange(1, lineCount);
+    } else if (operation.op === "copy_range") {
+      addRange(operation.startLine, operation.endLine);
+      addBoundary(operation.afterLine);
+    } else {
+      addRange(operation.startLine, operation.endLine);
+      const corridor = moveCorridor(operation);
+      addRange(corridor.startLine, corridor.endLine);
+      addBoundary(operation.afterLine);
     }
   }
+
+  store.assertIssuedCoverage(snapshot, { ranges, boundaryRanges, bof, eof });
 }
 
 function withoutPendingMetadata(metadata: unknown): Record<string, unknown> {
   if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return {};
   const { hashlinePending: _pending, ...rest } = metadata as Record<string, unknown>;
   return rest;
+}
+
+function withoutPendingSnapshotMetadata(metadata: unknown): Record<string, unknown> {
+  const sanitized = withoutPendingMetadata(metadata);
+  delete sanitized.snapshotId;
+  return sanitized;
+}
+
+function protocolKindMismatch(output: { output: string; metadata: Record<string, unknown> }): void {
+  output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+  output.output =
+    "SESSION_PROTOCOL_MISMATCH: The delivered tool kind did not match the pending Better Hashline operation. No snapshot was issued. An underlying mutation may need inspection; run a fresh hashline_read before retrying.";
 }
 
 type EditSuccessorState = "none" | "attached" | "unavailable";
@@ -581,58 +595,18 @@ function editResultOutput(success: string, state: EditSuccessorState): string {
   return `${success}\n${editLifecycleReceipt(state)}`;
 }
 
-function unavailableEditReadback(output: string): string {
-  const firstLine = output.split("\n", 1)[0] ?? "";
-  const success = /^Applied \d+ operations?\.$/u.test(firstLine)
-    ? firstLine
-    : "The edit was applied.";
-  return editResultOutput(success, "unavailable");
-}
+const BETTER_HASHLINE_APPLIED_RECEIPT =
+  /^Applied (?:1 operation|(?:[2-9]|[1-9]\d+) operations)\.$/u;
 
-function historyRetrySummary(error: OpenCodeSessionHistoryError): string {
-  if (!error.exhaustion) return "";
-  const attempts = `${error.attempts} attempt${error.attempts === 1 ? "" : "s"}`;
-  const timeout = error.timeoutMs ?? SESSION_HISTORY_TIMEOUT_MS;
-  return ` after ${attempts} within the ${timeout} ms total deadline`;
-}
-
-function sessionHistoryFailureMessage(error: OpenCodeSessionHistoryError): string {
-  const retrySummary = historyRetrySummary(error);
-  switch (error.category) {
-    case "transport-unavailable":
-      return "OpenCode session history transport is unavailable. Restore the active OpenCode client connection, then retry this edit.";
-    case "transport-unexpected":
-      return "OpenCode session history transport has an unexpected shape. Verify OpenCode and plugin compatibility, then retry after restoring a compatible host.";
-    case "timeout":
-      return `OpenCode session history fetch timed out${retrySummary}. Retry this edit when the local OpenCode service is responsive.`;
-    case "network":
-      return `OpenCode session history fetch encountered a network failure${retrySummary}. Retry this edit when the local OpenCode service is reachable.`;
-    case "http-status": {
-      const status = error.status ?? "unknown";
-      const statusClass = error.statusClass ?? "other";
-      const retryability = error.retryable ? "retryable " : "non-retryable ";
-      const advice = error.retryable
-        ? "Retry this edit when the active OpenCode host is available."
-        : "Verify the active OpenCode session and host compatibility before retrying this edit.";
-      return `OpenCode session history returned ${retryability}HTTP ${status} (${statusClass} status class)${retrySummary}. ${advice}`;
-    }
-    case "response-too-large":
-      return `OpenCode persisted session history exceeds the bounded inspection window of ${SESSION_HISTORY_TRANSPORT_MAX_BYTES} transport bytes. Start a genuinely new session; do not resume the same task ID.`;
-    case "invalid-json":
-      return "OpenCode session history returned invalid JSON and was not retried. Verify OpenCode and plugin compatibility before retrying this edit.";
-    case "invalid-shape":
-      return "OpenCode session history returned an invalid top-level shape and was not retried. Verify OpenCode and plugin compatibility before retrying this edit.";
-  }
-}
-
-function failSessionHistoryRead(error: unknown): never {
-  if (error instanceof OpenCodeSessionHistoryError) {
-    fail("SESSION_PROTOCOL_MISMATCH", sessionHistoryFailureMessage(error));
-  }
-  fail(
-    "SESSION_PROTOCOL_MISMATCH",
-    "OpenCode session history transport failed with an unexpected internal category. Verify OpenCode and plugin compatibility before retrying this edit.",
-  );
+function unavailableEditReadback(
+  result: { output: string; metadata: Record<string, unknown> },
+  fallbackOutput?: string,
+): void {
+  result.metadata = withoutPendingSnapshotMetadata(result.metadata);
+  const firstLine = result.output.split("\n", 1)[0] ?? "";
+  result.output = BETTER_HASHLINE_APPLIED_RECEIPT.test(firstLine)
+    ? (fallbackOutput ?? editResultOutput(firstLine, "unavailable"))
+    : "SESSION_PROTOCOL_MISMATCH: Better Hashline could not attest this edit result. No successor snapshot was issued. Whether a mutation occurred is unknown; inspect the target and run a fresh hashline_read before retrying.";
 }
 
 export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
@@ -670,7 +644,6 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const snapshots = new SnapshotStore(options);
   const pendingSnapshots = new Map<string, PendingSnapshot>();
   const sessions = new NativeAliasSessionRegistry();
-  const poisonedAliasSessions = new Set<string>();
 
   function assertConfigured(): void {
     if (initializationError) {
@@ -691,6 +664,13 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     return { identity: aliasIdentity, fingerprint: aliasFingerprint };
   }
 
+  function requireFreshAliasRead(reason: string): never {
+    fail(
+      "SNAPSHOT_REQUIRED",
+      `${reason} Rerun hashline_read in this same session and use only the snapshot ID returned by that read; old snapshot IDs cannot be revived.`,
+    );
+  }
+
   async function resolveAliasSessionBinding(
     directory: string,
     worktree: string,
@@ -706,15 +686,16 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       if (!samePathRoot(candidate, resolve(directory))) {
         fail(
           "SESSION_PROTOCOL_MISMATCH",
-          "OpenCode worktree and directory use different filesystem roots. Start a new session before editing.",
+          "OpenCode worktree and directory use different filesystem roots. Repair the active worktree/directory configuration, restart the plugin or host if necessary, then rerun hashline_read in this same session.",
         );
       }
       canonicalWorktree =
         parse(candidate).root === candidate ? candidate : await realpath(candidate);
-    } catch {
+    } catch (error) {
+      if (error instanceof HashlineError) throw error;
       fail(
         "SESSION_PROTOCOL_MISMATCH",
-        "OpenCode worktree identity could not be inspected. Start a new session before editing.",
+        "OpenCode worktree identity could not be inspected. Restore path access or repair the active worktree configuration, restart the plugin or host if necessary, then rerun hashline_read in this same session.",
       );
     }
     const identity = { ...alias.identity, worktree: canonicalWorktree };
@@ -729,7 +710,6 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     sessionId: string | undefined,
   ): Promise<NativeAliasBindingStatus> {
     if (!sessionId) return "unbound";
-    if (poisonedAliasSessions.has(sessionId)) return "mismatch";
     try {
       const binding = await resolveAliasSessionBinding(input.directory, input.worktree);
       return sessions.status(sessionId, binding.fingerprint);
@@ -738,72 +718,44 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     }
   }
 
-  async function assertAliasSession(
+  async function assertAliasSnapshotAdmission(
     sessionId: string,
     directory: string,
     worktree: string,
-    currentCall?: { id: string; tool: "edit" | "apply_patch"; input?: unknown },
-  ): Promise<{
-    canonicalWorktree: string;
-    identity: NativeAliasProtocolIdentity;
-    fingerprint: string;
-  }> {
-    if (poisonedAliasSessions.has(sessionId)) {
-      fail(
-        "SESSION_PROTOCOL_MISMATCH",
-        "A prior filesystem operation reached partial publication. Inspect the affected paths and start a new session before editing.",
+    snapshotId: string,
+  ): Promise<NativeAliasAdmission> {
+    const scope = { sessionId, worktree };
+    const binding = await resolveAliasSessionBinding(directory, worktree);
+    const authority = sessions.activeAuthority(
+      sessionId,
+      binding.fingerprint,
+      binding.canonicalWorktree,
+    );
+    if (authority === undefined) {
+      requireFreshAliasRead(
+        "No exact native-alias process epoch is active for this session and canonical worktree.",
       );
     }
-    const binding = await resolveAliasSessionBinding(directory, worktree);
-    const { identity, fingerprint } = binding;
-    if (sessions.isBound(sessionId, fingerprint)) return binding;
+    const snapshot = snapshots.peek(scope, snapshotId);
+    snapshots.assertAuthority(snapshot, authority);
+    snapshots.assertDelivered(snapshot);
+    return { ...binding, authority };
+  }
 
-    const historyOptions =
-      currentCall === undefined ? { sessionId, directory } : { currentCall, sessionId, directory };
-    const settleDelaysMs = [0, 5, 15, 30, 50] as const;
-    let settleDeadline: number | undefined;
-    for (let attempt = 0; ; attempt += 1) {
-      let messages: unknown;
-      try {
-        const remainingMs =
-          settleDeadline === undefined
-            ? SESSION_HISTORY_TIMEOUT_MS
-            : Math.floor(settleDeadline - performance.now());
-        if (remainingMs <= 0) {
-          fail(
-            "SESSION_PROTOCOL_MISMATCH",
-            "OpenCode current alias input did not stabilize within the bounded inspection window. Start a new session before editing.",
-          );
-        }
-        messages = await readOpenCodeSessionHistory(
-          input.client,
-          sessionId,
-          directory,
-          SESSION_HISTORY_FETCH_LIMIT,
-          remainingMs,
-        );
-      } catch (error) {
-        if (error instanceof HashlineError) throw error;
-        failSessionHistoryRead(error);
-      }
-      try {
-        assertNativeAliasHistory(messages, identity, historyOptions);
-        break;
-      } catch (error) {
-        if (!(error instanceof NativeAliasCurrentCallPendingError)) throw error;
-        settleDeadline ??= performance.now() + 160;
-        const delay = settleDelaysMs[attempt];
-        if (delay === undefined || performance.now() + delay >= settleDeadline) {
-          fail(
-            "SESSION_PROTOCOL_MISMATCH",
-            "OpenCode current alias input did not stabilize within the bounded inspection window. Start a new session before editing.",
-          );
-        }
-        await Bun.sleep(delay);
-      }
+  function assertAliasAuthorityCurrent(sessionId: string, admission: NativeAliasAdmission): void {
+    if (
+      sessions.isActive(
+        sessionId,
+        admission.fingerprint,
+        admission.canonicalWorktree,
+        admission.authority,
+      )
+    ) {
+      return;
     }
-    sessions.bind(sessionId, fingerprint);
-    return binding;
+    requireFreshAliasRead(
+      "The admitted native-alias read epoch retired before publication could begin.",
+    );
   }
 
   function rememberPending(pendingId: string, pending: PendingSnapshot): void {
@@ -818,7 +770,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const hashlineRead = tool({
     description:
       options.toolSurface === "native-aliases"
-        ? "Read a UTF-8 text file and issue an exact snapshot for Better Hashline's edit or apply_patch alias. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited."
+        ? "Read a UTF-8 text file and prepare an exact process-local snapshot for Better Hashline's edit or apply_patch alias. A successful tool.execute.after delivery binds its epoch; pending execution alone does not. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited."
         : "Read a UTF-8 text file and issue an exact snapshot for hashline_edit. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited.",
     args: readArgumentShape,
     async execute(rawArgs, context) {
@@ -827,12 +779,28 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       const parsed = readArguments.safeParse(rawArgs);
       if (!parsed.success) invalidArguments("hashline_read");
       const args = parsed.data;
+      const binding =
+        options.toolSurface === "native-aliases"
+          ? await resolveAliasSessionBinding(context.directory, context.worktree)
+          : undefined;
+      const candidate = binding
+        ? sessions.prepare(context.sessionID, binding.fingerprint, binding.canonicalWorktree)
+        : undefined;
       const resolved = await resolveExistingFile(args.filePath, context.directory);
       await authorizeExternal(context, resolved);
       await authorizeRead(context, resolved);
       const stable = await readStableFile(resolved, options.maxFileBytes, false, context.abort);
       const document = decodeTextDocument(stable.bytes, options.maxLines);
-      const snapshot = snapshots.remember(scopeFor(context), resolved.canonicalPath, document);
+      const shownPath = displayPath(
+        await canonicalDisplayRoot(context.worktree, context.directory),
+        resolved.canonicalPath,
+      );
+      const snapshot = snapshots.remember(
+        scopeFor(context),
+        resolved.canonicalPath,
+        document,
+        candidate?.authority,
+      );
       const rendered = renderSnapshotPage({
         snapshot,
         offset: args.offset ?? 1,
@@ -844,14 +812,12 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         kind: "read",
         snapshotId: snapshot.id,
         scope: snapshot.scope,
+        directory: context.directory,
         page: rendered.page,
         outputDigest: sha256(new TextEncoder().encode(rendered.output)),
         createdAt: Date.now(),
+        candidate,
       });
-      const shownPath = displayPath(
-        await canonicalDisplayRoot(context.worktree, context.directory),
-        resolved.canonicalPath,
-      );
       context.metadata({
         title: shownPath,
         metadata: { snapshotId: snapshot.id, nextOffset: rendered.nextOffset },
@@ -885,19 +851,24 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     if (rebase !== "none" && rebase !== "unique") {
       fail("INVALID_ARGUMENT", "rebase must be none or unique.");
     }
-    if (hasReadbackWindow && args.readback !== true) {
-      fail("INVALID_ARGUMENT", "readbackOffset and readbackLimit require readback:true.");
-    }
     if (batch.kind !== "text" && rebase !== "none") {
       fail("INVALID_ARGUMENT", `${batch.kind} does not support unique rebase.`);
     }
     if (batch.kind !== "text" && (args.readback || hasReadbackWindow)) {
       fail("INVALID_ARGUMENT", `${batch.kind} does not support readback.`);
     }
+    if (hasReadbackWindow && args.readback !== true) {
+      fail("INVALID_ARGUMENT", "readbackOffset and readbackLimit require readback:true.");
+    }
     const aliasBinding =
       toolName === "hashline_edit"
         ? undefined
-        : await assertAliasSession(context.sessionID, context.directory, context.worktree);
+        : await assertAliasSnapshotAdmission(
+            context.sessionID,
+            context.directory,
+            context.worktree,
+            args.snapshotId,
+          );
     const displayPrefix =
       batch.kind === "text" && !args.allowHashlinePrefixes
         ? findHashlineDisplayPrefix(batch.operations)
@@ -1053,7 +1024,12 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                 expected: stable,
                 maxBytes: options.maxFileBytes,
                 signal: context.abort,
-                consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
+                consume: () => {
+                  if (aliasBinding) {
+                    assertAliasAuthorityCurrent(context.sessionID, aliasBinding);
+                  }
+                  snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
+                },
               });
             } else if (destination) {
               try {
@@ -1064,8 +1040,11 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                   maxBytes: options.maxFileBytes,
                   signal: context.abort,
                   consume: () => {
-                    snapshots.invalidatePath(scope, resolved.canonicalPath);
-                    snapshots.invalidatePath(scope, destination.canonicalPath);
+                    if (aliasBinding) {
+                      assertAliasAuthorityCurrent(context.sessionID, aliasBinding);
+                    }
+                    snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
+                    snapshots.invalidateSessionPath(context.sessionID, destination.canonicalPath);
                   },
                 });
               } catch (error) {
@@ -1074,7 +1053,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                   error instanceof HashlineError &&
                   error.code === "PARTIAL_PUBLICATION"
                 ) {
-                  poisonedAliasSessions.add(context.sessionID);
+                  sessions.unbind(context.sessionID);
                 }
                 throw error;
               }
@@ -1176,7 +1155,12 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             replacement: plan.bytes,
             maxBytes: options.maxFileBytes,
             signal: context.abort,
-            consume: () => snapshots.invalidatePath(scope, resolved.canonicalPath),
+            consume: () => {
+              if (aliasBinding) {
+                assertAliasAuthorityCurrent(context.sessionID, aliasBinding);
+              }
+              snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
+            },
           });
           const successOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
           let output = editResultOutput(successOutput, "none");
@@ -1185,7 +1169,12 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             const fallbackOutput = editResultOutput(successOutput, "unavailable");
             try {
               const document = decodeTextDocument(verified.bytes, options.maxLines);
-              const successor = snapshots.remember(scope, resolved.canonicalPath, document);
+              const successor = snapshots.remember(
+                scope,
+                resolved.canonicalPath,
+                document,
+                aliasBinding?.authority,
+              );
               const prefix = `${editResultOutput(successOutput, "attached")}\n`;
               const rendered = renderSnapshotPage({
                 snapshot: successor,
@@ -1199,10 +1188,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                 kind: "edit",
                 snapshotId: successor.id,
                 scope: successor.scope,
+                directory: context.directory,
                 page: rendered.page,
                 outputDigest: sha256(new TextEncoder().encode(output)),
                 createdAt: Date.now(),
                 fallbackOutput,
+                authority: aliasBinding?.authority,
+                canonicalWorktree: aliasBinding?.canonicalWorktree,
+                fingerprint: aliasBinding?.fingerprint,
               });
               resultMetadata = { ...metadata, hashlinePending: pendingId };
             } catch {
@@ -1289,14 +1282,20 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               plan.missingDirectories.map((entry) => entry.canonicalPath),
             );
             try {
-              await publishNewFileWithParents({ plan, bytes, signal: context.abort });
+              await publishNewFileWithParents({
+                plan,
+                bytes,
+                signal: context.abort,
+                consume: () =>
+                  snapshots.invalidateSessionPath(context.sessionID, plan.canonicalPath),
+              });
             } catch (error) {
               if (
                 options.toolSurface === "native-aliases" &&
                 error instanceof HashlineError &&
                 error.code === "PARTIAL_PUBLICATION"
               ) {
-                poisonedAliasSessions.add(context.sessionID);
+                sessions.unbind(context.sessionID);
               }
               throw error;
             }
@@ -1327,7 +1326,13 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         async () => {
           await assertTargetAbsent(resolved);
           await authorizeEdit(context, resolved, diff);
-          await publishNewFile({ resolved, bytes, signal: context.abort });
+          await publishNewFile({
+            resolved,
+            bytes,
+            signal: context.abort,
+            consume: () =>
+              snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath),
+          });
           context.metadata({ title: shownPath, metadata: { diff } });
           return {
             title: shownPath,
@@ -1396,93 +1401,177 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           "NATIVE_TOOL_DISABLED",
           hookInput.tool === "write"
             ? "Use hashline_write to create a new file; native write is disabled."
-            : "hashline_edit is unavailable on the native-aliases surface. Start a new session after changing surfaces.",
+            : "hashline_edit is unavailable on the native-aliases surface. Restart the plugin in this same session after changing surfaces, then rerun hashline_read, or use an enforced unique hashline fallback.",
         );
       }
       if (hookInput.tool !== "edit" && hookInput.tool !== "apply_patch") return;
       assertConfigured();
-      if (!hashlineEditArgumentsSchema.safeParse(output.args).success) {
-        invalidArguments(hookInput.tool);
-      }
-      await assertAliasSession(hookInput.sessionID, input.directory, input.worktree, {
-        id: hookInput.callID,
-        tool: hookInput.tool,
-        input: output.args,
-      });
+      const parsed = hashlineEditArgumentsSchema.safeParse(output.args);
+      if (!parsed.success) invalidArguments(hookInput.tool);
+      await assertAliasSnapshotAdmission(
+        hookInput.sessionID,
+        input.directory,
+        input.worktree,
+        parsed.data.snapshotId,
+      );
     },
-    async "tool.execute.after"(input, output) {
+    async "tool.execute.after"(hookInput, output) {
       if (
-        (input.tool === "edit" || input.tool === "apply_patch") &&
+        (hookInput.tool === "edit" || hookInput.tool === "apply_patch") &&
         output.output.startsWith("DISPLAY_PREFIX_REJECTED:") &&
         typeof output.metadata?.betterHashlineRejection === "object" &&
         output.metadata.betterHashlineRejection !== null
       ) {
         return;
       }
-      const isRead = input.tool === "hashline_read";
-      const isEditReadback =
-        (input.tool === "hashline_edit" || input.tool === "edit" || input.tool === "apply_patch") &&
-        typeof input.args === "object" &&
-        input.args !== null &&
-        (input.args as Record<string, unknown>).readback === true;
-      if (!isRead && !isEditReadback) return;
-      const expectedKind = isRead ? "read" : "edit";
+      const reportedKind =
+        hookInput.tool === "hashline_read"
+          ? "read"
+          : (hookInput.tool === "hashline_edit" ||
+                hookInput.tool === "edit" ||
+                hookInput.tool === "apply_patch") &&
+              typeof hookInput.args === "object" &&
+              hookInput.args !== null &&
+              (hookInput.args as Record<string, unknown>).readback === true
+            ? "edit"
+            : undefined;
       const pendingId = output.metadata?.hashlinePending;
       if (typeof pendingId !== "string") {
+        if (reportedKind === undefined) return;
         output.metadata = withoutPendingMetadata(output.metadata);
-        if (isRead) {
-          delete output.metadata.snapshotId;
+        if (reportedKind === "read") {
+          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
           output.output =
-            "SNAPSHOT_REQUIRED: OpenCode did not preserve the snapshot marker. Rerun hashline_read.";
+            "SNAPSHOT_REQUIRED: OpenCode did not preserve the snapshot marker. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
         } else {
-          output.output = unavailableEditReadback(output.output);
+          unavailableEditReadback(output);
         }
         return;
       }
+
+      const deliveredSnapshotId = output.metadata?.snapshotId;
       const pending = pendingSnapshots.get(pendingId);
       pendingSnapshots.delete(pendingId);
       output.metadata = withoutPendingMetadata(output.metadata);
-      if (!pending || pending.kind !== expectedKind) {
-        if (isRead) {
-          delete output.metadata.snapshotId;
-          output.output = "SNAPSHOT_REQUIRED: Rerun hashline_read before editing.";
+      if (!pending) {
+        if (reportedKind === "read") {
+          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+          output.output =
+            "SNAPSHOT_REQUIRED: The delivered read did not match a live pending snapshot. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+        } else if (reportedKind === "edit") {
+          unavailableEditReadback(output);
         } else {
-          output.output = pending?.fallbackOutput ?? unavailableEditReadback(output.output);
+          protocolKindMismatch(output);
+        }
+        return;
+      }
+      if (reportedKind !== pending.kind) {
+        protocolKindMismatch(output);
+        return;
+      }
+      if (
+        pending.scope.sessionId !== hookInput.sessionID ||
+        (pending.kind === "read" && deliveredSnapshotId !== pending.snapshotId)
+      ) {
+        if (pending.kind === "read") {
+          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+          output.output =
+            "SNAPSHOT_REQUIRED: The delivered read did not match its exact pending session and snapshot. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+        } else {
+          unavailableEditReadback(output, pending.fallbackOutput);
         }
         return;
       }
       if (output.metadata.truncated === true) {
-        if (isRead) {
+        if (pending.kind === "read") {
+          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
           output.output =
-            "SNAPSHOT_REQUIRED: OpenCode truncated this result, so no editable lines were issued. Use a smaller limit.";
-          delete output.metadata.snapshotId;
+            "SNAPSHOT_REQUIRED: OpenCode truncated this result, so no editable lines were issued. Use a smaller limit and rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
         } else {
-          output.output = pending.fallbackOutput ?? unavailableEditReadback(output.output);
+          unavailableEditReadback(output, pending.fallbackOutput);
         }
         return;
       }
       if (sha256(new TextEncoder().encode(output.output)) !== pending.outputDigest) {
-        if (isRead) {
+        if (pending.kind === "read") {
+          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
           output.output =
-            "SNAPSHOT_REQUIRED: Another hook changed this result, so no editable lines were issued. Rerun hashline_read.";
-          delete output.metadata.snapshotId;
+            "SNAPSHOT_REQUIRED: Another hook changed this result, so no editable lines were issued. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
         } else {
-          output.output = pending.fallbackOutput ?? unavailableEditReadback(output.output);
+          unavailableEditReadback(output, pending.fallbackOutput);
         }
         return;
       }
+
       try {
+        if (pending.kind === "read" && pending.candidate) {
+          const binding = await resolveAliasSessionBinding(
+            pending.directory,
+            pending.scope.worktree,
+          );
+          if (
+            binding.fingerprint !== pending.candidate.fingerprint ||
+            binding.canonicalWorktree !== pending.candidate.canonicalWorktree ||
+            !sessions.isCandidateCurrent(pending.candidate)
+          ) {
+            requireFreshAliasRead(
+              "The delivered read no longer matches its exact prepared native-alias epoch and canonical worktree.",
+            );
+          }
+          const snapshot = snapshots.peek(pending.scope, pending.snapshotId);
+          snapshots.assertAuthority(snapshot, pending.candidate.authority);
+          if (!sessions.isCandidateCurrent(pending.candidate)) {
+            requireFreshAliasRead(
+              "The prepared native-alias read epoch retired before delivery could be committed.",
+            );
+          }
+          snapshots.issue(snapshot, pending.page);
+          if (!sessions.commit(pending.candidate)) {
+            throw new Error("Native alias candidate changed during synchronous delivery commit.");
+          }
+          return;
+        }
+
         const snapshot = snapshots.peek(pending.scope, pending.snapshotId);
+        if (pending.kind === "edit" && pending.authority) {
+          if (
+            !pending.fingerprint ||
+            !pending.canonicalWorktree ||
+            !sessions.isActive(
+              hookInput.sessionID,
+              pending.fingerprint,
+              pending.canonicalWorktree,
+              pending.authority,
+            )
+          ) {
+            requireFreshAliasRead(
+              "The native-alias epoch that produced this edit readback is no longer active.",
+            );
+          }
+          snapshots.assertAuthority(snapshot, pending.authority);
+          if (
+            !sessions.isActive(
+              hookInput.sessionID,
+              pending.fingerprint,
+              pending.canonicalWorktree,
+              pending.authority,
+            )
+          ) {
+            requireFreshAliasRead(
+              "The native-alias epoch that produced this edit readback retired before delivery.",
+            );
+          }
+        }
         snapshots.issue(snapshot, pending.page);
       } catch (error) {
-        if (isRead) {
+        if (pending.kind === "read") {
+          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
           output.output =
             error instanceof HashlineError
               ? error.message
-              : "SNAPSHOT_REQUIRED: Rerun hashline_read before editing.";
-          delete output.metadata.snapshotId;
+              : "SNAPSHOT_REQUIRED: Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
         } else {
-          output.output = pending.fallbackOutput ?? unavailableEditReadback(output.output);
+          unavailableEditReadback(output, pending.fallbackOutput);
         }
       }
     },
@@ -1496,17 +1585,15 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         const state = await aliasSessionStatus(hookInput.sessionID);
         const concurrency =
           state === "bound"
-            ? "native-alias-session=bound. Operations touching disjoint source and destination paths may run concurrently; serialize overlapping paths. Calls remain independently approved and non-transactional."
+            ? "native-alias-session=bound. Alias calls with disjoint complete source/destination path sets may run concurrently; alias calls with overlapping path sets serialize. Calls remain independently approved and non-transactional."
             : state === "mismatch"
-              ? "native-alias-session=mismatch. Start a new session before editing."
-              : "native-alias-session=unbound. Never issue edit or apply_patch calls concurrently or in the same assistant message; wait for each result until one exact before-hook binds the session.";
-        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. Pass top-level snapshotId and operations JSON. hashline_write is create-only; native write and hashline_edit are disabled. Do not edit via shell. Hashline line/control prefixes are annotations; set allowHashlinePrefixes:true in the initial call only for literal source text. Restart into a new session after configuration changes; Better Hashline must be the last plugin defining these aliases.`;
+              ? "native-alias-session=mismatch. Rerun hashline_read in this same session and use only the snapshot ID it returns; old snapshot IDs cannot be revived."
+              : "native-alias-session=unbound. Do not issue edit or apply_patch until a hashline_read result has been delivered and attested; rerun hashline_read in this same session and wait for its result.";
+        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. Pass top-level snapshotId and operations JSON. ${EDIT_SEMANTICS_GUIDANCE} hashline_write is create-only; native write and hashline_edit are disabled. Do not edit via shell. Hashline line/control prefixes are annotations; set allowHashlinePrefixes:true in the initial call only for literal source text. After configuration, schema, host, or surface changes, restart the plugin in this same session and rerun hashline_read, or use an enforced unique hashline fallback. Better Hashline must be the last plugin defining these aliases.`;
       } else if (options.enforce) {
-        guidance =
-          "Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. Use hashline_write only to create a new file; pass createParents:true only when missing parents must be created, and inspect the tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.";
+        guidance = `Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. ${EDIT_SEMANTICS_GUIDANCE} Use hashline_write only to create a new file; pass createParents:true only when missing parents must be created, and inspect the tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.`;
       } else {
-        guidance =
-          "Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files; missing parents require explicit createParents:true. Native editing tools remain enabled by configuration.";
+        guidance = `Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files; missing parents require explicit createParents:true. ${EDIT_SEMANTICS_GUIDANCE} Native editing tools remain enabled by configuration.`;
       }
       output.system.push(guidance);
     },
@@ -1522,7 +1609,6 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       pendingSnapshots.clear();
       snapshots.clear();
       sessions.clear();
-      poisonedAliasSessions.clear();
     },
   };
 };

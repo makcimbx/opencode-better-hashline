@@ -73,6 +73,9 @@ The agent calls `hashline_read` instead of native `read` for a UTF-8 text file i
 The prefixes are annotations, not file content. A line shown as `N!|... [preview only; line not issued]` is too large for one configured output page and cannot be edited by line reference.
 The header's `lines=<count>` value is the file's total logical-line count. A paged, preview-only, or bounded readback result adds `partial=true` only when that rendered page does not cover complete BOF-to-EOF evidence. Its displayed `N|` refs are editable, but that page does not by itself authorize whole-file replacement; multiple attested pages for the same unchanged snapshot can accumulate complete coverage.
 
+`offset` is one-based and defaults to 1. Requested `limit` accepts `1..100,000` and defaults to 1,000. The configured `maxOutputBytes` is authoritative (40 KiB by default, with a 45 KiB maximum), so a byte-limited partial page can stop earlier and ends with `@more`.
+Coverage diagnostics may suggest following `@more` with calls capped at a conservative 1,000 lines; that recovery chunk is not the public requested-limit ceiling.
+
 ### 2. Submit logical line operations
 
 ```json
@@ -96,15 +99,15 @@ The header's `lines=<count>` value is the file's total logical-line count. A pag
 }
 ```
 
-`lines: []` deletes a replacement range. `lines: [""]` supplies one empty logical-line value; at an unterminated EOF this can add only the final delimiter rather than a phantom line. Payload lines may not contain embedded CR or LF characters.
+`replace` removes the exact one-based inclusive `startLine..endLine` range, and `lines` is the complete replacement; neighboring lines outside the range remain, so do not repeat retained context unless intentional. `lines: []` deletes the range. `lines: [""]` supplies one empty logical-line value; at an unterminated EOF this can add only the final delimiter rather than a phantom line. Payload lines may not contain embedded CR or LF characters.
 
-Column-zero positive decimal annotations such as `17|`, `17!|`, `@hashline`, `@more`, `@eof`, `@note`, and `@hashline-edit` are rejected in model-supplied payload lines. Set top-level `allowHashlinePrefixes: true` in the initial call only when that exact prefix is intentional source content. Numeric diagnostics are bounded to `N|` or `N!|`; the renderer never emits `0|` or zero-padded numbers. Native aliases persist this failure as a completed non-mutating terminal result so an unsanitized session can recover after restart.
+Column-zero positive decimal annotations such as `17|`, `17!|`, `@hashline`, `@more`, `@eof`, `@note`, and `@hashline-edit` are rejected in model-supplied payload lines. Set top-level `allowHashlinePrefixes: true` in the initial call only when that exact prefix is intentional source content. Numeric diagnostics are bounded to `N|` or `N!|`; the renderer never emits `0|` or zero-padded numbers. Native aliases persist this failure as a completed non-mutating terminal result for offline verifier and model-trace evidence. That persisted result does not establish live edit authority; after a restart, continuation requires a fresh delivered and attested `hashline_read`.
 
 Batch every known change to one file in the same call. Every successful edit keeps the first line `Applied N operations.` and follows it with `@hashline-edit previous=consumed successor=<state>`. `successor=none` or `unavailable` includes `next=hashline_read`; `successor=attached` is immediately followed by the new snapshot page.
 
-Set `readback: true` for structural verification or a dependent follow-up edit. A successful result includes one contiguous successor page, starting at the first post-edit hunk and showing at most 1,000 lines by default. Text edits may set `readbackOffset` to a one-based post-edit start and `readbackLimit` to `1..1000`; both fields require `readback:true`. Only an attached page attested as delivered by the after-hook issues refs. There is no ID-only successor: if OpenCode truncates or changes the continuation, the edit remains applied, the receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
+Set `readback: true` for structural verification or a dependent follow-up edit. A successful result includes one contiguous successor page starting at the first post-edit hunk by default. `readbackOffset` selects a one-based post-edit start; requested `readbackLimit` accepts `1..100,000` and defaults to 1,000. Both fields require `readback:true`, and authoritative `maxOutputBytes` pagination may stop the page earlier with `partial=true` and `@more`. Only an attached page attested as delivered by the after-hook issues refs. There is no ID-only successor: if OpenCode truncates or changes the continuation, the edit remains applied, the receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
 
-Retained source ranges can also be transferred without echoing their contents:
+Issued source ranges can also be transferred without echoing their contents:
 
 ```json
 {
@@ -115,7 +118,7 @@ Retained source ranges can also be transferred without echoing their contents:
 }
 ```
 
-All coordinates describe the original snapshot, never an intermediate edit. Copy always reads pre-edit source and uses destination-local delimiters like `insert`, so its source may overlap another operation's write. Move preserves the positional EOL layout and requires the complete source-to-destination corridor to have been issued. One `move_range` may compose with pairwise-disjoint `replace` operations wholly inside its intervening corridor and outside its source; the replacement payloads are applied to immutable pre-batch corridor content before the move permutation. If empty texts and adjacent CR/LF bytes cannot be serialized without changing that logical layout, the move fails closed instead of normalizing delimiters. Every other destructive conflict stays conservative. Insertion-like destinations may touch destructive endpoints but may not lie strictly inside them or share one boundary.
+Every batch coordinate refers to the original immutable snapshot, never an intermediate result or a line created by another operation; do not shift later coordinates to account for earlier array entries. Copy always reads pre-edit source and uses destination-local delimiters like `insert`, so its source may overlap another operation's write. Move preserves the positional EOL layout and requires the complete source-to-destination corridor to have been issued. One `move_range` may compose with pairwise-disjoint `replace` operations wholly inside its intervening corridor and outside its source; the replacement payloads are applied to immutable pre-batch corridor content before the move permutation. If empty texts and adjacent CR/LF bytes cannot be serialized without changing that logical layout, the move fails closed instead of normalizing delimiters. Every other destructive conflict stays conservative. Insertion-like destinations may touch destructive endpoints but may not lie strictly inside them or share one boundary.
 
 Whole-file deletion and rename/move use the same issued snapshot without echoing file contents:
 
@@ -186,7 +189,7 @@ OpenCode accepts plugin options as the second tuple element:
 | `maxSnapshotsPerPath` | 4 | Retained revisions per session and canonical path |
 | `maxSnapshotsPerSession` | 32 | Retained snapshots per OpenCode session |
 | `snapshotTtlMs` | 30 minutes | Snapshot lifetime |
-| `maxOutputBytes` | 40 KiB | Model-visible `hashline_read` output budget |
+| `maxOutputBytes` | 40 KiB | Authoritative model-visible read/readback budget; configurable up to 45 KiB |
 | `maxContextLines` | 4 | Exact context on each side for `unique` rebase |
 
 Unknown or inconsistent options put the plugin into a diagnostic fail-closed mode: native mutators remain hidden and every Better Hashline tool returns `CONFIG_INVALID`. Fix the configuration and restart OpenCode. `maxCacheBytes` must be at least three times `maxFileBytes`.
@@ -197,8 +200,8 @@ Set `enforce: false` only for migration or A/B evaluation. It leaves native muta
 
 `toolSurface: "native-aliases"` keeps the Better Hashline snapshot executor but publishes it as
 `edit` on non-GPT routes and `apply_patch` on GPT-5-like patch routes so stock OpenCode can use its
-native diff renderers. It requires `enforce: true`, a compatible OpenCode host, a restart, and a new
-session:
+native diff renderers. It requires `enforce: true`, a compatible OpenCode host, a plugin or host restart as applicable after
+configuration, schema, host, or surface changes, and a delivered and attested `hashline_read` in the same session:
 
 ```json
 {
@@ -215,15 +218,19 @@ The mode still exposes unique `hashline_read` and create-only `hashline_write`; 
 native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Transport, schema, or
 session incompatibility fails closed without falling back to a builtin or to `hashline_edit`.
 The protocol marker name remains `native-aliases/v2`, but the expanded schemas change the canonical
-schema SHA-256 and protocol fingerprint. Existing sessions with the previous v2 fingerprint fail
-closed; restart the plugin and begin a new session rather than attempting continuation.
-Session-history fetches retry only bounded transient timeout, network, and selected HTTP failures,
-with at most four attempts under one 2-second total deadline. Exhaustion reports a safe category and
-can be retried in the same session after restoring the host; diagnostics never include request or
-response secrets. Oversized persisted history cannot be repaired by restarting or resuming the same
-task ID and requires a genuinely new session.
+schema SHA-256 and protocol fingerprint. An identity change invalidates the process-local live epoch.
+Restart the plugin as required and use a fresh delivered same-session read; earlier snapshot IDs remain
+unusable.
 
-Before exact process-local session binding, native-alias edits must be serialized because the preview cannot safely attest multiple unfinished native-looking calls. After system guidance explicitly reports `native-alias-session=bound`, calls whose source and destination path sets are disjoint may run concurrently; overlapping paths remain serialized and every call has an independent approval/publication outcome. A restart, protocol mismatch, or partial move publication removes that permission. This restriction is specific to the experimental alias surface; the default `hashline` surface does not need native session attestation.
+Live alias admission never fetches persisted session history. Bounded history validation and transport
+retry and size limits remain for offline verifier, model-trace, and evidence paths. Invalid or oversized
+history invalidates that evidence, but it neither establishes nor repairs the process-local live epoch.
+
+Native-alias `edit` and `apply_patch` calls are rejected while system guidance reports `native-alias-session=unbound` or `mismatch`. A delivered and attested `hashline_read` establishes or replaces the process-local live epoch for the current session, worktree, and protocol fingerprint. Once guidance reports `bound`, alias calls with disjoint complete source/destination path sets may run concurrently; overlapping path sets serialize, and every call has an independent approval and publication outcome. A partial move or parent publication invalidates affected snapshots and unbinds the epoch. After inspecting and repairing the paths, a fresh delivered `hashline_read` can rebind in the same session; old snapshot IDs remain unusable. The default `hashline` surface does not need native-session attestation.
+
+Reads prepared for the same fingerprint and canonical worktree may reuse the current candidate authority. Preparing a differing identity retires active authority immediately; only the current candidate delivered and attested by `tool.execute.after` can commit. A snapshot's authority token must match the active authority, so stale, reordered, or ABA completions cannot bind or revive old IDs.
+
+No Better Hashline failure or Better Hashline resource limit requires abandoning the OpenCode transcript or task ID. Recover in the same task by retrying, obtaining a fresh delivered `hashline_read`, repairing paths or configuration, restarting the plugin or host as applicable and rereading, or explicitly configuring enforced `toolSurface: "hashline"` and restarting. That switch is explicit, never a silent fallback. This invariant is scoped to Better Hashline and does not cover loss of OpenCode's own session database.
 
 Run the credential-free clean-room verifier after installation and after every plugin-order or
 configuration change:
@@ -242,13 +249,14 @@ replace an alias, and a later after-hook can mutate persisted output. Keep Bette
 plugins that define `edit` or `apply_patch`.
 
 Native-looking IDs persist in session history. Removing the plugin or changing surfaces can leave old
-native-looking cards while new calls resolve to OpenCode builtins; do not continue or import that
-session for editing. Rejected native-shaped calls may consume an extra model retry. Unsanitized exports
-and shares contain paths and diffs. Sanitized exports remove tool paths, diffs, and protocol markers but
-OpenCode 1.18.3 retains a safe root-relative session locator; review it before disclosure. The removed
-marker makes alias continuation fail closed. ACP can classify the alias as an edit but cannot reconstruct the
-native structured diff from Better Hashline metadata. The unique `hashline` surface remains the
-production default and recommendation.
+native-looking cards while new calls resolve to OpenCode builtins; verify the active surface and obtain a
+fresh delivered `hashline_read` before alias editing. Persisted history never restores the live epoch.
+Rejected native-shaped calls may consume an extra model retry. Unsanitized exports and shares contain
+paths and diffs. Sanitized exports remove tool paths, diffs, and protocol markers but OpenCode 1.18.3
+retains a safe root-relative session locator; review it before disclosure. Removing the marker makes
+offline history and evidence validation fail closed; it does not provide or restore live edit authority.
+ACP can classify the alias as an edit but cannot reconstruct the native structured diff from Better
+Hashline metadata. The unique `hashline` surface remains the production default and recommendation.
 
 The retained [privacy-safe pilot v7 summary](benchmarks/results/2026-07-21-native-alias-pilot-v7.json)
 records 48/48 passing Luna/Sol sessions across the unique and native-alias surfaces, complete
@@ -319,7 +327,7 @@ The custom read tool intentionally does not imitate OpenCode's native media atta
 - Executable mode and ownership are preserved where supported; all metadata preservation is not promised.
 - `enforce` blocks OpenCode's native mutator tool IDs, but it does not sandbox shell commands or other plugins.
 - Native aliases cannot attest final registry ownership or prevent later hooks from mutating renderer metadata.
-- Snapshot caches are in memory and disappear on restart, expiry, eviction, or successful publication.
+- Snapshot caches are in memory and disappear on restart, expiry, or eviction. An approved publication invalidates every affected path when it reaches the consume boundary, including partial outcomes; invalidation is not limited to successful publication.
 
 Full boundaries and trust assumptions are in [docs/threat-model.md](docs/threat-model.md).
 

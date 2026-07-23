@@ -38,8 +38,10 @@ Lifecycle tests must cover exact strict bytes, complete BOF-to-EOF source issuan
 single-link sources, occupied destinations including symlinks, stable existing parents,
 same-filesystem moves, dual-path permissions, deterministic overlapping locks, post-approval races
 without replanning, and `PARTIAL_PUBLICATION` without unsafe rollback. Native-alias tests must also
-cover operation/source/destination metadata correlation, old-version history rejection, affected
-snapshot invalidation, and poisoned-session recovery.
+cover operation/source/destination metadata correlation, offline old-version history rejection,
+delivered-read live-epoch admission without persisted-history fetches, affected snapshot invalidation
+and epoch unbinding after partial publication, and same-session fresh-read recovery without reviving
+old snapshot IDs.
 
 Parent-creating write tests must additionally cover the 64-directory bound, a fixed deepest-ancestor
 plan, authorization and deterministic locks for every directory plus the target, exclusive
@@ -47,10 +49,15 @@ non-recursive root-to-leaf `mkdir`, the existing staged no-clobber file publicat
 the first directory exists or creation becomes ambiguous, retained state and `PARTIAL_PUBLICATION`
 afterward, and no rollback.
 Omitted or false `createParents` must remain strict, and `move_file` must never create parents.
-Readback tests must cover one-based post-edit offsets, the 1..1000 limit, defaults, text-only
-validation, one contiguous delivered page, and rejection of undelivered or ID-only successor
-authority. Conflict tests must preserve stable codes and deterministic zero-based operation-pair
-suffixes.
+Read and readback tests must cover requested `limit` and `readbackLimit` values across the public
+`1..100,000` range, the 1,000-line default, and authoritative `maxOutputBytes` pagination (40 KiB
+by default, configurable to at most 45 KiB), with byte-limited partial pages ending in `@more`.
+Readback remains one contiguous, one-based, text-only delivered page; undelivered or ID-only
+successor authority must be rejected. Coverage diagnostics must aggregate missing ranges and boundary
+requirements while recommending conservative reads of at most 1,000 lines. Replacement tests must prove
+that `startLine..endLine` is inclusive, `lines` is the complete replacement, outside neighbors remain,
+and every operation uses immutable original-snapshot coordinates. Conflict tests must preserve stable
+codes and deterministic zero-based operation-pair suffixes.
 
 Do not replace fail-closed behavior with fuzzy matching, silent fallback, overwrite, unplanned or
 recursive parent creation, or destructive rollback merely to improve a success-rate benchmark.

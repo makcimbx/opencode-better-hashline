@@ -12,9 +12,10 @@ auth source, and `BENCHMARK_ACK_COSTS=yes` are all present. Every isolated agent
 steps.
 
 The marker name remains `native-aliases/v2`, but the current edit-schema expansion changes the
-canonical schema SHA and protocol fingerprint. Sessions with the older v2 identity fail closed and
-must be restarted as new sessions; marker-name equality alone does not make them compatible. This
-does not reopen or extend the immutable pilot-v7 schedule.
+canonical schema SHA and protocol fingerprint. For live plugin use, restart the plugin or host as
+applicable and obtain a fresh delivered `hashline_read` in the same OpenCode session/task; old
+snapshot IDs cannot revive. Marker-name equality alone does not make the identities compatible.
+This does not reopen or extend the immutable pilot-v7 schedule.
 
 Use `--preflight --output=<new-directory>` to build, pack, install, probe adapter isolation, and run
 the stock-host verifier without a model request. Preflight may use the npm registry and writes local

@@ -33,7 +33,10 @@ async function capturedHistoryError(
   try {
     await promise;
   } catch (error) {
-    if (error instanceof OpenCodeSessionHistoryError) return error;
+    if (error instanceof OpenCodeSessionHistoryError) {
+      expect(error.message).toContain("The persisted evidence cannot be attested.");
+      return error;
+    }
     throw error;
   }
   throw new Error("Expected OpenCode session history transport to fail");
