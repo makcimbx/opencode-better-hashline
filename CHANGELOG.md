@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.7.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.6.1...v0.7.0) (2026-07-23)
+
+### Added
+
 - Added a redesigned, quick-start-oriented project README and a packaged Russian-language guide.
 - Added a project-local rubric and recovery matrix for model-visible tool contracts.
 
