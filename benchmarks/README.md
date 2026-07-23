@@ -11,14 +11,14 @@ The runner uses generated fixtures and Node SHA-256. No network, model, reposito
 
 When comparing results, use the raw JSON environment fields and source commit. Timing values are expected to vary; protocol classifications should not.
 
-The current runner emits schema v7. It extends the deterministic corpus with the allowed composed
-move/replacement case and adds edit/write schema plus readback/parent-create call fixtures. Current
-development classifications are strict `6/18/5/0`, unique `11/18/0/0`, exact search
-`10/13/1/5`, line numbers `7/1/0/21`, endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
-(`exact_apply/safe_reject/false_reject/unsafe_accept`). Wire values are edit schema
-`3686 -> 5033` (+1347, 36.54%), write schema `282 -> 548` (+266, 94.33%), readback call
-`181 -> 218` (+37), and parent-create call `50 -> 81` (+31). Existing static, rendering,
-lifecycle, transfer, and corridor values are unchanged.
+The runner emits schema v7. The latest retained schema-v7 result extended the deterministic corpus
+with the allowed composed move/replacement case and added edit/write raw-schema plus
+readback/parent-create call fixtures. Its retained classifications are strict `6/18/5/0`, unique
+`11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, endpoint-8 `7/12/4/6`, and
+endpoint-16 `7/13/4/5` (`exact_apply/safe_reject/false_reject/unsafe_accept`). Its retained fixture
+wire values are edit schema `3686 -> 5033` (+1347, 36.54%), write schema `282 -> 548` (+266,
+94.33%), readback call `181 -> 218` (+37), and parent-create call `50 -> 81` (+31). These values
+describe that immutable result, not the current development contract.
 
 The latest retained model-free evidence is the immutable schema-v7
 [`2026-07-22-edit-protocol-ux-windows-x64.json`](results/2026-07-22-edit-protocol-ux-windows-x64.json).

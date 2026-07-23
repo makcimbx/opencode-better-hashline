@@ -306,7 +306,13 @@ describe("native alias activation and visibility", () => {
     expect(value.tool?.edit?.description).toBe(nativeAliasEditDescription);
     expect(value.tool?.apply_patch?.description).toBe(nativeAliasEditDescription);
     expect(nativeAliasEditDescription).toContain(
-      "Native aliases: edit and apply_patch require a delivered, attested hashline_read and native-alias-session=bound.",
+      "Better Hashline alias; it does not accept native oldString/newString or patchText syntax.",
+    );
+    expect(nativeAliasEditDescription).toContain(
+      "Wait for hashline_read's returned result before calling it",
+    );
+    expect(nativeAliasEditDescription).toContain(
+      "source and destination paths must be inside the current worktree",
     );
     expect(hashlineEditDescription).not.toContain("native-alias-session");
     expect(nativeAliasEditDescription).toContain(
@@ -317,16 +323,12 @@ describe("native alias activation and visibility", () => {
     );
     const guidance = await systemGuidance(value);
     expect(guidance).toContain("native-alias-session=unbound");
+    expect(guidance).toContain("Do not call edit or apply_patch");
+    expect(guidance).toContain("Run hashline_read and wait for its returned result");
     expect(guidance).toContain(
-      "Do not issue edit or apply_patch until a hashline_read result has been delivered",
+      "These aliases accept Better Hashline filePath/snapshotId/operations JSON",
     );
-    expect(guidance).toContain("in this same session");
-    expect(guidance).toContain(
-      "neighboring lines outside the range remain, so do not repeat retained context such as a closing delimiter unless intentional.",
-    );
-    expect(guidance).toContain(
-      "Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.",
-    );
+    expect(guidance).not.toContain("neighboring lines outside the range remain");
   });
 
   test("preserves every host alias-visibility state while hiding write and hashline_edit", async () => {
@@ -365,6 +367,9 @@ describe("native alias activation and visibility", () => {
     });
     expect(Object.keys(value.tool ?? {}).sort()).toEqual(["hashline_read", "hashline_write"]);
     expect(await systemGuidance(value)).toContain("configuration is invalid");
+    expect(await systemGuidance(value)).toContain(
+      "Do not bypass this state with shell commands or another mutation tool",
+    );
     await expect(
       value["tool.execute.before"]?.(
         { tool: "edit", sessionID: "invalid", callID: "call" },
@@ -395,6 +400,9 @@ describe("native alias activation and visibility", () => {
     const { value } = await aliasHarness({ healthStatus: 503 });
     expect(Object.keys(value.tool ?? {}).sort()).toEqual(["hashline_read", "hashline_write"]);
     expect(await systemGuidance(value)).toContain("native aliases are unavailable");
+    expect(await systemGuidance(value)).toContain(
+      "Do not bypass this state with shell commands or another mutation tool",
+    );
     await expect(
       value["tool.execute.before"]?.(
         { tool: "edit", sessionID: randomUUID(), callID: "call" },
@@ -427,8 +435,8 @@ describe("native alias argument and mutation contract", () => {
     const { edit, applyPatch } = aliasRegistry(value);
     const toolContext = context();
     const cases = [
-      ["edit", edit, { filePath: "missing.txt", oldString: "old", newString: "new" }],
-      ["apply_patch", applyPatch, { patchText: "*** Begin Patch" }],
+      ["edit", edit, { filePath: "missing.txt", oldString: "old", newString: "new" }, "newString"],
+      ["apply_patch", applyPatch, { patchText: "*** Begin Patch" }, "patchText"],
       [
         "edit",
         edit,
@@ -436,19 +444,19 @@ describe("native alias argument and mutation contract", () => {
           ...replaceArgs("missing.txt", "s_AAAAAAAAAAAAAAAAAAAAAA"),
           oldString: "old",
         },
+        "oldString",
       ],
     ] as const;
 
-    for (const [name, definition, args] of cases) {
+    for (const [name, definition, args, rejectedField] of cases) {
+      const expected = `INVALID_ARGUMENT: ${rejectedField} is not accepted by ${name}. No mutation occurred; a valid supplied snapshot remains usable.`;
       await expect(
         value["tool.execute.before"]?.(
           { tool: name, sessionID: toolContext.sessionID, callID: "call" },
           { args },
         ),
-      ).rejects.toThrow(`INVALID_ARGUMENT: Invalid ${name} arguments.`);
-      await expect(definition.execute(args as never, toolContext)).rejects.toThrow(
-        `INVALID_ARGUMENT: Invalid ${name} arguments.`,
-      );
+      ).rejects.toThrow(expected);
+      await expect(definition.execute(args as never, toolContext)).rejects.toThrow(expected);
     }
 
     expect(historyCalls).toEqual([]);
@@ -801,7 +809,7 @@ describe("native alias argument and mutation contract", () => {
     expect(guidance).toContain(
       "Alias calls with disjoint complete source/destination path sets may run concurrently",
     );
-    expect(guidance).toContain("alias calls with overlapping path sets serialize");
+    expect(guidance).toContain("overlapping path sets serialize");
     expect(guidance).not.toContain("Never issue edit or apply_patch calls concurrently");
 
     const leftSnapshot = await issueSnapshot(value, toolContext, "left.txt");
@@ -938,7 +946,9 @@ describe("native alias argument and mutation contract", () => {
           replaceArgs(outsideFile, String(snapshot.metadata.snapshotId), "TWO"),
           toolContext,
         ),
-      ).rejects.toThrow("UNSUPPORTED_FILE: Native aliases cannot edit files outside");
+      ).rejects.toThrow(
+        'UNSUPPORTED_FILE: Native aliases require source files inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
+      );
       expect(asks).toHaveLength(permissionsBeforeEdit);
       expect(await readFile(outsideFile, "utf8")).toBe("one\ntwo\n");
     } finally {
@@ -1094,7 +1104,7 @@ describe("native alias argument and mutation contract", () => {
     });
     try {
       await expect(tools.applyPatch.execute(args, toolContext)).rejects.toThrow(
-        "resume this same session",
+        "Do not retry until their names match the intended state",
       );
     } finally {
       unlinkMock.mockRestore();
@@ -1156,7 +1166,9 @@ describe("native alias argument and mutation contract", () => {
           },
           toolContext,
         ),
-      ).rejects.toThrow("resume this same session");
+      ).rejects.toThrow(
+        "Created directories are intentionally retained, and the target file may or may not exist",
+      );
     } finally {
       mkdirMock.mockRestore();
     }
@@ -1636,7 +1648,7 @@ describe("native alias live epoch recovery", () => {
           },
           toolContext,
         ),
-      ).rejects.toThrow("resume this same session");
+      ).rejects.toThrow("Inspect and reconcile the requested tree and target before retrying");
     } finally {
       mkdirMock.mockRestore();
       releaseReadAuthorization();

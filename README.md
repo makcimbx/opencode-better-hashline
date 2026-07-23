@@ -94,10 +94,10 @@ The agent calls `hashline_read` instead of native `read` for a UTF-8 text file i
 @eof
 ```
 
-The prefixes are annotations, not file content. A line shown as `N!|... [preview only; line not issued]` is too large for one configured output page and cannot be edited by line reference.
+The prefixes are annotations, not file content. A line shown as `N!|... [preview only; line not issued]` is too large for one configured output page and cannot be edited by line reference. Pagination cannot issue that line; raise `maxOutputBytes` within its configured cap when safe, or stop and restructure the file manually without treating the preview as source content.
 The header's `lines=<count>` value is the file's total logical-line count. A paged, preview-only, or bounded readback result adds `partial=true` only when that rendered page does not cover complete BOF-to-EOF evidence. Its displayed `N|` refs are editable, but that page does not by itself authorize whole-file replacement; multiple attested pages for the same unchanged snapshot can accumulate complete coverage.
 
-`offset` is one-based and defaults to 1. Requested `limit` accepts `1..100,000` and defaults to 1,000. The configured `maxOutputBytes` is authoritative (40 KiB by default, with a 45 KiB maximum), so a byte-limited partial page can stop earlier and ends with `@more`.
+`offset` is one-based and defaults to 1. Requested `limit` accepts `1..100,000` and defaults to 1,000. The configured `maxOutputBytes` is authoritative (40 KiB by default, with a 45 KiB maximum), so a page can stop before the requested line count. `@more` means rendering stopped before EOF; `@eof` means the cursor reached EOF, and `partial=true` may accompany either when the page lacks complete editable evidence.
 Coverage diagnostics may suggest following `@more` with calls capped at a conservative 1,000 lines; that recovery chunk is not the public requested-limit ceiling.
 
 ### 2. Submit logical line operations
@@ -129,7 +129,7 @@ Column-zero positive decimal annotations such as `17|`, `17!|`, `@hashline`, `@m
 
 Batch every known change to one file in the same call. Every successful edit keeps the first line `Applied N operations.` and follows it with `@hashline-edit previous=consumed successor=<state>`. `successor=none` or `unavailable` includes `next=hashline_read`; `successor=attached` is immediately followed by the new snapshot page.
 
-Set `readback: true` for structural verification or a dependent follow-up edit. A successful result includes one contiguous successor page starting at the first post-edit hunk by default. `readbackOffset` selects a one-based post-edit start; requested `readbackLimit` accepts `1..100,000` and defaults to 1,000. Both fields require `readback:true`, and authoritative `maxOutputBytes` pagination may stop the page earlier with `partial=true` and `@more`. Only an attached page attested as delivered by the after-hook issues refs. There is no ID-only successor: if OpenCode truncates or changes the continuation, the edit remains applied, the receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
+Set `readback: true` to request structural verification or a dependent follow-up edit. It requests one contiguous successor page starting at the first post-edit hunk by default, but a successful mutation may report `successor=unavailable` instead of attaching it. `readbackOffset` selects a one-based post-edit start; requested `readbackLimit` accepts `1..100,000` and defaults to 1,000. Both fields require `readback:true`. The authoritative `maxOutputBytes` budget can stop rendering early: `@more` means before EOF, `@eof` means EOF was reached, and `partial=true` may accompany either. Only an attached page attested as delivered by the after-hook issues refs. There is no ID-only successor: if OpenCode truncates or changes the continuation, the edit remains applied, the receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
 
 Issued source ranges can also be transferred without echoing their contents:
 
@@ -151,9 +151,9 @@ Whole-file deletion and rename/move use the same issued snapshot without echoing
 { "operations": [{ "op": "move_file", "destinationPath": "src/renamed.ts" }] }
 ```
 
-A lifecycle operation must be the sole operation, uses `rebase: "none"`, requires complete BOF-to-EOF issued coverage, and rejects `readback: true`. The source must be a direct regular single-link file. `move_file` requires an absent destination under an existing stable parent on the same filesystem; it never overwrites or creates directories. After a move, read the destination before editing it. Move publication uses an exclusive hard link followed by source unlink, so an unlink failure can leave both exact names and returns `PARTIAL_PUBLICATION` instead of risking an automatic rollback.
+A lifecycle operation must be the sole operation, uses `rebase: "none"`, requires complete BOF-to-EOF issued coverage, and rejects `readback`, `readbackOffset`, and `readbackLimit`. The source must be a direct regular single-link file. `move_file` requires an absent destination under an existing stable parent on the same filesystem; it never overwrites or creates directories. After a move, read the destination before editing it. Move publication uses an exclusive hard link followed by source unlink, so an unlink failure can leave both exact names and returns `PARTIAL_PUBLICATION` instead of risking an automatic rollback. Inspect and reconcile both paths before any retry.
 
-`hashline_write` remains create-only. Omitted or false `createParents` keeps the strict existing-parent behavior. Explicit `createParents:true` freezes at most 64 missing directories from the deepest existing ancestor, authorizes and locks every directory plus the target, creates each directory exclusively from root to leaf, and then uses the existing staged no-clobber file publication. Once a directory exists, or a failed `mkdir` leaves its outcome ambiguous, any later failure returns `PARTIAL_PUBLICATION`, retains created state, and performs no rollback; inspect the tree before retrying. This option does not apply to `move_file`.
+`hashline_write` remains create-only. Omitted or false `createParents` requires an existing parent; a missing parent fails with `PATH_NOT_FOUND`. Explicit `createParents:true` freezes at most 64 missing directories from the deepest existing ancestor, authorizes and locks every directory plus the target, creates each directory exclusively from root to leaf, and then uses the existing staged no-clobber file publication. Once publication starts, an error may leave the target file and created directories present. After a directory exists, or a failed `mkdir` leaves its outcome ambiguous, any later failure returns `PARTIAL_PUBLICATION` and performs no rollback; inspect and reconcile the tree and target before retrying. This option does not apply to `move_file`.
 
 ### 3. Validate and publish
 
@@ -218,7 +218,7 @@ OpenCode accepts plugin options as the second tuple element:
 
 Unknown or inconsistent options put the plugin into a diagnostic fail-closed mode: native mutators remain hidden and every Better Hashline tool returns `CONFIG_INVALID`. Fix the configuration and restart OpenCode. `maxCacheBytes` must be at least three times `maxFileBytes`.
 
-Set `enforce: false` only for migration or A/B evaluation. It leaves native mutators enabled and changes the system instruction from required to preferred usage.
+Set `enforce: false` only for migration or A/B evaluation. It leaves native mutators enabled and exposes two separate workflows: use `hashline_read` only with `hashline_edit`; for native mutation of an existing file, use native `read` followed by native `edit`, `write`, or `apply_patch`. Native `write` or `apply_patch` may create an absent target without a preceding read. Never pass hashline annotations or snapshot IDs to native mutators.
 
 ### Experimental native aliases
 
@@ -239,7 +239,7 @@ configuration, schema, host, or surface changes, and a delivered and attested `h
 ```
 
 The mode still exposes unique `hashline_read` and create-only `hashline_write`; it never aliases
-native `write`. Native-shaped edit or patch calls reject with `INVALID_ARGUMENT`. Transport, schema, or
+native `write`. Alias mutation is restricted to source and destination paths inside the current worktree; authorized external mutation requires explicitly switching to the unique hashline surface and restarting. Better Hashline aliases require top-level `filePath`, `snapshotId`, and `operations`, accept only the documented optional controls, and reject native `oldString`/`newString` or `patchText` shapes with `INVALID_ARGUMENT`. Transport, schema, or
 session incompatibility fails closed without falling back to a builtin or to `hashline_edit`.
 The protocol marker name remains `native-aliases/v2`, but the expanded schemas change the canonical
 schema SHA-256 and protocol fingerprint. An identity change invalidates the process-local live epoch.
@@ -254,7 +254,7 @@ Native-alias `edit` and `apply_patch` calls are rejected while system guidance r
 
 Reads prepared for the same fingerprint and canonical worktree may reuse the current candidate authority. Preparing a differing identity retires active authority immediately; only the current candidate delivered and attested by `tool.execute.after` can commit. A snapshot's authority token must match the active authority, so stale, reordered, or ABA completions cannot bind or revive old IDs.
 
-No Better Hashline failure or Better Hashline resource limit requires abandoning the OpenCode transcript or task ID. Recover in the same task by retrying, obtaining a fresh delivered `hashline_read`, repairing paths or configuration, restarting the plugin or host as applicable and rereading, or explicitly configuring enforced `toolSurface: "hashline"` and restarting. That switch is explicit, never a silent fallback. This invariant is scoped to Better Hashline and does not cover loss of OpenCode's own session database.
+No Better Hashline failure or Better Hashline resource limit requires abandoning the OpenCode transcript or task ID. Recover in the same task using the action named by the error: retry only when it is explicitly safe, obtain a fresh delivered `hashline_read`, inspect and reconcile partially published paths before retrying, repair paths or configuration, restart the plugin or host as applicable and reread, or explicitly configure `enforce:true` with `toolSurface: "hashline"` and restart. That switch is explicit, never a silent fallback, and old snapshot IDs are not reused. This invariant is scoped to Better Hashline and does not cover loss of OpenCode's own session database.
 
 Run the credential-free clean-room verifier after installation and after every plugin-order or
 configuration change:

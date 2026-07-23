@@ -68,8 +68,18 @@ const EDIT_SEMANTICS_GUIDANCE =
   "replace removes the one-based inclusive startLine..endLine range; lines is the complete replacement; neighboring lines outside the range remain, so do not repeat retained context such as a closing delimiter unless intentional. Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.";
 
 const readArgumentShape = {
-  filePath: tool.schema.string().min(1).describe("Path relative to the session directory"),
-  offset: tool.schema.number().int().min(1).optional().describe("One-based first line"),
+  filePath: tool.schema
+    .string()
+    .min(1)
+    .describe(
+      "Existing UTF-8 file path. Relative paths resolve from the session directory; canonical targets outside allowed roots require external-directory authorization.",
+    ),
+  offset: tool.schema
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe("Optional one-based first line; defaults to 1."),
   limit: tool.schema
     .number()
     .int()
@@ -77,7 +87,7 @@ const readArgumentShape = {
     .max(ABSOLUTE_MAX_LOGICAL_LINES)
     .optional()
     .describe(
-      "Maximum rendered lines; defaults to 1000. Output remains bounded by maxOutputBytes; partial pages end with @more.",
+      "Maximum rendered lines; defaults to 1000. Output remains bounded by maxOutputBytes. @more means rendering stopped before EOF; @eof means the cursor reached EOF; partial=true may accompany either.",
     ),
 };
 const readArguments = tool.schema.object(readArgumentShape).strict();
@@ -103,20 +113,24 @@ function createEditSchema() {
         .int()
         .min(1)
         .optional()
-        .describe("Only for replace, copy_range, and move_range; one-based inclusive."),
+        .describe(
+          "Only for replace, copy_range, and move_range; first one-based inclusive source line, within the original snapshot and no later than endLine.",
+        ),
       endLine: tool.schema
         .number()
         .int()
         .min(1)
         .optional()
-        .describe("Only for replace, copy_range, and move_range; one-based inclusive."),
+        .describe(
+          "Only for replace, copy_range, and move_range; last one-based inclusive source line, no earlier than startLine and within the original snapshot.",
+        ),
       afterLine: tool.schema
         .number()
         .int()
         .min(0)
         .optional()
         .describe(
-          "Only for insert, copy_range, and move_range; 0 means before line 1. Copy may target its source; move forbids destinations strictly inside its source and rejects adjacent identity destinations.",
+          "Only for insert, copy_range, and move_range; 0..snapshot line count, where 0 means before line 1. Copy may target its source; move forbids destinations strictly inside its source and rejects adjacent identity destinations.",
         ),
       lines: tool.schema
         .array(tool.schema.string().max(16 * 1024 * 1024))
@@ -136,7 +150,7 @@ function createEditSchema() {
         .min(1)
         .optional()
         .describe(
-          "Only for move_file; relative paths resolve from the session directory, while absolute paths require external-directory authorization. Its parent must exist and the destination must be absent.",
+          "Only for move_file; relative paths resolve from the session directory, and canonical targets outside allowed roots require external-directory authorization. The parent must exist and the destination must be absent. Native aliases require the destination inside the current worktree.",
         ),
     })
     .strict()
@@ -144,8 +158,18 @@ function createEditSchema() {
       "Fields not listed for the selected op are invalid; replace_file and file lifecycle operations must be sole. One move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor must be issued and unchanged.",
     );
   const argumentShape = {
-    filePath: tool.schema.string().min(1),
-    snapshotId: tool.schema.string().regex(/^s_[A-Za-z0-9_-]{22}$/),
+    filePath: tool.schema
+      .string()
+      .min(1)
+      .describe(
+        "Source path for this snapshot; must resolve to the same canonical file as snapshotId. Native aliases require the source inside the current worktree.",
+      ),
+    snapshotId: tool.schema
+      .string()
+      .regex(/^s_[A-Za-z0-9_-]{22}$/)
+      .describe(
+        "Exact snapshot ID delivered by hashline_read for filePath; do not invent it or reuse it after a successful mutation.",
+      ),
     rebase: tool.schema
       .enum(["none", "unique"])
       .optional()
@@ -162,7 +186,7 @@ function createEditSchema() {
       .boolean()
       .optional()
       .describe(
-        "Use for structural verification or a follow-up edit; returns a bounded, potentially partial attested successor near the first hunk. File lifecycle operations reject readback.",
+        "Optional; defaults to false. For a text edit, true requests one bounded successor page for verification or follow-up, but the attachment can be unavailable after a successful mutation. Lifecycle operations reject readback, readbackOffset, and readbackLimit.",
       ),
     readbackOffset: tool.schema
       .number()
@@ -179,9 +203,15 @@ function createEditSchema() {
       .max(ABSOLUTE_MAX_LOGICAL_LINES)
       .optional()
       .describe(
-        "Only with readback:true for text edits. Maximum rendered lines in the one contiguous successor page; defaults to 1000. Output remains bounded by maxOutputBytes; partial pages end with @more.",
+        "Only with readback:true for text edits. Maximum rendered lines in the one contiguous successor page; defaults to 1000. Output remains bounded by maxOutputBytes. @more means rendering stopped before EOF; @eof means the cursor reached EOF; partial=true may accompany either.",
       ),
-    operations: tool.schema.array(editOperation).min(1).max(100),
+    operations: tool.schema
+      .array(editOperation)
+      .min(1)
+      .max(100)
+      .describe(
+        "Array of 1..100 flat operation objects. Every coordinate refers to the original immutable snapshot.",
+      ),
   };
   return {
     argumentShape,
@@ -193,9 +223,9 @@ const editSchema = createEditSchema();
 const editArgumentShape = editSchema.argumentShape;
 export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 
-export const hashlineEditDescription = `Atomically mutate one exact hashline_read snapshot. Batch text changes to this file, or use one sole file lifecycle operation. Pass top-level snapshotId and operations JSON; do not encode arguments as text. ${EDIT_SEMANTICS_GUIDANCE} copy reads pre-edit source. replace_file, delete_file, and move_file require rebase:none and complete issued coverage. delete_file removes the source; move_file requires destinationPath, an existing parent, and an absent same-filesystem destination. File lifecycle operations reject readback and never overwrite. Destructive writes may be adjacent but not overlap, except one move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor still requires exact issued freshness. Insert/copy destinations may touch a destructive endpoint, but may not lie inside a destructive span or share a destination. replace lines:[] deletes; insert forbids []; an empty file uses replace_file with lines:[],finalNewline:false. finalNewline is replace_file-only. lines:[""] is one empty logical line and may change only EOL bytes. Text readback:true returns one contiguous attested successor page for verification/follow-up; readbackOffset selects its one-based post-edit start, readbackLimit defaults to 1000; output remains bounded by maxOutputBytes, and partial pages say partial=true and end with @more. unique exactly relocates a still-retained snapshot after external changes; it cannot revive a consumed or unknown snapshot.`;
+export const hashlineEditDescription = `Mutate one exact hashline_read snapshot. Text batches publish one atomic replacement. File lifecycle operations are sole calls; move_file is nontransactional, and PARTIAL_PUBLICATION may leave both source and destination names present. Pass required top-level filePath, snapshotId, and operations JSON plus only the documented optional controls; do not encode arguments as text. ${EDIT_SEMANTICS_GUIDANCE} copy reads pre-edit source. replace_file, delete_file, and move_file require rebase:none and complete issued coverage. Lifecycle operations reject readback, readbackOffset, and readbackLimit and never overwrite. Destructive writes may be adjacent but not overlap; insert/copy destinations may touch a destructive endpoint but may not lie inside a destructive span or share a destination. Successful publication invalidates every retained snapshot for the affected session paths and returns a diff plus receipt. For text edits, readback:true requests one successor page, but the attachment can be unavailable; without an attached successor, run hashline_read before another mutation. After PARTIAL_PUBLICATION, inspect and reconcile every affected path before retrying.`;
 
-export const nativeAliasEditDescription = `${hashlineEditDescription} Native aliases: edit and apply_patch require a delivered, attested hashline_read and native-alias-session=bound. When bound, calls with disjoint complete source/destination path sets may run concurrently; overlapping path sets serialize.`;
+export const nativeAliasEditDescription = `Better Hashline alias; it does not accept native oldString/newString or patchText syntax. Wait for hashline_read's returned result before calling it; native-alias-session must be bound, and source and destination paths must be inside the current worktree. ${hashlineEditDescription}`;
 
 type SnapshotEditToolName = "hashline_edit" | "edit" | "apply_patch";
 
@@ -220,16 +250,23 @@ function createSnapshotEditTool(
 }
 
 const writeArgumentShape = {
-  filePath: tool.schema.string().min(1),
+  filePath: tool.schema
+    .string()
+    .min(1)
+    .describe(
+      "Absent target file path. Relative paths resolve from the session directory; canonical targets outside allowed roots require external-directory authorization.",
+    ),
   content: tool.schema
     .string()
     .max(16 * 1024 * 1024)
-    .describe("Complete file content"),
+    .describe(
+      "Complete UTF-8 text as one string; NUL, invalid Unicode, and control-heavy content are rejected.",
+    ),
   createParents: tool.schema
     .boolean()
     .optional()
     .describe(
-      "Default false. When true, create up to 64 missing parent directories through one fixed, approved no-rollback plan; after a directory exists or a mkdir outcome becomes ambiguous, failures return PARTIAL_PUBLICATION.",
+      "Default false: a missing parent fails with PATH_NOT_FOUND. true creates up to 64 missing parents through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
     ),
 };
 const writeArguments = tool.schema.object(writeArgumentShape).strict();
@@ -323,8 +360,70 @@ function firstNewFileHunkLine(diff: string): number {
   return Math.max(1, line);
 }
 
-function invalidArguments(toolName: string): never {
-  fail("INVALID_ARGUMENT", `Invalid ${toolName} arguments.`);
+type ValidationIssue = Record<string, unknown>;
+
+function validationPath(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0) return "arguments";
+  let result = "";
+  for (const part of value) {
+    if (typeof part === "number") result += `[${part}]`;
+    else if (typeof part === "string" && /^[A-Za-z_$][A-Za-z0-9_$-]*$/u.test(part)) {
+      result += result.length === 0 ? part : `.${part}`;
+    }
+  }
+  return result || "arguments";
+}
+
+function describeValidationIssue(toolName: string, error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("issues" in error)) return undefined;
+  const rawIssues = (error as { issues?: unknown }).issues;
+  if (!Array.isArray(rawIssues)) return undefined;
+  const issues = rawIssues.filter(
+    (issue): issue is ValidationIssue => typeof issue === "object" && issue !== null,
+  );
+  const issue = issues.find((candidate) => candidate.code === "unrecognized_keys") ?? issues[0];
+  if (!issue) return undefined;
+
+  const path = validationPath(issue.path);
+  if (issue.code === "unrecognized_keys" && Array.isArray(issue.keys)) {
+    const key = issue.keys
+      .filter(
+        (candidate): candidate is string =>
+          typeof candidate === "string" && /^[A-Za-z_$][A-Za-z0-9_$-]{0,63}$/u.test(candidate),
+      )
+      .sort()[0];
+    if (!key) return `An unsupported field is not accepted by ${toolName}.`;
+    const field = path === "arguments" ? key : `${path}.${key}`;
+    return `${field} is not accepted by ${toolName}.`;
+  }
+  if (issue.code === "invalid_type") {
+    const expected = typeof issue.expected === "string" ? issue.expected : "the documented type";
+    const label = ["array", "integer", "object"].includes(expected)
+      ? `an ${expected}`
+      : ["boolean", "number", "string"].includes(expected)
+        ? `a ${expected}`
+        : expected;
+    return `${path} must be ${label}.`;
+  }
+  if (issue.code === "too_big") {
+    const maximum = typeof issue.maximum === "number" ? ` of ${issue.maximum}` : "";
+    return `${path} exceeds its maximum${maximum}.`;
+  }
+  if (issue.code === "too_small") {
+    const minimum = typeof issue.minimum === "number" ? ` of ${issue.minimum}` : "";
+    return `${path} is below its minimum${minimum}.`;
+  }
+  if (issue.code === "invalid_format") return `${path} has an invalid format.`;
+  if (issue.code === "invalid_value") return `${path} is not an accepted value.`;
+  return `${path} is invalid.`;
+}
+
+function invalidArguments(toolName: string, error?: unknown): never {
+  const detail = describeValidationIssue(toolName, error) ?? `Invalid ${toolName} arguments.`;
+  const recovery = ["hashline_edit", "edit", "apply_patch"].includes(toolName)
+    ? "No mutation occurred; a valid supplied snapshot remains usable."
+    : "No mutation occurred.";
+  fail("INVALID_ARGUMENT", `${detail} ${recovery}`);
 }
 
 function rejectDisplayPrefix(match: HashlineDisplayPrefixMatch): never {
@@ -389,7 +488,10 @@ function parseTextOperations(
     for (const line of lines) {
       totalBytes += Buffer.byteLength(line, "utf8") + 2;
       if (totalBytes > maxFileBytes || totalLines > maxLines) {
-        fail("UNSUPPORTED_FILE", "Replacement payload exceeds the configured safety limits.");
+        fail(
+          "UNSUPPORTED_FILE",
+          `Replacement payload exceeds maxFileBytes=${maxFileBytes} or maxLines=${maxLines}. No publication occurred and the snapshot was not consumed; reduce the payload before retrying.`,
+        );
       }
     }
   }
@@ -647,7 +749,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
 
   function assertConfigured(): void {
     if (initializationError) {
-      fail("CONFIG_INVALID", initializationError);
+      fail(
+        "CONFIG_INVALID",
+        `${initializationError} File mutation and editable snapshot issuance are disabled. Do not bypass this state with shell commands or another mutation tool. Repair the configuration, restart, then run a fresh delivered hashline_read.`,
+      );
     }
   }
 
@@ -656,9 +761,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     fingerprint: string;
   } {
     if (aliasAvailabilityError || !aliasIdentity || !aliasFingerprint) {
+      const reason = aliasAvailabilityError ?? "Native alias protocol identity is unavailable.";
       fail(
         "TOOL_SURFACE_UNAVAILABLE",
-        aliasAvailabilityError ?? "Native alias protocol identity is unavailable.",
+        `${reason} File mutation and editable snapshot issuance are disabled. Do not bypass this state with shell commands or another mutation tool. Repair the host/plugin configuration, restart, then run a fresh delivered hashline_read.`,
       );
     }
     return { identity: aliasIdentity, fingerprint: aliasFingerprint };
@@ -770,14 +876,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const hashlineRead = tool({
     description:
       options.toolSurface === "native-aliases"
-        ? "Read a UTF-8 text file and prepare an exact process-local snapshot for Better Hashline's edit or apply_patch alias. A successful tool.execute.after delivery binds its epoch; pending execution alone does not. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited."
-        : "Read a UTF-8 text file and issue an exact snapshot for hashline_edit. Output lines use N|content; prefixes are not file content. Use native read instead for directories, media, PDFs, or inspection that will not be edited.",
+        ? "Read an existing UTF-8 text file for Better Hashline's edit or apply_patch alias and prepare a pending exact snapshot. Wait for the returned result; only successful delivery binds the session and makes N| lines editable. Output uses @hashline, N|, N!|, @more, and @eof; prefixes are annotations, not file content. An N!| line is preview-only and cannot be issued by smaller pagination; raise maxOutputBytes and reread if it can fit, otherwise stop for manual restructuring or an explicit configuration change. Native-alias mutation requires the target inside the current worktree; external snapshots are inspection-only for aliases. Use native read for directories, media, PDFs, or inspection that will not be edited."
+        : "Read an existing UTF-8 text file for hashline_edit and prepare a pending exact snapshot. Wait for the returned result; only successfully delivered N| lines become editable. Output uses @hashline, N|, N!|, @more, and @eof; prefixes are annotations, not file content. An N!| line is preview-only and cannot be issued by smaller pagination; raise maxOutputBytes and reread if it can fit, otherwise stop for manual restructuring or an explicit configuration change. Use native read for directories, media, PDFs, or inspection that will not be edited.",
     args: readArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
       throwIfAborted(context.abort);
       const parsed = readArguments.safeParse(rawArgs);
-      if (!parsed.success) invalidArguments("hashline_read");
+      if (!parsed.success) invalidArguments("hashline_read", parsed.error);
       const args = parsed.data;
       const binding =
         options.toolSurface === "native-aliases"
@@ -843,7 +949,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     assertConfigured();
     throwIfAborted(context.abort);
     const parsed = hashlineEditArgumentsSchema.safeParse(rawArgs);
-    if (!parsed.success) invalidArguments(toolName);
+    if (!parsed.success) invalidArguments(toolName, parsed.error);
     const args = parsed.data;
     const batch = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
     const rebase = args.rebase ?? "none";
@@ -855,7 +961,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       fail("INVALID_ARGUMENT", `${batch.kind} does not support unique rebase.`);
     }
     if (batch.kind !== "text" && (args.readback || hasReadbackWindow)) {
-      fail("INVALID_ARGUMENT", `${batch.kind} does not support readback.`);
+      fail(
+        "INVALID_ARGUMENT",
+        `${batch.kind} does not accept readback, readbackOffset, or readbackLimit. Remove them and retry with the same snapshot.`,
+      );
     }
     if (hasReadbackWindow && args.readback !== true) {
       fail("INVALID_ARGUMENT", "readbackOffset and readbackLimit require readback:true.");
@@ -899,12 +1008,19 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         toolName !== "hashline_edit" &&
         (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
       ) {
-        fail("UNSUPPORTED_FILE", "Native aliases cannot edit files outside the current worktree.");
+        fail(
+          "UNSUPPORTED_FILE",
+          'Native aliases require source files inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
+        );
       }
 
       const destination =
         batch.kind === "move_file"
-          ? await resolveNewFile(batch.destinationPath, context.directory)
+          ? await resolveNewFile(
+              batch.destinationPath,
+              context.directory,
+              "move_file never creates parent directories. Create the destination parent before retrying.",
+            )
           : undefined;
       const destinationShown = destination
         ? displayPath(displayRoot, destination.canonicalPath)
@@ -927,7 +1043,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             : "UNSUPPORTED_FILE",
           pathsAlias(resolved.canonicalPath, destination.canonicalPath)
             ? "move_file source and destination must be different paths."
-            : "Native aliases cannot move files outside the current worktree.",
+            : 'Native aliases require move_file destinations inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
         );
       }
 
@@ -1085,7 +1201,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       toolName !== "hashline_edit" &&
       (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
     ) {
-      fail("UNSUPPORTED_FILE", "Native aliases cannot edit files outside the current worktree.");
+      fail(
+        "UNSUPPORTED_FILE",
+        'Native aliases require source files inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
+      );
     }
     const scope = scopeFor(context);
     const snapshot = snapshots.pin(scope, args.snapshotId);
@@ -1234,18 +1353,21 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const hashlineWrite = tool({
     description:
       options.toolSurface === "native-aliases"
-        ? "CREATE ONLY: create a new UTF-8 file. Never call hashline_write after hashline_read, for an existing path, or to overwrite/edit content. This tool fails if any file, directory, or symlink already exists at the target. Missing parents require explicit createParents:true and may remain after PARTIAL_PUBLICATION. Use hashline_read followed by edit or apply_patch for every existing file."
-        : "Create a new UTF-8 file. This tool is create-only and fails if any file, directory, or symlink already exists at the target. Missing parents require explicit createParents:true and may remain after PARTIAL_PUBLICATION. Use hashline_edit for existing files.",
+        ? "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. A hashline_read of another path does not prohibit creation. For an existing target, use hashline_read followed by edit or apply_patch. Omitted/false createParents requires an existing parent and fails with PATH_NOT_FOUND otherwise; true may create up to 64 parents. After publication starts, an error can leave the target file and created directories present; inspect them before retrying."
+        : "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. For an existing target, use hashline_read followed by hashline_edit. Omitted/false createParents requires an existing parent and fails with PATH_NOT_FOUND otherwise; true may create up to 64 parents. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
     args: writeArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
       if (options.toolSurface === "native-aliases") assertAliasAvailable();
       throwIfAborted(context.abort);
       const parsed = writeArguments.safeParse(rawArgs);
-      if (!parsed.success) invalidArguments("hashline_write");
+      if (!parsed.success) invalidArguments("hashline_write", parsed.error);
       const args = parsed.data;
       if (Buffer.byteLength(args.content, "utf8") > options.maxFileBytes) {
-        fail("UNSUPPORTED_FILE", "The new file exceeds maxFileBytes.");
+        fail(
+          "UNSUPPORTED_FILE",
+          `The new file exceeds maxFileBytes=${options.maxFileBytes}. No publication occurred; reduce the content before retrying.`,
+        );
       }
       const bytes = encodeNewText(args.content);
       decodeTextDocument(bytes, options.maxLines);
@@ -1286,8 +1408,11 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                 plan,
                 bytes,
                 signal: context.abort,
-                consume: () =>
-                  snapshots.invalidateSessionPath(context.sessionID, plan.canonicalPath),
+                consume: () => {
+                  for (const mutationPath of plan.mutationPaths) {
+                    snapshots.invalidateSessionPath(context.sessionID, mutationPath);
+                  }
+                },
               });
             } catch (error) {
               if (
@@ -1313,7 +1438,11 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           context.abort,
         );
       }
-      const resolved = await resolveNewFile(args.filePath, context.directory);
+      const resolved = await resolveNewFile(
+        args.filePath,
+        context.directory,
+        "Missing parents are not created by default; pass createParents:true only if this write should create them.",
+      );
       await authorizeExternal(context, resolved);
       const shownPath = displayPath(
         await canonicalDisplayRoot(context.worktree, context.directory),
@@ -1391,7 +1520,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         assertConfigured();
         fail(
           "NATIVE_TOOL_DISABLED",
-          `Use hashline_edit for existing files or hashline_write for new files instead of ${hookInput.tool}.`,
+          `Use hashline_read followed by hashline_edit for an existing file, or hashline_write for a new file, instead of ${hookInput.tool}. Do not bypass this restriction with shell mutation.`,
         );
       }
       if (!options.enforce) return;
@@ -1400,14 +1529,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         fail(
           "NATIVE_TOOL_DISABLED",
           hookInput.tool === "write"
-            ? "Use hashline_write to create a new file; native write is disabled."
-            : "hashline_edit is unavailable on the native-aliases surface. Restart the plugin in this same session after changing surfaces, then rerun hashline_read, or use an enforced unique hashline fallback.",
+            ? "Use hashline_write only to create an absent file; native write is disabled."
+            : 'hashline_edit is unavailable on the native-aliases surface. Restart after changing surfaces and run a fresh hashline_read, or explicitly configure enforce:true with toolSurface:"hashline", restart, and reread. Never fall back silently.',
         );
       }
       if (hookInput.tool !== "edit" && hookInput.tool !== "apply_patch") return;
       assertConfigured();
       const parsed = hashlineEditArgumentsSchema.safeParse(output.args);
-      if (!parsed.success) invalidArguments(hookInput.tool);
+      if (!parsed.success) invalidArguments(hookInput.tool, parsed.error);
       await assertAliasSnapshotAdmission(
         hookInput.sessionID,
         input.directory,
@@ -1578,31 +1707,36 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     async "experimental.chat.system.transform"(hookInput, output) {
       let guidance: string;
       if (initializationError) {
-        guidance = `Better Hashline configuration is invalid and file mutation is disabled: ${initializationError}`;
+        guidance = `Better Hashline configuration is invalid and file mutation is disabled: ${initializationError} Do not bypass this state with shell commands or another mutation tool. Repair the configuration, restart, then begin with a fresh delivered hashline_read.`;
       } else if (options.toolSurface === "native-aliases" && aliasAvailabilityError) {
-        guidance = `Better Hashline native aliases are unavailable and file mutation is disabled: ${aliasAvailabilityError}`;
+        guidance = `Better Hashline native aliases are unavailable and file mutation is disabled: ${aliasAvailabilityError} Do not bypass this state with shell commands or another mutation tool. Repair the host/plugin configuration, restart, then begin with a fresh delivered hashline_read.`;
       } else if (options.toolSurface === "native-aliases") {
         const state = await aliasSessionStatus(hookInput.sessionID);
         const concurrency =
           state === "bound"
-            ? "native-alias-session=bound. Alias calls with disjoint complete source/destination path sets may run concurrently; alias calls with overlapping path sets serialize. Calls remain independently approved and non-transactional."
+            ? "native-alias-session=bound. Alias calls with disjoint complete source/destination path sets may run concurrently; overlapping path sets serialize. Calls remain independently approved; move_file remains nontransactional."
             : state === "mismatch"
-              ? "native-alias-session=mismatch. Rerun hashline_read in this same session and use only the snapshot ID it returns; old snapshot IDs cannot be revived."
-              : "native-alias-session=unbound. Do not issue edit or apply_patch until a hashline_read result has been delivered and attested; rerun hashline_read in this same session and wait for its result.";
-        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. Pass top-level snapshotId and operations JSON. ${EDIT_SEMANTICS_GUIDANCE} hashline_write is create-only; native write and hashline_edit are disabled. Do not edit via shell. Hashline line/control prefixes are annotations; set allowHashlinePrefixes:true in the initial call only for literal source text. After configuration, schema, host, or surface changes, restart the plugin in this same session and rerun hashline_read, or use an enforced unique hashline fallback. Better Hashline must be the last plugin defining these aliases.`;
+              ? "native-alias-session=mismatch. Run hashline_read again and wait for its returned result; use only that new snapshot ID, because old IDs cannot be revived."
+              : "native-alias-session=unbound. Do not call edit or apply_patch. Run hashline_read and wait for its returned result; only successful delivery binds the session.";
+        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. These aliases accept Better Hashline filePath/snapshotId/operations JSON, never native oldString/newString or patchText syntax, and require source and destination paths inside the current worktree. hashline_write is create-only; omitted/false createParents requires an existing parent. Native write and hashline_edit are disabled. Do not mutate files via shell. Hashline line/control prefixes are annotations; allowHashlinePrefixes:true is only for intentional source text. After configuration, schema, host, or surface changes, restart and run a fresh hashline_read; alternatively, explicitly configure enforce:true with toolSurface:"hashline", restart, and reread. Never fall back silently or reuse old IDs. Better Hashline must be the last plugin defining these aliases.`;
       } else if (options.enforce) {
-        guidance = `Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. ${EDIT_SEMANTICS_GUIDANCE} Use hashline_write only to create a new file; pass createParents:true only when missing parents must be created, and inspect the tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.`;
+        guidance = `Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. ${EDIT_SEMANTICS_GUIDANCE} Use hashline_write only to create an absent file; omitted/false createParents requires an existing parent, while true intentionally creates missing parents. Inspect the target and tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.`;
       } else {
-        guidance = `Better Hashline is available. Prefer hashline_read followed by hashline_edit for existing UTF-8 text files, and hashline_write for new files; missing parents require explicit createParents:true. ${EDIT_SEMANTICS_GUIDANCE} Native editing tools remain enabled by configuration.`;
+        guidance = `Better Hashline migration mode exposes two separate workflows. Prefer hashline_read followed by hashline_edit for an existing UTF-8 text file, and hashline_write for a new file; omitted/false createParents requires an existing parent. When a native mutator changes an existing file, first use native read. Native write or apply_patch may create an absent target without a preceding read. Never pass hashline output or snapshot IDs to native mutators. ${EDIT_SEMANTICS_GUIDANCE}`;
       }
       output.system.push(guidance);
     },
     async "tool.definition"(input, output) {
       if (input.toolID === "read") {
-        output.description +=
-          options.toolSurface === "native-aliases"
-            ? "\nFor any text file that may be edited with Better Hashline's edit or apply_patch alias, use hashline_read instead so the edit has an exact snapshot."
-            : "\nFor any text file that may be edited, use hashline_read instead so the edit has an exact snapshot.";
+        output.description += initializationError
+          ? "\nBetter Hashline is fail-closed because its configuration is invalid. Editable snapshot issuance and file mutation are unavailable. Do not bypass this state; repair the configuration, restart, then run a fresh hashline_read."
+          : options.toolSurface === "native-aliases" && aliasAvailabilityError
+            ? "\nBetter Hashline is fail-closed because native aliases are unavailable. Editable snapshot issuance and file mutation are unavailable. Do not bypass this state; repair the host/plugin configuration, restart, then run a fresh hashline_read."
+            : !options.enforce
+              ? "\nMigration mode has two separate workflows: use native read before a native mutator changes an existing file; native write or apply_patch may create an absent target without a preceding read. Use hashline_read only with hashline_edit, and never pass hashline output or snapshot IDs to native mutators."
+              : options.toolSurface === "native-aliases"
+                ? "\nFor any worktree text file that may be changed with Better Hashline's edit or apply_patch alias, use hashline_read and wait for its returned result first."
+                : "\nFor any text file that may be edited, use hashline_read instead so the edit has an exact snapshot.";
       }
     },
     async dispose() {

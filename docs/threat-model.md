@@ -122,20 +122,27 @@ When failed exact relocation detects only delimiter changes at the original sele
 it adds a reread explanation but still returns `TARGET_CHANGED`; it does not normalize or fuzzy-match.
 
 File lifecycle operations are not text transfers. They are sole, strict operations planned outside
-`planEdits`; line fields, readback, unique relocation, overwrite, parent creation, and cross-filesystem
-movement are unavailable. Their exact delete/move patch and v2 metadata are immutable across
-approval. Delete revalidates the direct terminal binding before unlink. Move publishes destination
-first with a verified hard link and can therefore truthfully report a nontransactional state in
-which both names remain.
+`planEdits`; line fields, every readback field, unique relocation, overwrite, parent creation, and
+cross-filesystem movement are unavailable. Their exact delete/move patch and v2 metadata are
+immutable across approval. Delete revalidates the direct terminal binding before unlink. Move
+publishes destination first with a verified hard link and can therefore truthfully report a
+nontransactional state in which both names remain. After `PARTIAL_PUBLICATION`, both paths must be
+inspected and reconciled before any retry.
+
+Native aliases accept only the Better Hashline argument shape and restrict source and destination
+mutation to the current worktree. Authorized external paths require the unique hashline surface;
+alias admission never broadens filesystem authorization.
 
 `hashline_write` parent creation is separate from lifecycle movement. Omitted/false
-`createParents` stays strict; explicit `true` fixes the deepest existing ancestor and at most 64
-missing directories before permission, authorizes and locks every directory plus the target, and
-uses exclusive root-to-leaf creation before existing staged no-clobber publication. Once the first
-directory exists, or a failed `mkdir` leaves its outcome ambiguous, a failure is reported as
-`PARTIAL_PUBLICATION` with no automatic rollback. The error omits requested and canonical host roots,
-and the native-alias live epoch is unbound. After inspecting and repairing the paths, a fresh delivered
-`hashline_read` can rebind in the same session; old snapshot IDs remain unusable.
+`createParents` requires an existing parent and fails with `PATH_NOT_FOUND` when it is missing.
+Explicit `true` fixes the deepest existing ancestor and at most 64 missing directories before
+permission, authorizes and locks every directory plus the target, and uses exclusive root-to-leaf
+creation before existing staged no-clobber publication. Once the first directory exists, or a failed
+`mkdir` leaves its outcome ambiguous, a failure is reported as `PARTIAL_PUBLICATION` with no
+automatic rollback; the target file may also be committed. The error omits requested and canonical
+host roots and unbinds the native-alias live epoch. Inspect and reconcile directories and target
+before retrying; a fresh delivered `hashline_read` can then rebind in the same session, while old
+snapshot IDs remain unusable.
 
 ## Metadata
 

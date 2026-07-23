@@ -620,11 +620,13 @@ function isMalformedState(value: unknown, editTool: VerificationCaseReport["edit
           patchText: `*** Begin Patch\n*** Update File: malformed.txt\n@@\n-${PRIVATE_CANARY}\n+changed\n*** End Patch`,
         }
       : { filePath: "malformed.txt", newString: "changed", oldString: PRIVATE_CANARY };
+  const rejectedField = editTool === "apply_patch" ? "patchText" : "newString";
   return (
     state !== undefined &&
     hasExactKeys(state, ["error", "input", "status"]) &&
     state.status === "error" &&
-    state.error === `INVALID_ARGUMENT: Invalid ${editTool} arguments.` &&
+    state.error ===
+      `INVALID_ARGUMENT: ${rejectedField} is not accepted by ${editTool}. No mutation occurred; a valid supplied snapshot remains usable.` &&
     sameJson(state.input, input)
   );
 }
@@ -671,7 +673,8 @@ function isNoClobberState(value: unknown): boolean {
     state !== undefined &&
     hasExactKeys(state, ["error", "input", "status"]) &&
     state.status === "error" &&
-    state.error === "TARGET_EXISTS: The target already exists." &&
+    state.error ===
+      "TARGET_EXISTS: The target already exists; create and move operations never overwrite. Inspect it and choose an absent target." &&
     isFileOperationInput(
       state.input,
       LIFECYCLE_NO_CLOBBER_PATH,
@@ -894,7 +897,7 @@ export function assertFullVerificationReport(
     !sameJson(writeRequired, ["filePath", "content"]) ||
     !sameJson(record(writeProperties.createParents), {
       description:
-        "Default false. When true, create up to 64 missing parent directories through one fixed, approved no-rollback plan; after a directory exists or a mkdir outcome becomes ambiguous, failures return PARTIAL_PUBLICATION.",
+        "Default false: a missing parent fails with PATH_NOT_FOUND. true creates up to 64 missing parents through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
       type: "boolean",
     })
   ) {

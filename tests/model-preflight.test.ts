@@ -359,10 +359,11 @@ const caseReport = (
           patchText: `*** Begin Patch\n*** Update File: malformed.txt\n@@\n-${privateCanary}\n+changed\n*** End Patch`,
         }
       : { filePath: "malformed.txt", newString: "changed", oldString: privateCanary };
+  const rejectedField = editTool === "apply_patch" ? "patchText" : "newString";
   const metadataSnapshot = canonicalJson([
     {
       state: {
-        error: `INVALID_ARGUMENT: Invalid ${editTool} arguments.`,
+        error: `INVALID_ARGUMENT: ${rejectedField} is not accepted by ${editTool}. No mutation occurred; a valid supplied snapshot remains usable.`,
         input: malformedInput,
         status: "error",
       },
@@ -394,7 +395,8 @@ const caseReport = (
     readEvent("lifecycle-no-clobber.txt", lifecycleNoClobberBytes),
     {
       state: {
-        error: "TARGET_EXISTS: The target already exists.",
+        error:
+          "TARGET_EXISTS: The target already exists; create and move operations never overwrite. Inspect it and choose an absent target.",
         input: operationInput("lifecycle-no-clobber.txt", "move_file", "lifecycle-occupied.txt"),
         status: "error",
       },

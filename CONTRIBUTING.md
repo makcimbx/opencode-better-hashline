@@ -51,13 +51,18 @@ afterward, and no rollback.
 Omitted or false `createParents` must remain strict, and `move_file` must never create parents.
 Read and readback tests must cover requested `limit` and `readbackLimit` values across the public
 `1..100,000` range, the 1,000-line default, and authoritative `maxOutputBytes` pagination (40 KiB
-by default, configurable to at most 45 KiB), with byte-limited partial pages ending in `@more`.
+by default and at most 45 KiB when configured). Byte-limited pages use `@more` only before EOF;
+`@eof` can coexist with `partial=true` when preview-only lines leave incomplete editable evidence.
 Readback remains one contiguous, one-based, text-only delivered page; undelivered or ID-only
 successor authority must be rejected. Coverage diagnostics must aggregate missing ranges and boundary
 requirements while recommending conservative reads of at most 1,000 lines. Replacement tests must prove
 that `startLine..endLine` is inclusive, `lines` is the complete replacement, outside neighbors remain,
 and every operation uses immutable original-snapshot coordinates. Conflict tests must preserve stable
 codes and deterministic zero-based operation-pair suffixes.
+
+Use [`docs/tool-contract-guidelines.md`](docs/tool-contract-guidelines.md) for every model-visible
+tool, schema, system-guidance, receipt, or recovery-message change. Apply its rubric across all
+configured surfaces and preserve phase-correct error recovery.
 
 Do not replace fail-closed behavior with fuzzy matching, silent fallback, overwrite, unplanned or
 recursive parent creation, or destructive rollback merely to improve a success-rate benchmark.
