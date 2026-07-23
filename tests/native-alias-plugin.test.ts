@@ -598,7 +598,7 @@ describe("native alias argument and mutation contract", () => {
   });
 
   for (const surface of ["edit", "apply_patch"] as const) {
-    test(`${surface} reaches the shared snapshot executor and emits renderer metadata`, async () => {
+    test(`${surface} reaches the shared executor and infers limit-only readback`, async () => {
       await writeFile(join(root, "file.txt"), "one\ntwo\nthree\n");
       const asks: AskRecord[] = [];
       const metadataUpdates: Array<Record<string, unknown>> = [];
@@ -622,8 +622,6 @@ describe("native alias argument and mutation contract", () => {
       const readResult = await issueSnapshot(value, toolContext, "file.txt");
       const args = {
         ...replaceArgs("file.txt", String(readResult.metadata.snapshotId)),
-        readback: true,
-        readbackOffset: 2,
         readbackLimit: 1,
       };
       currentInput = args;
@@ -644,8 +642,8 @@ describe("native alias argument and mutation contract", () => {
       expect(result.output).toContain(
         "Applied 1 operation.\n@hashline-edit previous=consumed successor=attached\n@hashline snapshot=",
       );
-      expect(result.output).toContain("2|TWO");
-      expect(result.output).not.toContain("1|one");
+      expect(result.output).toContain("1|one");
+      expect(result.output).not.toContain("2|TWO");
       expect(result.output).not.toContain("3|three");
       expect(result.output).toContain("partial=true");
       expect(result.metadata.hashlinePending).toBeUndefined();
@@ -1162,7 +1160,6 @@ describe("native alias argument and mutation contract", () => {
           {
             filePath: "partial-parent/inner/created.txt",
             content: "created\n",
-            createParents: true,
           },
           toolContext,
         ),
@@ -1216,12 +1213,12 @@ describe("native alias argument and mutation contract", () => {
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe("one\ntwo\n");
   });
 
-  test("invalidates byte-identical targets recreated by strict and parent-creating writes", async () => {
+  test("invalidates byte-identical targets recreated with and without new parents", async () => {
     const { value } = await aliasHarness();
     const { edit, hashlineWrite } = aliasRegistry(value);
     const cases = [
-      { filePath: "strict-recreated.txt", createParents: false },
-      { filePath: "parents/recreated.txt", createParents: true },
+      { filePath: "existing-parent-recreated.txt", removeParent: false },
+      { filePath: "parents/recreated.txt", removeParent: true },
     ];
 
     for (const [index, entry] of cases.entries()) {
@@ -1230,20 +1227,13 @@ describe("native alias argument and mutation contract", () => {
       await writeFile(absolutePath, "one\ntwo\n");
       const toolContext = context({ sessionID: `recreated-${index}` });
       const stale = await issueSnapshot(value, toolContext, entry.filePath);
-      if (entry.createParents) {
+      if (entry.removeParent) {
         await rm(join(root, "parents"), { recursive: true });
       } else {
         await rm(absolutePath);
       }
 
-      await hashlineWrite.execute(
-        {
-          filePath: entry.filePath,
-          content: "one\ntwo\n",
-          ...(entry.createParents ? { createParents: true } : {}),
-        },
-        toolContext,
-      );
+      await hashlineWrite.execute({ filePath: entry.filePath, content: "one\ntwo\n" }, toolContext);
       await expect(
         edit.execute(replaceArgs(entry.filePath, String(stale.metadata.snapshotId)), toolContext),
       ).rejects.toThrow("SNAPSHOT_UNKNOWN:");
@@ -1644,7 +1634,6 @@ describe("native alias live epoch recovery", () => {
           {
             filePath: "partial-during-read/inner/created.txt",
             content: "created\n",
-            createParents: true,
           },
           toolContext,
         ),

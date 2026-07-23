@@ -197,11 +197,7 @@ function expectedNestedCreationEvidence() {
   const diff = createFilePatch(target, NESTED_CREATE_BYTES);
   return {
     creation: {
-      input: {
-        content: NESTED_CREATE_BYTES,
-        createParents: true,
-        filePath: NESTED_CREATE_PATH,
-      },
+      input: { content: NESTED_CREATE_BYTES, filePath: NESTED_CREATE_PATH },
       metadata: { created: true, createdDirectories: directories, diff, truncated: false },
       output: "Created 2 parent directories and the file. Use hashline_read before editing it.",
       status: "completed",
@@ -271,7 +267,7 @@ function expectedReadbackEvidence(editTool: VerificationCaseReport["editTool"]) 
       input: editInput(
         READBACK_PATH,
         [{ endLine: 10, lines: ["readback-changed"], op: "replace", startLine: 10 }],
-        { readback: true, readbackLimit: 5, readbackOffset: 8 },
+        { readbackLimit: 5, readbackOffset: 8 },
       ),
       output: readbackOutput,
       pendingRemoved: true,
@@ -893,15 +889,10 @@ export function assertFullVerificationReport(
   if (
     !writeSchemaRecord ||
     !writeProperties ||
-    !hasExactKeys(writeProperties, ["content", "createParents", "filePath"]) ||
-    !sameJson(writeRequired, ["filePath", "content"]) ||
-    !sameJson(record(writeProperties.createParents), {
-      description:
-        "Default false: a missing parent fails with PATH_NOT_FOUND. true creates up to 64 missing parents through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
-      type: "boolean",
-    })
+    !hasExactKeys(writeProperties, ["content", "filePath"]) ||
+    !sameJson(writeRequired, ["filePath", "content"])
   ) {
-    throw new Error("Verifier write schema does not expose optional boolean createParents.");
+    throw new Error("Verifier write schema does not expose the exact create-only fields.");
   }
   const writeSchemaSha256 = jsonSha256(writeSchema);
   const finalBytesSha256 = sha256(VERIFIER_RENDERED_BYTES);

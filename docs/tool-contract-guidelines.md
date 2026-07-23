@@ -60,6 +60,12 @@ states out of the schema when provider-compatible validation can express them.
   partially.
 - Describe canonical authorization behavior rather than inferring it from relative
   or absolute path syntax.
+- Present `hashline_write` as a strict `filePath`/`content` create-only call that automatically
+  plans zero to 64 missing parents; never ask callers to opt into parent creation.
+- For text readback, state that either window implies the request, explicit `false` conflicts with a
+  window, and lifecycle operations reject `true` and all windows.
+- For `replace_file`, distinguish non-empty newline-state inheritance from empty `lines`, which infer
+  `finalNewline:false` and still reject explicit `true`.
 
 ## Recovery Matrix
 
@@ -91,10 +97,11 @@ For every model-visible contract change:
 5. Keep retained benchmark JSON and closed pilot identities unchanged. New model
    evaluation requires a new versioned task identity and explicit cost approval.
 
-High-value held-out recovery scenarios include existing-file routing, intentional
-`createParents:true` retry, immutable batch coordinates, forbidden-field repair,
-complete-coverage lifecycle recovery, no-clobber move recovery, stale versus unique
-rebase, alias binding, partial move reconciliation, and partial parent creation.
+High-value held-out recovery scenarios include existing-file routing, strict two-field creation with
+automatic zero/multi-parent plans and obsolete-field rejection, inferred readback windows and the
+explicit-false conflict, empty-file newline inference, immutable batch coordinates, forbidden-field
+repair, complete-coverage lifecycle recovery, no-clobber move recovery, stale versus unique rebase,
+alias binding, partial move reconciliation, and partial parent creation.
 
 ## Sources
 

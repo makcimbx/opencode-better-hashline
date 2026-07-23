@@ -106,7 +106,7 @@ Coverage diagnostics may suggest following `@more` with calls capped at a conser
 {
   "filePath": "src/client.ts",
   "snapshotId": "s_J7yi7wDyv3j9xQ2zP5kL8A",
-  "readback": true,
+  "readbackLimit": 100,
   "operations": [
     {
       "op": "replace",
@@ -125,11 +125,13 @@ Coverage diagnostics may suggest following `@more` with calls capped at a conser
 
 `replace` removes the exact one-based inclusive `startLine..endLine` range, and `lines` is the complete replacement; neighboring lines outside the range remain, so do not repeat retained context unless intentional. `lines: []` deletes the range. `lines: [""]` supplies one empty logical-line value; at an unterminated EOF this can add only the final delimiter rather than a phantom line. Payload lines may not contain embedded CR or LF characters.
 
+For a sole `replace_file`, omitting `finalNewline` preserves the snapshot state when `lines` is non-empty. `lines: []` alone writes an empty file by inferring `finalNewline:false`; explicit `true` with an empty payload remains invalid.
+
 Column-zero positive decimal annotations such as `17|`, `17!|`, `@hashline`, `@more`, `@eof`, `@note`, and `@hashline-edit` are rejected in model-supplied payload lines. Set top-level `allowHashlinePrefixes: true` in the initial call only when that exact prefix is intentional source content. Numeric diagnostics are bounded to `N|` or `N!|`; the renderer never emits `0|` or zero-padded numbers. Native aliases persist this failure as a completed non-mutating terminal result for offline verifier and model-trace evidence. That persisted result does not establish live edit authority; after a restart, continuation requires a fresh delivered and attested `hashline_read`.
 
 Batch every known change to one file in the same call. Every successful edit keeps the first line `Applied N operations.` and follows it with `@hashline-edit previous=consumed successor=<state>`. `successor=none` or `unavailable` includes `next=hashline_read`; `successor=attached` is immediately followed by the new snapshot page.
 
-Set `readback: true` to request structural verification or a dependent follow-up edit. It requests one contiguous successor page starting at the first post-edit hunk by default, but a successful mutation may report `successor=unavailable` instead of attaching it. `readbackOffset` selects a one-based post-edit start; requested `readbackLimit` accepts `1..100,000` and defaults to 1,000. Both fields require `readback:true`. The authoritative `maxOutputBytes` budget can stop rendering early: `@more` means before EOF, `@eof` means EOF was reached, and `partial=true` may accompany either. Only an attached page attested as delivered by the after-hook issues refs. There is no ID-only successor: if OpenCode truncates or changes the continuation, the edit remains applied, the receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
+Set `readback: true` to request structural verification or a dependent follow-up edit with the default window. Supplying `readbackOffset` or `readbackLimit` also requests the same one contiguous successor page, so no separate flag is needed; explicit `readback:false` with either window is invalid. The page starts at the first post-edit hunk and requests 1,000 lines by default; `readbackOffset` selects a one-based start and `readbackLimit` accepts `1..100,000`. A successful mutation may report `successor=unavailable` instead of attaching it. The authoritative `maxOutputBytes` budget can stop rendering early: `@more` means before EOF, `@eof` means EOF was reached, and `partial=true` may accompany either. Only an attached page attested as delivered by the after-hook issues refs. There is no ID-only successor: if OpenCode truncates or changes the continuation, the edit remains applied, the receipt changes to `successor=unavailable`, and a normal `hashline_read` is required.
 
 Issued source ranges can also be transferred without echoing their contents:
 
@@ -151,9 +153,11 @@ Whole-file deletion and rename/move use the same issued snapshot without echoing
 { "operations": [{ "op": "move_file", "destinationPath": "src/renamed.ts" }] }
 ```
 
-A lifecycle operation must be the sole operation, uses `rebase: "none"`, requires complete BOF-to-EOF issued coverage, and rejects `readback`, `readbackOffset`, and `readbackLimit`. The source must be a direct regular single-link file. `move_file` requires an absent destination under an existing stable parent on the same filesystem; it never overwrites or creates directories. After a move, read the destination before editing it. Move publication uses an exclusive hard link followed by source unlink, so an unlink failure can leave both exact names and returns `PARTIAL_PUBLICATION` instead of risking an automatic rollback. Inspect and reconcile both paths before any retry.
+A lifecycle operation must be the sole operation, uses `rebase: "none"`, requires complete BOF-to-EOF issued coverage, and never returns successor readback. It rejects `readback:true`, `readbackOffset`, and `readbackLimit`. The source must be a direct regular single-link file. `move_file` requires an absent destination under an existing stable parent on the same filesystem; it never overwrites or creates directories. After a move, read the destination before editing it. Move publication uses an exclusive hard link followed by source unlink, so an unlink failure can leave both exact names and returns `PARTIAL_PUBLICATION` instead of risking an automatic rollback. Inspect and reconcile both paths before any retry.
 
-`hashline_write` remains create-only. Omitted or false `createParents` requires an existing parent; a missing parent fails with `PATH_NOT_FOUND`. Explicit `createParents:true` freezes at most 64 missing directories from the deepest existing ancestor, authorizes and locks every directory plus the target, creates each directory exclusively from root to leaf, and then uses the existing staged no-clobber file publication. Once publication starts, an error may leave the target file and created directories present. After a directory exists, or a failed `mkdir` leaves its outcome ambiguous, any later failure returns `PARTIAL_PUBLICATION` and performs no rollback; inspect and reconcile the tree and target before retrying. This option does not apply to `move_file`.
+`hashline_write` remains create-only; call its strict schema with only `filePath` and `content`. Every call freezes a plan from the deepest existing ancestor and automatically creates at most 64 missing directories. Every planned directory and the target are authorized and locked, missing directories are created exclusively from root to leaf, and the file uses staged no-clobber publication. With zero missing directories, the same path simply publishes the file without running `mkdir`.
+
+Once the first directory exists, or a failed `mkdir` leaves its outcome ambiguous, any later failure returns `PARTIAL_PUBLICATION` and performs no rollback; created directories and the target file may remain. The result invalidates affected snapshots and unbinds a native-alias live epoch. Inspect and reconcile the tree and target before retrying, then use a fresh delivered `hashline_read` before further alias mutation; old snapshot IDs remain unusable. `move_file` still requires an existing parent and never creates directories.
 
 ### 3. Validate and publish
 
@@ -303,11 +307,11 @@ Better Hashline therefore separates model-facing addressing from server-side aut
 ## Evidence
 
 The latest retained model-free JSON is the immutable
-[schema-v7 edit-protocol UX record](benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json).
+[schema-v8 default-simplification record](benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json).
 Its 29-case corpus covers exact, stale, collision, ambiguity, boundary, overlap, encoding, transfer,
-and composed-move behavior. The schema-v6 lifecycle, schema-v5, 15-case, and 21-case records remain
-immutable historical evidence. Comparison arms are deliberately small protocol simulations, not
-complete implementations of third-party tools. The retained schema-v7 output is:
+and composed-move behavior. The schema-v7, schema-v6 lifecycle, schema-v5, 15-case, and 21-case
+records remain immutable historical evidence. Comparison arms are deliberately small protocol
+simulations, not complete implementations of third-party tools. The retained schema-v8 output is:
 
 | Adapter | Unsafe accepts | False rejects |
 | --- | ---: | ---: |
@@ -318,7 +322,7 @@ complete implementations of third-party tools. The retained schema-v7 output is:
 | 8-bit endpoint hashes | 6 | 4 |
 | 16-bit endpoint hashes | 5 | 4 |
 
-The full four-outcome counts are strict `6/18/5/0`, unique `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, 8-bit endpoints `7/12/4/6`, and 16-bit endpoints `7/13/4/5` (`exact_apply/safe_reject/false_reject/unsafe_accept`). This corpus tests in-memory protocol mechanics only; it does not exercise OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; the retained schema-v7 record is not a paid/model-quality claim. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
+The full four-outcome counts are strict `6/18/5/0`, unique `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, 8-bit endpoints `7/12/4/6`, and 16-bit endpoints `7/13/4/5` (`exact_apply/safe_reject/false_reject/unsafe_accept`). This corpus tests in-memory protocol mechanics only; it does not exercise OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; the retained schema-v8 record is not a paid/model-quality claim. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
 
 ```sh
 bun run bench
@@ -347,7 +351,7 @@ The custom read tool intentionally does not imitate OpenCode's native media atta
 - There is an unavoidable check-to-rename window against hostile external writers; this is not kernel CAS.
 - A one-file batch is validation-atomic, but there is no multi-file transaction.
 - Rename atomicity, directory durability, ACLs, xattrs, hardlinks, network filesystems, and Windows open-handle behavior vary by platform.
-- Create-only `hashline_write` requires same-directory hard-link support for no-replace publication. With `createParents:true`, created directories or even the final file may remain after `PARTIAL_PUBLICATION`; no rollback is attempted. A detected race after the file link can leave the new file committed, but returns failure and never deletes a possibly newer writer's path.
+- Create-only `hashline_write` requires same-directory hard-link support for no-replace publication. Automatically created directories or even the final file may remain after `PARTIAL_PUBLICATION`; no rollback is attempted. A detected race after the file link can leave the new file committed, but returns failure and never deletes a possibly newer writer's path.
 - Executable mode and ownership are preserved where supported; all metadata preservation is not promised.
 - `enforce` blocks OpenCode's native mutator tool IDs, but it does not sandbox shell commands or other plugins.
 - Native aliases cannot attest final registry ownership or prevent later hooks from mutating renderer metadata.

@@ -34,9 +34,11 @@ function digest(value: string | Uint8Array): string {
 
 type JsonSchemaNode = {
   enum?: string[] | undefined;
+  description?: string | undefined;
   items?: JsonSchemaNode | undefined;
   properties?: Record<string, JsonSchemaNode> | undefined;
   required?: string[] | undefined;
+  type?: string | undefined;
 };
 
 function rawEditSchemaFixtureWireSize(): {
@@ -86,10 +88,14 @@ function rawWriteSchemaFixtureWireSize(): {
 } {
   const currentParameters = z.toJSONSchema(hashlineWriteArgumentsSchema);
   const baselineParameters = structuredClone(currentParameters) as JsonSchemaNode;
-  if (!baselineParameters.properties?.createParents) {
+  if (!baselineParameters.properties) {
     throw new Error("Unexpected hashline_write raw JSON Schema fixture shape.");
   }
-  delete baselineParameters.properties.createParents;
+  baselineParameters.properties.createParents = {
+    description:
+      "Default false: a missing parent fails with PATH_NOT_FOUND. true creates up to 64 missing parents through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
+    type: "boolean",
+  };
   const encoder = new TextEncoder();
   const legacyBytes = encoder.encode(JSON.stringify(baselineParameters)).byteLength;
   const currentBytes = encoder.encode(JSON.stringify(currentParameters)).byteLength;
@@ -149,7 +155,7 @@ if (
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 7,
+  schemaVersion: 8,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -176,11 +182,11 @@ const result = {
     operationSchemaWireSize:
       "Exact compact UTF-8 JSON bytes for the hashline_edit description plus raw z.toJSONSchema fixture, compared with a synthetic baseline derived from that current schema; not a provider projection or token estimate.",
     writeOperationSchemaWireSize:
-      "Exact compact UTF-8 JSON bytes for the hashline_write raw z.toJSONSchema fixture and a synthetic current-derived baseline without createParents; not a provider projection or token estimate.",
+      "Exact compact UTF-8 JSON bytes for the hashline_write raw z.toJSONSchema fixture and its reconstructed pre-change baseline with optional createParents; not a provider projection or token estimate.",
     fileLifecycleCallWireSize:
       "Exact compact UTF-8 JSON bytes for valid Better Hashline lifecycle calls and equivalent native apply_patch calls; no semantic or safety advantage is inferred from size.",
     editProtocolUxCallWireSize:
-      "Exact compact UTF-8 JSON bytes for default versus explicit readback-window calls and strict versus opt-in parent-creation calls.",
+      "Exact compact UTF-8 JSON bytes for legacy explicit controls versus inferred readback, empty-file, and parent-creation calls.",
     transferCallWireSize:
       "Exact compact UTF-8 JSON bytes for copy/move calls versus equivalent model-supplied insert/replace payloads.",
     moveCorridorWireSize:

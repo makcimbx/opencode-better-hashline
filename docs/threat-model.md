@@ -49,7 +49,7 @@ creation plus source unlink is also not transactional; post-publication verifica
 races and partial states but cannot safely roll them back over an even newer writer. Use OS isolation
 when uncoordinated writers are in scope.
 
-Opt-in parent creation similarly cannot make a portable directory-chain transaction. Exclusive
+Automatic parent creation similarly cannot make a portable directory-chain transaction. Exclusive
 non-recursive `mkdir` and immediate identity checks detect many races, but after the first directory
 is created the safe result can be a retained partial tree or committed target. The plugin reports
 `PARTIAL_PUBLICATION` and never deletes those names automatically.
@@ -97,8 +97,8 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | Relocation | Exact selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges |
 | Text-batch validation | One immutable pre-batch file, declared read/write effects checked before mutation, stable conflict codes with deterministic zero-based pair evidence |
 | Permission binding | Exact planned patch and complete source/destination or parent-chain path set before approval |
-| New file safety | Existing-parent strict default; staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
-| Parent creation safety | Explicit opt-in, at most 64 fixed missing directories, all-path authorization/locks, exclusive root-to-leaf creation, and no rollback after a directory exists or creation becomes ambiguous; a partial outcome invalidates affected snapshots and unbinds the alias epoch |
+| New file safety | Strict `filePath`/`content` schema, one fixed zero-to-64-parent plan, staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
+| Parent creation safety | Automatic fixed missing-directory plan, all-path authorization/locks, exclusive root-to-leaf creation, and no rollback after a directory exists or creation becomes ambiguous; a partial outcome invalidates affected snapshots and unbinds the alias epoch |
 | Delete safety | Direct regular single-link source revalidated before exact unlink and absence verification |
 | Move safety | Existing stable parents, same filesystem, absent destination, no-clobber hard link, exact inode/byte/link-count verification, then source unlink |
 | Partial move safety | No destructive rollback; affected snapshots invalidated, explicit `PARTIAL_PUBLICATION`, and alias epoch unbound until inspection/repair plus a fresh delivered same-session read; old IDs stay unusable |
@@ -122,8 +122,8 @@ When failed exact relocation detects only delimiter changes at the original sele
 it adds a reread explanation but still returns `TARGET_CHANGED`; it does not normalize or fuzzy-match.
 
 File lifecycle operations are not text transfers. They are sole, strict operations planned outside
-`planEdits`; line fields, every readback field, unique relocation, overwrite, parent creation, and
-cross-filesystem movement are unavailable. Their exact delete/move patch and v2 metadata are
+`planEdits`; line fields, requested readback (`true` or either window), unique relocation, overwrite,
+parent creation, and cross-filesystem movement are unavailable. Their exact delete/move patch and v2 metadata are
 immutable across approval. Delete revalidates the direct terminal binding before unlink. Move
 publishes destination first with a verified hard link and can therefore truthfully report a
 nontransactional state in which both names remain. After `PARTIAL_PUBLICATION`, both paths must be
@@ -133,16 +133,16 @@ Native aliases accept only the Better Hashline argument shape and restrict sourc
 mutation to the current worktree. Authorized external paths require the unique hashline surface;
 alias admission never broadens filesystem authorization.
 
-`hashline_write` parent creation is separate from lifecycle movement. Omitted/false
-`createParents` requires an existing parent and fails with `PATH_NOT_FOUND` when it is missing.
-Explicit `true` fixes the deepest existing ancestor and at most 64 missing directories before
-permission, authorizes and locks every directory plus the target, and uses exclusive root-to-leaf
-creation before existing staged no-clobber publication. Once the first directory exists, or a failed
-`mkdir` leaves its outcome ambiguous, a failure is reported as `PARTIAL_PUBLICATION` with no
-automatic rollback; the target file may also be committed. The error omits requested and canonical
-host roots and unbinds the native-alias live epoch. Inspect and reconcile directories and target
-before retrying; a fresh delivered `hashline_read` can then rebind in the same session, while old
-snapshot IDs remain unusable.
+`hashline_write` parent creation is separate from lifecycle movement. Its strict schema accepts only
+`filePath` and `content` and rejects the obsolete `createParents` field. Every call fixes the deepest
+existing ancestor, zero to 64 missing directories, and the target before permission; it authorizes and
+locks every planned path, then uses exclusive root-to-leaf creation before staged no-clobber
+publication. A zero-directory plan publishes the file without `mkdir`. Once the first directory
+exists, or a failed `mkdir` leaves its outcome ambiguous, a failure is reported as
+`PARTIAL_PUBLICATION` with no automatic rollback; the target file may also be committed. The error
+omits requested and canonical host roots and unbinds the native-alias live epoch. Inspect and
+reconcile directories and target before retrying; a fresh delivered `hashline_read` can then rebind
+in the same session, while old snapshot IDs remain unusable. `move_file` never creates parents.
 
 ## Metadata
 

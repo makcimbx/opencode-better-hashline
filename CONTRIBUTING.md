@@ -43,22 +43,26 @@ delivered-read live-epoch admission without persisted-history fetches, affected 
 and epoch unbinding after partial publication, and same-session fresh-read recovery without reviving
 old snapshot IDs.
 
-Parent-creating write tests must additionally cover the 64-directory bound, a fixed deepest-ancestor
-plan, authorization and deterministic locks for every directory plus the target, exclusive
-non-recursive root-to-leaf `mkdir`, the existing staged no-clobber file publication, no state before
-the first directory exists or creation becomes ambiguous, retained state and `PARTIAL_PUBLICATION`
-afterward, and no rollback.
-Omitted or false `createParents` must remain strict, and `move_file` must never create parents.
+Automatic parent-creating write tests must additionally cover the strict `filePath`/`content` schema,
+rejection of the obsolete `createParents` field, the zero-missing-directory path, the 64-directory
+bound, a fixed deepest-ancestor plan, authorization and deterministic locks for every directory plus
+the target, exclusive non-recursive root-to-leaf `mkdir`, the existing staged no-clobber file
+publication, no state before the first directory exists or creation becomes ambiguous, retained state
+and `PARTIAL_PUBLICATION` afterward, and no rollback. `move_file` must never create parents.
 Read and readback tests must cover requested `limit` and `readbackLimit` values across the public
 `1..100,000` range, the 1,000-line default, and authoritative `maxOutputBytes` pagination (40 KiB
 by default and at most 45 KiB when configured). Byte-limited pages use `@more` only before EOF;
 `@eof` can coexist with `partial=true` when preview-only lines leave incomplete editable evidence.
 Readback remains one contiguous, one-based, text-only delivered page; undelivered or ID-only
-successor authority must be rejected. Coverage diagnostics must aggregate missing ranges and boundary
-requirements while recommending conservative reads of at most 1,000 lines. Replacement tests must prove
-that `startLine..endLine` is inclusive, `lines` is the complete replacement, outside neighbors remain,
-and every operation uses immutable original-snapshot coordinates. Conflict tests must preserve stable
-codes and deterministic zero-based operation-pair suffixes.
+successor authority must be rejected. Text-edit tests must prove that `readback:true` works without a
+window, either window field implies readback, and explicit `readback:false` plus a window is rejected.
+Lifecycle tests must prove that `readback:true` and every window are rejected without a successor.
+Coverage diagnostics must aggregate missing ranges and boundary requirements while recommending
+conservative reads of at most 1,000 lines. Replacement tests must prove that `startLine..endLine` is
+inclusive, `lines` is the complete replacement, outside neighbors remain, and every operation uses
+immutable original-snapshot coordinates. Whole-file tests must prove that omitted `finalNewline`
+preserves snapshot state for non-empty `lines`, while empty `lines` infer `false` and reject explicit
+`true`. Conflict tests must preserve stable codes and deterministic zero-based operation-pair suffixes.
 
 Use [`docs/tool-contract-guidelines.md`](docs/tool-contract-guidelines.md) for every model-visible
 tool, schema, system-guidance, receipt, or recovery-message change. Apply its rubric across all
@@ -75,8 +79,8 @@ failures, retries, partial publications, and unintended changes rather than succ
 averages. Never rewrite retained evidence to cover a new schema, operation, task set, or adapter; add
 a new identity and result. Dry runs and model-free verifier evidence are not paid model evidence.
 Development runner output is not retained evidence until it is written once at a new final result
-path. Preserve the schema-v6 and schema-v7 results plus pilot-v7 scope unchanged; future runner or
-protocol revisions require a new result identity.
+path. Preserve the schema-v5, schema-v6, schema-v7, and schema-v8 results plus pilot-v7 scope
+unchanged; future runner or protocol revisions require a new result identity.
 
 ## Commits
 

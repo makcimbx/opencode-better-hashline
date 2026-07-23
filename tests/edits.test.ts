@@ -136,6 +136,7 @@ describe("line edit planning", () => {
     expect(
       plan("a\n", "a\n", [{ op: "replace_file", lines: ["x"], finalNewline: false }]).text,
     ).toBe("x");
+    expect(plan("a", "a", [{ op: "replace_file", lines: ["x"] }]).text).toBe("x");
   });
 
   test("strict mode rejects stale bytes and unique mode preserves unrelated insertion", () => {
@@ -280,7 +281,7 @@ describe("line edit planning", () => {
     }
   });
 
-  test("keeps replace_file exclusive and strict", () => {
+  test("keeps replace_file exclusive and infers an empty file without a newline", () => {
     expect(() =>
       plan("a\n", "a\n", [
         { op: "replace_file", lines: ["x"] },
@@ -290,9 +291,7 @@ describe("line edit planning", () => {
     expect(() => plan("a\n", "a\n", [{ op: "replace_file", lines: ["x"] }], "unique")).toThrow(
       "INVALID_ARGUMENT: replace_file does not support unique rebase.",
     );
-    expect(() => plan("a\n", "a\n", [{ op: "replace_file", lines: [] }])).toThrow(
-      "INVALID_ARGUMENT:",
-    );
+    expect(plan("a\n", "a\n", [{ op: "replace_file", lines: [] }]).text).toBe("");
     expect(() =>
       plan("a\n", "a\n", [{ op: "replace_file", lines: [], finalNewline: true }]),
     ).toThrow("INVALID_ARGUMENT:");

@@ -1096,7 +1096,6 @@ async function verifyScenario(
               args: {
                 filePath: NESTED_CREATE_PATH,
                 content: NESTED_CREATE_BYTES,
-                createParents: true,
               },
             },
             scenario.modelID,
@@ -1176,7 +1175,6 @@ async function verifyScenario(
                       lines: ["readback-changed"],
                     },
                   ],
-                  readback: true,
                   readbackOffset: 8,
                   readbackLimit: 5,
                 },
@@ -1769,14 +1767,13 @@ async function verifyScenario(
       hashlineWriteArgumentsSchema.safeParse({
         filePath: NESTED_CREATE_PATH,
         content: NESTED_CREATE_BYTES,
-        createParents: true,
       }).success &&
         !hashlineWriteArgumentsSchema.safeParse({
           filePath: NESTED_CREATE_PATH,
           content: NESTED_CREATE_BYTES,
-          createParents: "true",
+          createParents: true,
         }).success,
-      "hashline_write createParents validation changed",
+      "hashline_write accepted the obsolete createParents field",
     );
 
     const nestedHooks = (await readFile(hookLog, "utf8"))
@@ -1834,7 +1831,6 @@ async function verifyScenario(
     const expectedNestedInput = {
       filePath: NESTED_CREATE_PATH,
       content: NESTED_CREATE_BYTES,
-      createParents: true,
     };
     const expectedNestedMetadata = {
       diff: NESTED_CREATE_DIFF,

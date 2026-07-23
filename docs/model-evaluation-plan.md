@@ -2,11 +2,12 @@
 
 Status: design only. No model result is implied by this document.
 
-Retained evidence note: the deterministic runner emits schema v7. Its latest immutable model-free
-record contains a 29-case corpus and expanded edit/write/readback/parent-create wire fixtures:
-[`2026-07-22-edit-protocol-ux-windows-x64.json`](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json).
-The schema-v6 result and closed pilot-v7 scope remain immutable. Neither the retained schema-v7
-result nor this frozen plan supports a paid or model-quality claim.
+Retained evidence note: the deterministic runner emits schema v8. Its latest immutable model-free
+record retains the 29-case corpus and adds wire fixtures for inferred readback, empty-file newline,
+and parent-creation defaults:
+[`2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json).
+The schema-v5, schema-v6, schema-v7, and closed pilot-v7 records remain immutable. Neither the
+retained schema-v8 result nor this frozen plan supports a paid or model-quality claim.
 
 | Field | Value |
 | --- | --- |

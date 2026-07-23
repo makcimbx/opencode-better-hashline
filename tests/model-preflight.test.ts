@@ -79,7 +79,7 @@ const editInput = (
 ) => ({ filePath, ...extra, operations, snapshotId: "<snapshot>" });
 const nestedCreationEvidence = canonicalJson({
   creation: {
-    input: { content: nestedCreateBytes, createParents: true, filePath: nestedCreatePath },
+    input: { content: nestedCreateBytes, filePath: nestedCreatePath },
     metadata: {
       created: true,
       createdDirectories: [fixturePath("nested"), fixturePath("nested/inner")],
@@ -137,7 +137,7 @@ const readbackEvidence = (editTool: "hashline_edit" | "edit" | "apply_patch") =>
       input: editInput(
         readbackPath,
         [{ endLine: 10, lines: ["readback-changed"], op: "replace", startLine: 10 }],
-        { readback: true, readbackLimit: 5, readbackOffset: 8 },
+        { readbackLimit: 5, readbackOffset: 8 },
       ),
       output: [
         "Applied 1 operation.",
@@ -819,7 +819,7 @@ describe("native alias preflight receipt", () => {
       forgedEvidence(0, "nestedCreationEvidence", "nestedCreationEvidenceSha256", (evidence) => {
         const creation = evidence.creation as Record<string, unknown>;
         const input = creation.input as Record<string, unknown>;
-        input.createParents = false;
+        input.createParents = true;
       }),
       forgedEvidence(1, "readbackEvidence", "readbackEvidenceSha256", (evidence) => {
         const delivered = evidence.delivered as Record<string, unknown>;

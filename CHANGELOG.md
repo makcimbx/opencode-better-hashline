@@ -15,10 +15,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Expanded tool and field descriptions with explicit routing, path, result, lifecycle, and recovery contracts.
+- Simplified strict `hashline_write` calls to `filePath` and `content`; writes now automatically create up to 64 missing parents through the existing fixed, authorized, locked, no-rollback plan, while the obsolete `createParents` field is rejected.
+- Made `readbackOffset` or `readbackLimit` imply text readback; explicit `readback:false` with a window is invalid, and lifecycle operations still reject `true` and all windows.
 
+- Added immutable schema-v8 model-free evidence for the unchanged safety corpus and the simplified write, readback, empty-file, and lifecycle-call fixtures.
 ### Fixed
 
 - Corrected migration-mode read routing, pagination footer guarantees, lifecycle atomicity wording, and phase-specific filesystem recovery guidance.
+- Fixed `replace_file` with empty `lines` and omitted `finalNewline` to infer `false`; explicit `true` remains invalid, while non-empty omission still preserves snapshot newline state.
 
 ## [0.6.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.6.0...v0.6.1) (2026-07-23)
 

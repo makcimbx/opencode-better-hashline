@@ -16,7 +16,6 @@ import {
   pathsAlias,
   publishDeletedFile,
   publishMovedFile,
-  publishNewFile,
   publishNewFileWithParents,
   publishReplacement,
   readStableFile,
@@ -143,7 +142,7 @@ function createEditSchema() {
         .boolean()
         .optional()
         .describe(
-          "Only for replace_file; omit to preserve snapshot state. true requires non-empty lines; an empty file requires false.",
+          "Only for replace_file; omit to preserve snapshot state, except lines:[] defaults to false. true requires non-empty lines.",
         ),
       destinationPath: tool.schema
         .string()
@@ -186,7 +185,7 @@ function createEditSchema() {
       .boolean()
       .optional()
       .describe(
-        "Optional; defaults to false. For a text edit, true requests one bounded successor page for verification or follow-up, but the attachment can be unavailable after a successful mutation. Lifecycle operations reject readback, readbackOffset, and readbackLimit.",
+        "Optional; defaults to false unless readbackOffset or readbackLimit is supplied. For a text edit, true requests one bounded successor page for verification or follow-up, but the attachment can be unavailable after a successful mutation. Lifecycle operations reject true and all readback window fields.",
       ),
     readbackOffset: tool.schema
       .number()
@@ -194,7 +193,7 @@ function createEditSchema() {
       .min(1)
       .optional()
       .describe(
-        "Only with readback:true for text edits. One-based first line in the post-edit file; omit to start near the first hunk.",
+        "For text edits. Supplying this one-based post-edit start implies readback unless readback:false is explicit; omit to start near the first hunk.",
       ),
     readbackLimit: tool.schema
       .number()
@@ -203,7 +202,7 @@ function createEditSchema() {
       .max(ABSOLUTE_MAX_LOGICAL_LINES)
       .optional()
       .describe(
-        "Only with readback:true for text edits. Maximum rendered lines in the one contiguous successor page; defaults to 1000. Output remains bounded by maxOutputBytes. @more means rendering stopped before EOF; @eof means the cursor reached EOF; partial=true may accompany either.",
+        "For text edits. Supplying this maximum rendered-line count implies readback unless readback:false is explicit; defaults to 1000. Output remains bounded by maxOutputBytes. @more means rendering stopped before EOF; @eof means the cursor reached EOF; partial=true may accompany either.",
       ),
     operations: tool.schema
       .array(editOperation)
@@ -223,7 +222,7 @@ const editSchema = createEditSchema();
 const editArgumentShape = editSchema.argumentShape;
 export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 
-export const hashlineEditDescription = `Mutate one exact hashline_read snapshot. Text batches publish one atomic replacement. File lifecycle operations are sole calls; move_file is nontransactional, and PARTIAL_PUBLICATION may leave both source and destination names present. Pass required top-level filePath, snapshotId, and operations JSON plus only the documented optional controls; do not encode arguments as text. ${EDIT_SEMANTICS_GUIDANCE} copy reads pre-edit source. replace_file, delete_file, and move_file require rebase:none and complete issued coverage. Lifecycle operations reject readback, readbackOffset, and readbackLimit and never overwrite. Destructive writes may be adjacent but not overlap; insert/copy destinations may touch a destructive endpoint but may not lie inside a destructive span or share a destination. Successful publication invalidates every retained snapshot for the affected session paths and returns a diff plus receipt. For text edits, readback:true requests one successor page, but the attachment can be unavailable; without an attached successor, run hashline_read before another mutation. After PARTIAL_PUBLICATION, inspect and reconcile every affected path before retrying.`;
+export const hashlineEditDescription = `Mutate one exact hashline_read snapshot. Text batches publish one atomic replacement. File lifecycle operations are sole calls; move_file is nontransactional, and PARTIAL_PUBLICATION may leave both source and destination names present. Pass required top-level filePath, snapshotId, and operations JSON plus only the documented optional controls; do not encode arguments as text. ${EDIT_SEMANTICS_GUIDANCE} copy reads pre-edit source. replace_file, delete_file, and move_file use strict freshness and require complete issued coverage; unique rebase is forbidden. Lifecycle operations never return successor readback and reject true or window fields. Destructive writes may be adjacent but not overlap; insert/copy destinations may touch a destructive endpoint but may not lie inside a destructive span or share a destination. Successful publication invalidates every retained snapshot for the affected session paths and returns a diff plus receipt. For text edits, readback:true or either window field requests one successor page, but the attachment can be unavailable; without an attached successor, run hashline_read before another mutation. After PARTIAL_PUBLICATION, inspect and reconcile every affected path before retrying.`;
 
 export const nativeAliasEditDescription = `Better Hashline alias; it does not accept native oldString/newString or patchText syntax. Wait for hashline_read's returned result before calling it; native-alias-session must be bound, and source and destination paths must be inside the current worktree. ${hashlineEditDescription}`;
 
@@ -261,12 +260,6 @@ const writeArgumentShape = {
     .max(16 * 1024 * 1024)
     .describe(
       "Complete UTF-8 text as one string; NUL, invalid Unicode, and control-heavy content are rejected.",
-    ),
-  createParents: tool.schema
-    .boolean()
-    .optional()
-    .describe(
-      "Default false: a missing parent fails with PATH_NOT_FOUND. true creates up to 64 missing parents through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
     ),
 };
 const writeArguments = tool.schema.object(writeArgumentShape).strict();
@@ -954,20 +947,21 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     const batch = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
     const rebase = args.rebase ?? "none";
     const hasReadbackWindow = args.readbackOffset !== undefined || args.readbackLimit !== undefined;
+    const requestReadback = args.readback === true || hasReadbackWindow;
     if (rebase !== "none" && rebase !== "unique") {
       fail("INVALID_ARGUMENT", "rebase must be none or unique.");
     }
     if (batch.kind !== "text" && rebase !== "none") {
       fail("INVALID_ARGUMENT", `${batch.kind} does not support unique rebase.`);
     }
-    if (batch.kind !== "text" && (args.readback || hasReadbackWindow)) {
+    if (batch.kind !== "text" && requestReadback) {
       fail(
         "INVALID_ARGUMENT",
         `${batch.kind} does not accept readback, readbackOffset, or readbackLimit. Remove them and retry with the same snapshot.`,
       );
     }
-    if (hasReadbackWindow && args.readback !== true) {
-      fail("INVALID_ARGUMENT", "readbackOffset and readbackLimit require readback:true.");
+    if (hasReadbackWindow && args.readback === false) {
+      fail("INVALID_ARGUMENT", "readbackOffset and readbackLimit conflict with readback:false.");
     }
     const aliasBinding =
       toolName === "hashline_edit"
@@ -1284,7 +1278,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           const successOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
           let output = editResultOutput(successOutput, "none");
           let resultMetadata = metadata;
-          if (args.readback) {
+          if (requestReadback) {
             const fallbackOutput = editResultOutput(successOutput, "unavailable");
             try {
               const document = decodeTextDocument(verified.bytes, options.maxLines);
@@ -1353,8 +1347,8 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const hashlineWrite = tool({
     description:
       options.toolSurface === "native-aliases"
-        ? "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. A hashline_read of another path does not prohibit creation. For an existing target, use hashline_read followed by edit or apply_patch. Omitted/false createParents requires an existing parent and fails with PATH_NOT_FOUND otherwise; true may create up to 64 parents. After publication starts, an error can leave the target file and created directories present; inspect them before retrying."
-        : "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. For an existing target, use hashline_read followed by hashline_edit. Omitted/false createParents requires an existing parent and fails with PATH_NOT_FOUND otherwise; true may create up to 64 parents. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
+        ? "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. A hashline_read of another path does not prohibit creation. For an existing target, use hashline_read followed by edit or apply_patch. Missing parents are created automatically, up to 64 through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying."
+        : "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. For an existing target, use hashline_read followed by hashline_edit. Missing parents are created automatically, up to 64 through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
     args: writeArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
@@ -1371,102 +1365,67 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
       const bytes = encodeNewText(args.content);
       decodeTextDocument(bytes, options.maxLines);
-      if (args.createParents) {
-        const plan = await resolveNewFileParentPlan(args.filePath, context.directory);
-        const plannedEntries = [
-          {
-            requestedPath: plan.requestedPath,
-            requestedAbsolute: plan.requestedAbsolute,
-            canonicalPath: plan.canonicalPath,
-          },
-          ...plan.missingDirectories.map((entry) => ({
-            requestedPath: entry.requestedPath,
-            requestedAbsolute: entry.requestedPath,
-            canonicalPath: entry.canonicalPath,
-          })),
-        ];
-        for (const entry of plannedEntries) await authorizeExternal(context, entry);
-        const displayRoot = await canonicalDisplayRoot(context.worktree, context.directory);
-        const shownPath = displayPath(displayRoot, plan.canonicalPath);
-        const shownDirectories = plan.missingDirectories.map((entry) =>
-          displayPath(displayRoot, entry.canonicalPath),
-        );
-        const diff = unifiedDiff(shownPath, "", args.content);
-
-        return await withPathLocks(
-          plan.lockPaths,
-          async () => {
-            await revalidateNewFileParentPlan(plan);
-            await authorizeEdits(
-              context,
-              plannedEntries,
-              diff,
-              plan.missingDirectories.map((entry) => entry.canonicalPath),
-            );
-            try {
-              await publishNewFileWithParents({
-                plan,
-                bytes,
-                signal: context.abort,
-                consume: () => {
-                  for (const mutationPath of plan.mutationPaths) {
-                    snapshots.invalidateSessionPath(context.sessionID, mutationPath);
-                  }
-                },
-              });
-            } catch (error) {
-              if (
-                options.toolSurface === "native-aliases" &&
-                error instanceof HashlineError &&
-                error.code === "PARTIAL_PUBLICATION"
-              ) {
-                sessions.unbind(context.sessionID);
-              }
-              throw error;
-            }
-            const metadata = { diff, createdDirectories: shownDirectories };
-            context.metadata({ title: shownPath, metadata });
-            return {
-              title: shownPath,
-              output:
-                shownDirectories.length === 0
-                  ? "Created the file. Use hashline_read before editing it."
-                  : `Created ${shownDirectories.length} parent ${shownDirectories.length === 1 ? "directory" : "directories"} and the file. Use hashline_read before editing it.`,
-              metadata: { ...metadata, created: true },
-            };
-          },
-          context.abort,
-        );
-      }
-      const resolved = await resolveNewFile(
-        args.filePath,
-        context.directory,
-        "Missing parents are not created by default; pass createParents:true only if this write should create them.",
-      );
-      await authorizeExternal(context, resolved);
-      const shownPath = displayPath(
-        await canonicalDisplayRoot(context.worktree, context.directory),
-        resolved.canonicalPath,
+      const plan = await resolveNewFileParentPlan(args.filePath, context.directory);
+      const plannedEntries = [
+        {
+          requestedPath: plan.requestedPath,
+          requestedAbsolute: plan.requestedAbsolute,
+          canonicalPath: plan.canonicalPath,
+        },
+        ...plan.missingDirectories.map((entry) => ({
+          requestedPath: entry.requestedPath,
+          requestedAbsolute: entry.requestedPath,
+          canonicalPath: entry.canonicalPath,
+        })),
+      ];
+      for (const entry of plannedEntries) await authorizeExternal(context, entry);
+      const displayRoot = await canonicalDisplayRoot(context.worktree, context.directory);
+      const shownPath = displayPath(displayRoot, plan.canonicalPath);
+      const shownDirectories = plan.missingDirectories.map((entry) =>
+        displayPath(displayRoot, entry.canonicalPath),
       );
       const diff = unifiedDiff(shownPath, "", args.content);
 
-      return await withPathLock(
-        resolved.canonicalPath,
+      return await withPathLocks(
+        plan.lockPaths,
         async () => {
-          await assertTargetAbsent(resolved);
-          await authorizeEdit(context, resolved, diff);
-          await publishNewFile({
-            resolved,
-            bytes,
-            signal: context.abort,
-            consume: () =>
-              snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath),
-          });
-          context.metadata({ title: shownPath, metadata: { diff } });
+          await revalidateNewFileParentPlan(plan);
+          await authorizeEdits(
+            context,
+            plannedEntries,
+            diff,
+            plan.missingDirectories.map((entry) => entry.canonicalPath),
+          );
+          try {
+            await publishNewFileWithParents({
+              plan,
+              bytes,
+              signal: context.abort,
+              consume: () => {
+                for (const mutationPath of plan.mutationPaths) {
+                  snapshots.invalidateSessionPath(context.sessionID, mutationPath);
+                }
+              },
+            });
+          } catch (error) {
+            if (
+              options.toolSurface === "native-aliases" &&
+              error instanceof HashlineError &&
+              error.code === "PARTIAL_PUBLICATION"
+            ) {
+              sessions.unbind(context.sessionID);
+            }
+            throw error;
+          }
+          const metadata = { diff, createdDirectories: shownDirectories };
+          context.metadata({ title: shownPath, metadata });
           return {
             title: shownPath,
-            output: "Created the file. Use hashline_read before editing it.",
-            metadata: { diff, created: true },
+            output:
+              shownDirectories.length === 0
+                ? "Created the file. Use hashline_read before editing it."
+                : `Created ${shownDirectories.length} parent ${shownDirectories.length === 1 ? "directory" : "directories"} and the file. Use hashline_read before editing it.`,
+            metadata: { ...metadata, created: true },
           };
         },
         context.abort,
@@ -1553,15 +1512,19 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       ) {
         return;
       }
+      const hookArgs =
+        typeof hookInput.args === "object" && hookInput.args !== null
+          ? (hookInput.args as Record<string, unknown>)
+          : undefined;
       const reportedKind =
         hookInput.tool === "hashline_read"
           ? "read"
           : (hookInput.tool === "hashline_edit" ||
                 hookInput.tool === "edit" ||
                 hookInput.tool === "apply_patch") &&
-              typeof hookInput.args === "object" &&
-              hookInput.args !== null &&
-              (hookInput.args as Record<string, unknown>).readback === true
+              (hookArgs?.readback === true ||
+                hookArgs?.readbackOffset !== undefined ||
+                hookArgs?.readbackLimit !== undefined)
             ? "edit"
             : undefined;
       const pendingId = output.metadata?.hashlinePending;
@@ -1718,11 +1681,11 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             : state === "mismatch"
               ? "native-alias-session=mismatch. Run hashline_read again and wait for its returned result; use only that new snapshot ID, because old IDs cannot be revived."
               : "native-alias-session=unbound. Do not call edit or apply_patch. Run hashline_read and wait for its returned result; only successful delivery binds the session.";
-        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. These aliases accept Better Hashline filePath/snapshotId/operations JSON, never native oldString/newString or patchText syntax, and require source and destination paths inside the current worktree. hashline_write is create-only; omitted/false createParents requires an existing parent. Native write and hashline_edit are disabled. Do not mutate files via shell. Hashline line/control prefixes are annotations; allowHashlinePrefixes:true is only for intentional source text. After configuration, schema, host, or surface changes, restart and run a fresh hashline_read; alternatively, explicitly configure enforce:true with toolSurface:"hashline", restart, and reread. Never fall back silently or reuse old IDs. Better Hashline must be the last plugin defining these aliases.`;
+        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. These aliases accept Better Hashline filePath/snapshotId/operations JSON, never native oldString/newString or patchText syntax, and require source and destination paths inside the current worktree. hashline_write is create-only and creates up to 64 missing parents through a fixed no-rollback plan. Native write and hashline_edit are disabled. Do not mutate files via shell. Hashline line/control prefixes are annotations; allowHashlinePrefixes:true is only for intentional source text. After configuration, schema, host, or surface changes, restart and run a fresh hashline_read; alternatively, explicitly configure enforce:true with toolSurface:"hashline", restart, and reread. Never fall back silently or reuse old IDs. Better Hashline must be the last plugin defining these aliases.`;
       } else if (options.enforce) {
-        guidance = `Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. ${EDIT_SEMANTICS_GUIDANCE} Use hashline_write only to create an absent file; omitted/false createParents requires an existing parent, while true intentionally creates missing parents. Inspect the target and tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.`;
+        guidance = `Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. ${EDIT_SEMANTICS_GUIDANCE} Use hashline_write only to create an absent file; it automatically creates up to 64 missing parents through a fixed no-rollback plan. Inspect the target and tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.`;
       } else {
-        guidance = `Better Hashline migration mode exposes two separate workflows. Prefer hashline_read followed by hashline_edit for an existing UTF-8 text file, and hashline_write for a new file; omitted/false createParents requires an existing parent. When a native mutator changes an existing file, first use native read. Native write or apply_patch may create an absent target without a preceding read. Never pass hashline output or snapshot IDs to native mutators. ${EDIT_SEMANTICS_GUIDANCE}`;
+        guidance = `Better Hashline migration mode exposes two separate workflows. Prefer hashline_read followed by hashline_edit for an existing UTF-8 text file, and hashline_write for a new file; hashline_write creates missing parents automatically. When a native mutator changes an existing file, first use native read. Native write or apply_patch may create an absent target without a preceding read. Never pass hashline output or snapshot IDs to native mutators. ${EDIT_SEMANTICS_GUIDANCE}`;
       }
       output.system.push(guidance);
     },

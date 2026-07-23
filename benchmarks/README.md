@@ -11,19 +11,19 @@ The runner uses generated fixtures and Node SHA-256. No network, model, reposito
 
 When comparing results, use the raw JSON environment fields and source commit. Timing values are expected to vary; protocol classifications should not.
 
-The runner emits schema v7. The latest retained schema-v7 result extended the deterministic corpus
-with the allowed composed move/replacement case and added edit/write raw-schema plus
-readback/parent-create call fixtures. Its retained classifications are strict `6/18/5/0`, unique
-`11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, endpoint-8 `7/12/4/6`, and
-endpoint-16 `7/13/4/5` (`exact_apply/safe_reject/false_reject/unsafe_accept`). Its retained fixture
-wire values are edit schema `3686 -> 5033` (+1347, 36.54%), write schema `282 -> 548` (+266,
-94.33%), readback call `181 -> 218` (+37), and parent-create call `50 -> 81` (+31). These values
-describe that immutable result, not the current development contract.
+The runner emits schema v8. The latest retained schema-v8 result keeps the schema-v7 29-case
+corpus and records the simplified edit/write defaults. Its retained classifications are strict
+`6/18/5/0`, unique `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, endpoint-8
+`7/12/4/6`, and endpoint-16 `7/13/4/5`
+(`exact_apply/safe_reject/false_reject/unsafe_accept`). Its retained fixture wire values are edit
+schema `4694 -> 6127` (+1433, 30.53%), write schema `849 -> 531` (-318, -37.46%), inferred
+readback `202 -> 186` (-16), inferred empty-file newline `138 -> 117` (-21), and automatic
+parent creation `81 -> 60` (-21). These are mechanical byte fixtures, not token or model-quality
+claims.
 
-The latest retained model-free evidence is the immutable schema-v7
-[`2026-07-22-edit-protocol-ux-windows-x64.json`](results/2026-07-22-edit-protocol-ux-windows-x64.json).
-The schema-v6 and schema-v5 records remain immutable. The schema-v7 record makes no paid or
-model-quality claim.
+The latest retained model-free evidence is the immutable schema-v8
+[`2026-07-23-default-simplification-r2-windows-x64.json`](results/2026-07-23-default-simplification-r2-windows-x64.json).
+The schema-v5, schema-v6, and schema-v7 records remain immutable.
 
 Result paths are write-once unless `--force` is supplied explicitly. Never use `--force` on published evidence.
 

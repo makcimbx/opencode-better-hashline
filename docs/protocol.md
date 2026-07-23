@@ -105,7 +105,6 @@ Tool: `hashline_edit`, or the Better Hashline `edit`/`apply_patch` aliases on th
   "filePath": "src/example.ts",
   "snapshotId": "s_J7yi7wDyv3j9xQ2zP5kL8A",
   "rebase": "none",
-  "readback": true,
   "readbackOffset": 4,
   "readbackLimit": 100,
   "operations": [
@@ -133,12 +132,14 @@ runtime validation accepts only these exact combinations and rejects every unlis
 `rebase: "none"`. Unknown operation fields are rejected rather than ignored.
 
 At the top level, `filePath` must resolve to the canonical source represented by the exact delivered, unconsumed `snapshotId`; `destinationPath` belongs only to the sole `move_file` operation. `operations` contains 1..100 flat operation objects whose coordinates all refer to that original snapshot. `rebase` is optional and defaults to `"none"`.
-`readbackOffset` is an optional one-based post-edit text line, and requested `readbackLimit` accepts
-integers from 1 through 100,000. Both require `readback:true`; `readback`, `readbackOffset`, and
-`readbackLimit` are invalid for every lifecycle operation. The offset defaults to the first new-file hunk
-line, and the limit defaults to 1,000. The authoritative `maxOutputBytes` budget can stop rendering
-before the requested line count; `@more` means before EOF, `@eof` means EOF was reached, and
-`partial=true` may accompany either.
+For text edits, `readback` is optional. `readback:true` or either window field requests one contiguous
+successor page; when none is supplied, readback defaults to `false`. `readbackOffset` is an optional
+one-based post-edit line, and requested `readbackLimit` accepts integers from 1 through 100,000.
+Explicit `readback:false` with either window is invalid. Lifecycle operations reject `readback:true`,
+`readbackOffset`, and `readbackLimit`, and never return a successor. The offset defaults to the first
+new-file hunk line, and the limit defaults to 1,000. The authoritative `maxOutputBytes` budget can
+stop rendering before the requested line count; `@more` means before EOF, `@eof` means EOF was
+reached, and `partial=true` may accompany either.
 `allowHashlinePrefixes` is optional and defaults to `false`. Before any path lookup or permission,
 the executor rejects literal `replace`, `insert`, and `replace_file` lines beginning in column zero
 with a positive non-zero decimal annotation (`17|` or `17!|`) or the exact markers `@hashline`,
@@ -155,13 +156,14 @@ evidence. It never establishes or restores the live epoch. An already bound proc
 after restart, live continuation requires a fresh delivered and attested `hashline_read`. Text
 matching alone never makes a rejected native-looking call compatible.
 
-`readback` is optional and defaults to `false` for text edits. Use it to request structural
-verification or a dependent follow-up edit. It requests exactly one contiguous successor page using
-the explicit offset/limit or the first-hunk/1,000-line defaults; requesting more lines never creates a
-second page, and a successful mutation may report `successor=unavailable` instead of attaching the
-page. `maxOutputBytes` can stop rendering early with `@more`; a page that reaches EOF uses `@eof`,
-and either may be marked `partial=true`. File lifecycle operations reject `readback`,
-`readbackOffset`, and `readbackLimit`, and never attach a successor. A
+For text edits, `readback` defaults to `false` only when neither window field is supplied. Explicit
+`true` requests structural verification or a dependent follow-up edit with the first-hunk/1,000-line
+defaults; supplying `readbackOffset` or `readbackLimit` implies the same request. Explicit `false`
+cannot be combined with a window. The request produces exactly one contiguous successor page; asking
+for more lines never creates a second page, and a successful mutation may report
+`successor=unavailable` instead of attaching the page. `maxOutputBytes` can stop rendering early with
+`@more`; a page that reaches EOF uses `@eof`, and either may be marked `partial=true`. File lifecycle
+operations reject `readback:true` and both window fields and never attach a successor. A
 successful text edit begins with `Applied N operations.`; lifecycle success begins with `Deleted
 <source>.` or `Moved <source> to <destination>.`. Every successful mutation then includes one
 snapshot lifecycle receipt:
@@ -247,7 +249,7 @@ Transfer operations never accept `lines` or `finalNewline`; their source is exac
 }
 ```
 
-`replace_file` must be the sole operation, requires `rebase: "none"`, exact current bytes, and a completely issued snapshot including BOF and EOF. `finalNewline` is optional only for `replace_file`; omitting it preserves the snapshot's final-newline state. To write an empty file regardless of that state, pass `lines: []` and `finalNewline: false`. An empty array with inherited or explicit `true` is invalid; use `lines: [""]` to represent a file containing one newline.
+`replace_file` must be the sole operation, requires `rebase: "none"`, exact current bytes, and a completely issued snapshot including BOF and EOF. `finalNewline` is optional only for `replace_file`. For non-empty `lines`, omitting it preserves the snapshot's final-newline state. For `lines: []`, omission infers `false` and writes an empty file; explicit `true` remains invalid. Use `lines: [""]` to represent a file containing one newline.
 
 ### Delete File
 
@@ -260,9 +262,9 @@ Transfer operations never accept `lines` or `finalNewline`; their source is exac
 }
 ```
 
-`delete_file` is the sole operation. It accepts no line coordinates, `lines`, `finalNewline`,
-`destinationPath`, `readback`, `readbackOffset`, or `readbackLimit`; it requires strict mode and
-complete issued BOF-to-EOF coverage. The source named by top-level `filePath` must be a direct terminal directory entry, not a terminal
+`delete_file` is the sole operation. Its operation object accepts no line coordinates, `lines`,
+`finalNewline`, or `destinationPath`. Top-level `readback:true`, `readbackOffset`, and
+`readbackLimit` are rejected; strict mode and complete issued BOF-to-EOF coverage are required. The source named by top-level `filePath` must be a direct terminal directory entry, not a terminal
 symlink, and must still identify the exact regular, single-link UTF-8 file retained by the snapshot.
 After approval, the executor revalidates the source parent and direct terminal binding, invalidates
 the source snapshots at publication, unlinks that exact entry, and verifies that the name is absent.
@@ -279,8 +281,8 @@ the source snapshots at publication, unlinks that exact entry, and verifies that
 ```
 
 `move_file` has the same strict source and issued-coverage requirements as `delete_file`. Its sole
-operation requires only `destinationPath`; line coordinates, `lines`, `finalNewline`, `readback`,
-`readbackOffset`, and `readbackLimit` are forbidden. Relative destinations resolve from
+operation requires only `destinationPath`; line coordinates, `lines`, and `finalNewline` are
+forbidden. Top-level `readback:true`, `readbackOffset`, and `readbackLimit` are rejected. Relative destinations resolve from
 `ToolContext.directory`; absolute destinations require external-directory authorization on the
 hashline surface, while native aliases require both source and destination inside the current
 worktree. The destination must differ from the source and must be absent even when the terminal
@@ -464,14 +466,14 @@ For a text edit:
 11. At the approved publication's consume boundary, immediately before publication, invalidate every snapshot for this session/path; consumption remains final after partial or failed publication.
 12. Attempt one rename over the canonical target.
 13. Reread and verify the resulting bytes.
-14. When `readback: true`, retain those verified bytes as a pending snapshot and render the one
-    requested/default contiguous page.
+14. When text readback is requested by `readback:true` or either window field, retain those verified
+    bytes as a pending snapshot and render the one requested/default contiguous page.
 15. Issue only that page's refs after `tool.execute.after` attests the delivered output; otherwise
     expose no successor ID and report `successor=unavailable`.
 
 For a file lifecycle operation:
 
-1. Validate the sole operation, strict rebase, no-readback shape, snapshot scope, canonical source path, and complete issued BOF-to-EOF provenance.
+1. Validate the sole operation, strict rebase, absence of requested readback, snapshot scope, canonical source path, and complete issued BOF-to-EOF provenance.
 2. Resolve a direct mutable source and, for move, an absent destination under an existing canonical parent; authorize every external source or destination path.
 3. Acquire deterministic process-global locks sequentially for the sorted canonical source/destination path set; cancellation while queued releases acquired locks before later paths are reserved.
 4. Reread the source as the exact regular, single-link UTF-8 snapshot file; revalidate direct terminal and parent identity, and for move verify destination absence and same-filesystem identity.
@@ -486,32 +488,33 @@ No rebase, destination substitution, patch change, metadata change, or lifecycle
 permission approval. If approved state changed while permission was pending, publication rejects.
 Lifecycle operations never create a readback successor.
 
-For a new file, `hashline_write` is create-only and accepts optional `createParents`, defaulting to
-`false`. With omission or `false`, the parent must already exist and the strict behavior is
-unchanged. The tool requests the same path permissions, writes and flushes an exclusive
-same-directory temporary file, then publishes it with a no-replace hard link. It verifies staged
-and published identity, link count, exact bytes, and parent identity before returning success. It
-never overwrites a file, directory, or symlink. Filesystems that cannot provide these local
-hard-link semantics reject the operation. A failure after the hard link succeeds can leave the new
-file committed; the plugin reports `RACE_AFTER_WRITE` and requires target inspection instead of a
-blind retry. If the target exists, take a fresh `hashline_read` before editing it; if it is absent,
-rebuild the creation plan. The plugin never risks deleting a newer writer's file.
+For a new file, `hashline_write` is create-only and its strict schema accepts exactly `filePath` and
+`content`. Unknown fields, including the obsolete `createParents`, are rejected before mutation.
+Every call locates and pins the deepest existing requested and canonical directory ancestor, rejects
+more than 64 missing directories, and freezes one immutable plan containing zero to 64 root-to-leaf
+directory entries plus the target. It authorizes every planned directory and target, acquires
+deterministic locks for all of them, revalidates the exact absence and identity plan without
+replanning, and requests one edit permission for the complete diff and path set.
 
-With explicit `createParents:true`, the plugin locates and pins the deepest existing requested and
-canonical directory ancestor, rejects more than 64 missing directories, and freezes one root-to-leaf
-directory chain plus the target. It authorizes every planned directory and target, acquires
-deterministic locks for all of them, revalidates the exact absence/identity plan without replanning,
-and requests one edit permission for the complete diff and directory list. Publication creates each
-directory with exclusive non-recursive `mkdir`, verifies each directory and immediate parent, then
-delegates file creation to the same staged no-clobber path above. Failures before the first `mkdir`
-attempt retain their ordinary prepublication code and leave no created state. If an attempted
-`mkdir` reports failure but either planned name appeared, publication is conservatively ambiguous.
-From that point, every cancellation, race, staging, linking, readback, or final verification failure
-returns `PARTIAL_PUBLICATION`; created directories and any committed file are intentionally retained
-and never rolled back. Partial errors omit canonical host paths, invalidate snapshots for every
-planned mutation path, and unbind the native-alias live epoch. Inspect whether every planned
-directory and the target exists, reconcile them to one intended state before retrying, then use a
-fresh delivered `hashline_read` to rebind in the same session. Old snapshot IDs remain unusable. `move_file` does not use this path and
+Publication creates each missing directory with exclusive non-recursive `mkdir`, verifying every
+directory and immediate parent. It then writes and flushes an exclusive same-directory temporary file
+and publishes it with a no-replace hard link, verifying staged and published identity, link count,
+exact bytes, and parent identity. With zero missing directories, no `mkdir` runs and the same plan
+delegates directly to that staged no-clobber file publication. The tool never overwrites a file,
+directory, or symlink. Filesystems that cannot provide the required local hard-link semantics reject
+the operation.
+
+Failures before the first directory exists or a `mkdir` outcome becomes ambiguous retain their
+ordinary code and leave no planned directory state. With zero missing directories, a failure after
+the hard link succeeds can leave the new file committed; the plugin reports `RACE_AFTER_WRITE`,
+requires target inspection instead of a blind retry, and never risks deleting a newer writer's file.
+Once any planned directory exists, or an attempted `mkdir` reports failure but a planned name
+appeared, every later cancellation, race, staging, linking, or final-verification failure returns
+`PARTIAL_PUBLICATION`. Created directories and any committed file are intentionally retained and
+never rolled back. Partial errors omit canonical host paths, invalidate snapshots for every planned
+mutation path, and unbind the native-alias live epoch. Inspect every planned directory and the target,
+reconcile them to one intended state before retrying, then use a fresh delivered `hashline_read` to
+rebind in the same session. Old snapshot IDs remain unusable. `move_file` does not use this path and
 never creates parents.
 
 ## Batch Semantics
@@ -576,7 +579,7 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `NATIVE_TOOL_DISABLED` | Enforcement rejected a hidden native mutator |
 | `TOOL_SURFACE_UNAVAILABLE` | The requested alias surface cannot be safely activated on this host |
 | `SESSION_PROTOCOL_MISMATCH` | Offline history/evidence, pending tool identity, or current worktree identity is missing, unreadable, or incompatible |
-| `PATH_NOT_FOUND` | Requested source path or a parent required under strict creation/move behavior does not exist |
+| `PATH_NOT_FOUND` | Requested source path, required lifecycle parent, or resolvable existing write ancestor does not exist |
 | `TARGET_EXISTS` | Create-only or move publication found an existing destination, including a symlink |
 | `SNAPSHOT_REQUIRED` | No valid issued snapshot is available |
 | `SNAPSHOT_UNKNOWN` | ID was not retained for this scope |
@@ -593,12 +596,56 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `PERMISSION_DENIED` | OpenCode rejected a required permission |
 | `RACE_BEFORE_WRITE` | Approved state changed before publication; the message identifies whether the unchanged snapshot can be retried or a fresh read/replan is required |
 | `RACE_AFTER_WRITE` | Publication may have occurred; inspect affected paths, take a fresh read, and replan instead of blindly retrying |
-| `PARTIAL_PUBLICATION` | A move or parent-creating write may have left multiple planned names; reconcile all affected paths before retrying, then restart/reread as instructed |
+| `PARTIAL_PUBLICATION` | A move or write after automatic parent creation may have left multiple planned names; reconcile all affected paths before retrying, then restart/reread as instructed |
 | `UNSUPPORTED_FILE` | File type, metadata, encoding, size, filesystem relation, or policy is unsupported |
 
 Consumers must treat every `CODE: message` as failure. The native-alias `DISPLAY_PREFIX_REJECTED` result is completed only at the host transport layer so its offline attestation persists; it never reports `Applied`, requests permission, changes a file, or establishes a live epoch.
 Schema validation fails before mutation. After correcting the arguments, an otherwise valid supplied
 edit snapshot remains usable; read and write calls have no supplied edit snapshot to consume.
+
+## Migration From 0.6.1
+
+The strict `hashline_write` provider schema now accepts only `filePath` and `content`. Generated
+clients and prompts must remove `createParents` rather than sending `false`; the obsolete field is
+rejected. Every write now freezes the existing fixed plan and automatically creates up to 64 missing
+parents. A zero-missing-directory plan uses the same staged no-clobber publication without `mkdir`.
+`move_file` still requires an existing parent and never creates directories.
+
+For `replace_file`, empty `lines` with omitted `finalNewline` now infer `false` and write an empty
+file. Explicit `true` remains invalid, while omission with non-empty `lines` still preserves the
+snapshot's final-newline state.
+
+For text edits, either `readbackOffset` or `readbackLimit` now implies readback; `readback:true` remains
+valid without a window, and explicit `readback:false` plus either window is invalid. Lifecycle
+operations continue to reject requested readback: `true` and all window fields.
+
+These schema, default, and field-relationship changes alter provider contracts, schema identities,
+and the native-alias protocol fingerprint. Restart the plugin or host as applicable and obtain a
+fresh delivered and attested `hashline_read` in the same session before alias mutation. There is no
+compatibility translation for obsolete arguments, and old snapshot IDs remain unusable.
+
+Exact provider-contract and identity evidence uses the same normalized fixture as the previous
+migration section:
+
+| Evidence | 0.6.1 normalized fixture | Updated normalized fixture |
+| --- | --- | --- |
+| `hashline` provider-contract UTF-8 bytes | 5,904 | 6,041 (+137) |
+| `hashline` serialized SHA-256 | `7fc559ed464f9aa59d4ce810d268bb98729744753e87545cc0ebf543a987e3c0` | `d88fa0b43b27662a6cd00b15e259b27fd0285b046a10f800b3b44e5ca042e0a9` |
+| `hashline` canonical SHA-256 | `758268f9032ef75ac1e6366498708b6c8b48497678b20a4d80d7d645e3cbce50` | `67c6c7cc2ffc8cb60fa35aa8083ea2885a258845b3df94efbdf677721a3e1298` |
+| Native-alias provider-contract UTF-8 bytes | 6,160 | 6,297 (+137) |
+| Native-alias serialized SHA-256 | `9a6fc9dbb0294ddea6afc861fade1b089833c118e779857e2567210c671dfe9f` | `96bd65e8295d462a6f44ba97ab7d0aef2a670a552ec68aca64eab918a4e000e3` |
+| Native-alias canonical SHA-256 | `69c88ee443c2be296734733368896c270354023727677283fa1593f330c163f5` | `fd9e41d4424fa454073a89f330f5edc51af930b96798f89a06fcd6262af1a44e` |
+| Raw schema SHA-256 | `50110b299ef8350aa3eab6be355cfb6f716a5b08b81ba4fc44da686a303a163b` | `4f9a2ae9f4fb4aa17efc6be7078e34101fad043db5e091c735d8426192ee0438` |
+| Provider schema SHA-256 | `8be7f8de8507ba43cbab6c8fb81d66b9f27885240cd4a1bbbf89492197ad772e` | `cc27fd62d927605cec08729f858bdc8fc3bb5bc0c7a637b5e8d49843b0cc8279` |
+| Protocol fingerprint | `e3fac59150e2829314052d07f4c71930099d28451a8629db766c0bd9b41c02bd` | `705a7542e0a2ca4abc4a9d7c53d3600f19f2659e1ad0e6fa22b99a594187214e` |
+
+The retained model-free
+[schema-v8 result](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json)
+records the unchanged 29-case safety classifications plus reconstructed pre-change/current wire
+fixtures: `hashline_edit` schema `4694 -> 6127` (+1433, 30.53%), `hashline_write` schema
+`849 -> 531` (-318, -37.46%), inferred readback `202 -> 186` (-16), inferred empty-file newline
+`138 -> 117` (-21), and automatic parent creation `81 -> 60` (-21). These are mechanical byte
+fixtures, not token or model-quality claims.
 
 ## Migration From 0.6.0
 
