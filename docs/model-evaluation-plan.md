@@ -2,19 +2,20 @@
 
 Status: design only. No model result is implied by this document.
 
-Current implementation note: the deterministic runner now emits schema v7. Its 29-case corpus and
-expanded edit/write/readback/parent-create wire fixtures are retained in the immutable model-free
-[`2026-07-22-edit-protocol-ux-windows-x64.json`](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json).
-The schema-v6 result and closed pilot-v7 scope remain immutable. Neither the schema-v7 result nor
-this plan supports a paid or model-quality claim.
+Retained evidence note: the deterministic runner emits schema v8. Its latest immutable model-free
+record retains the 29-case corpus and adds wire fixtures for inferred readback, empty-file newline,
+and parent-creation defaults:
+[`2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json).
+The schema-v5, schema-v6, schema-v7, and closed pilot-v7 records remain immutable. Neither the
+retained schema-v8 result nor this frozen plan supports a paid or model-quality claim.
 
 | Field | Value |
 | --- | --- |
 | Plan version | 1.0 draft |
 | Plan date | 2026-07-19 |
 | Model catalog snapshot | 2026-07-18T22:35:37Z |
-| Current package baseline | `opencode-better-hashline@0.1.1` |
-| Current OpenCode baseline | `1.18.3` |
+| Frozen plan package baseline | `opencode-better-hashline@0.1.1` |
+| Frozen plan OpenCode baseline | `1.18.3` |
 
 ## Purpose
 
@@ -61,7 +62,7 @@ This study will not attempt to prove:
 | Mechanism ablation | Yes | Isolate addressing semantics | Mechanism-specific result |
 
 No result may be promoted from one layer to a stronger layer. In particular, the existing 12-task
-model harness remains a development smoke and the current 29-case deterministic corpus remains
+model harness remains a development smoke and the retained 29-case deterministic corpus remains
 mechanical protocol evidence.
 
 ## Causal Estimands
@@ -99,7 +100,7 @@ observable native and plugin outcomes under controlled stale, ambiguous, permiss
 and publication scenarios. This establishes reproducible behavior but does not estimate an LLM
 success rate.
 
-## Current Harness Baseline
+## Frozen Plan Harness Baseline
 
 The existing runner already provides strong transport controls:
 

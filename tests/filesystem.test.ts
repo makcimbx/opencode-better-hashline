@@ -340,6 +340,21 @@ describe("new-file parent planning", () => {
     await expect(resolveNewFileParentPlan("blocker/child/target", root)).rejects.toThrow(
       "UNSUPPORTED_FILE:",
     );
+    const realRealpath = fsPromises.realpath;
+    const requestedParent = join(root, "blocker", "child");
+    const realpathMock = spyOn(fsPromises, "realpath").mockImplementation((async (
+      target: PathLike,
+    ) => {
+      if (String(target) === requestedParent) throw syscallError("ENOTDIR");
+      return realRealpath(target);
+    }) as typeof fsPromises.realpath);
+    try {
+      await expect(resolveNewFile("blocker/child/target", root)).rejects.toThrow(
+        "UNSUPPORTED_FILE: Parent path for blocker/child/target contains a non-directory component. No publication occurred; correct the parent path before retrying.",
+      );
+    } finally {
+      realpathMock.mockRestore();
+    }
     await writeFile(join(root, "existing"), "content");
     await expect(resolveNewFileParentPlan("existing", root)).rejects.toThrow("TARGET_EXISTS:");
     await expect(resolveNewFileParentPlan("unsafe\nparent/target", root)).rejects.toThrow(
@@ -675,6 +690,49 @@ describe("filesystem publication", () => {
     expect(await readFile(path, "utf8")).toBe("content");
   });
 
+  test("distinguishes delete disappearance from ambiguous syscall errors", async () => {
+    const cases = [
+      {
+        code: "ENOENT",
+        message:
+          "RACE_BEFORE_WRITE: The file disappeared during delete publication. This call did not remove it, but the snapshot was consumed; inspect the path and take a fresh read before replanning.",
+      },
+      {
+        code: "EIO",
+        message:
+          "RACE_AFTER_WRITE: Delete publication returned an unexpected filesystem error. Deletion may have occurred; inspect the path and take a fresh read before replanning. Do not blindly retry.",
+      },
+    ] as const;
+
+    for (const { code, message } of cases) {
+      const path = join(root, `delete-${code}.txt`);
+      await writeFile(path, "content");
+      const resolved = await resolveMutableFile(path, root);
+      const expected = await readStableFile(resolved, 1024, true);
+      const unlinkMock = spyOn(fsPromises, "unlink").mockImplementation(async () => {
+        throw Object.assign(new Error(`raw ${code}`), { code });
+      });
+      let consumed = false;
+      try {
+        await expect(
+          publishDeletedFile({
+            resolved,
+            expected,
+            maxBytes: 1024,
+            signal: new AbortController().signal,
+            consume() {
+              consumed = true;
+            },
+          }),
+        ).rejects.toThrow(message);
+      } finally {
+        unlinkMock.mockRestore();
+      }
+      expect(consumed).toBe(true);
+      expect(await readFile(path, "utf8")).toBe("content");
+    }
+  });
+
   test("rejects a terminal symlink introduced after lifecycle resolution", async () => {
     if (process.platform === "win32") return;
     const sourcePath = join(root, "mutable-source.txt");
@@ -800,7 +858,9 @@ describe("filesystem publication", () => {
             consumed = true;
           },
         }),
-      ).rejects.toThrow("TARGET_EXISTS: The move destination already exists.");
+      ).rejects.toThrow(
+        "TARGET_EXISTS: The move destination appeared before no-replace publication. No move link was published, but the source snapshot was consumed; inspect the destination, choose an absent path, and take a fresh source read before retrying.",
+      );
     } finally {
       linkMock.mockRestore();
     }
@@ -841,6 +901,53 @@ describe("filesystem publication", () => {
     expect(await readFile(destinationPath, "utf8")).toBe("content");
   });
 
+  test("distinguishes unsupported and ambiguous move link failures", async () => {
+    const cases = [
+      {
+        code: "EPERM",
+        message:
+          "UNSUPPORTED_FILE: The filesystem cannot publish a no-replace file move. No move was reported, but the source snapshot was consumed; take a fresh source read before another workflow.",
+      },
+      {
+        code: "EIO",
+        message:
+          "PARTIAL_PUBLICATION: The destination link operation returned an unexpected filesystem error, so the destination may exist.",
+      },
+    ] as const;
+
+    for (const { code, message } of cases) {
+      const sourcePath = join(root, `move-${code}-source.txt`);
+      const destinationPath = join(root, `move-${code}-destination.txt`);
+      await writeFile(sourcePath, "content");
+      const source = await resolveMutableFile(sourcePath, root);
+      const destination = await resolveNewFile(destinationPath, root);
+      const expected = await readStableFile(source, 1024, true);
+      const linkMock = spyOn(fsPromises, "link").mockImplementation(async () => {
+        throw Object.assign(new Error(`raw ${code}`), { code });
+      });
+      let consumed = false;
+      try {
+        await expect(
+          publishMovedFile({
+            source,
+            destination,
+            expected,
+            maxBytes: 1024,
+            signal: new AbortController().signal,
+            consume() {
+              consumed = true;
+            },
+          }),
+        ).rejects.toThrow(message);
+      } finally {
+        linkMock.mockRestore();
+      }
+      expect(consumed).toBe(true);
+      expect(await readFile(sourcePath, "utf8")).toBe("content");
+      await expect(readFile(destinationPath)).rejects.toThrow();
+    }
+  });
+
   test("publishes one replacement, preserves mode, and consumes at commit", async () => {
     const path = join(root, "script.sh");
     await writeFile(path, "old\n");
@@ -862,6 +969,101 @@ describe("filesystem publication", () => {
     expect(new TextDecoder().decode(verified.bytes)).toBe("new\n");
     expect(await readFile(path, "utf8")).toBe("new\n");
     if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o751);
+  });
+
+  test("normalizes every post-rename verification failure as RACE_AFTER_WRITE", async () => {
+    for (const boundary of ["abort", "open", "metadata"] as const) {
+      const path = join(root, `post-rename-${boundary}.txt`);
+      await writeFile(path, "old");
+      const resolved = await resolveExistingFile(path, root);
+      const expected = await readStableFile(resolved, 1024, true);
+      const controller = new AbortController();
+      const realRename = fsPromises.rename;
+      const realOpen = fsPromises.open;
+      let published = false;
+      let consumed = false;
+      const renameMock = spyOn(fsPromises, "rename").mockImplementation(
+        async (source, destination) => {
+          await realRename(source, destination);
+          published = true;
+          if (boundary === "abort") controller.abort(new Error("post-rename abort"));
+        },
+      );
+      const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+        if (!published || flags !== "r" || String(target) !== resolved.canonicalPath) {
+          return realOpen(target, flags, mode);
+        }
+        if (boundary === "open") throw syscallError("EIO");
+        const handle = await realOpen(target, flags, mode);
+        if (boundary === "metadata") {
+          const realStat = handle.stat.bind(handle);
+          let statCalls = 0;
+          spyOn(handle, "stat").mockImplementation((async () => {
+            const stats = await realStat();
+            statCalls += 1;
+            return statCalls === 2 ? ({ ...stats, mtimeMs: stats.mtimeMs + 1 } as Stats) : stats;
+          }) as typeof handle.stat);
+        }
+        return handle;
+      });
+      try {
+        await expect(
+          publishReplacement({
+            resolved,
+            expected,
+            replacement: encoder.encode("new"),
+            maxBytes: 1024,
+            signal: controller.signal,
+            consume() {
+              consumed = true;
+            },
+          }),
+        ).rejects.toThrow(
+          "RACE_AFTER_WRITE: Replacement was published, but post-publication verification failed. Inspect the target and take a fresh read before replanning. Do not blindly retry.",
+        );
+      } finally {
+        openMock.mockRestore();
+        renameMock.mockRestore();
+      }
+      expect(consumed).toBe(true);
+      expect(await readFile(path, "utf8")).toBe("new");
+    }
+  });
+
+  test("preserves the primary replacement error when staging cleanup also fails", async () => {
+    const path = join(root, "replacement-cleanup-failure.txt");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    const renameMock = spyOn(fsPromises, "rename").mockImplementation(async () => {
+      throw syscallError("EPERM");
+    });
+    const realRm = fsPromises.rm;
+    const rmMock = spyOn(fsPromises, "rm").mockImplementation(async (target, options) => {
+      if (String(target).includes(".hashline-")) throw syscallError("EBUSY");
+      return realRm(target, options);
+    });
+    try {
+      await expect(
+        publishReplacement({
+          resolved,
+          expected,
+          replacement: encoder.encode("new"),
+          maxBytes: 1024,
+          signal: new AbortController().signal,
+          consume() {},
+        }),
+      ).rejects.toThrow(
+        "UNSUPPORTED_FILE: The filesystem could not atomically replace the target. No replacement was published, but the snapshot was consumed; take a fresh read before choosing another workflow. Staging cleanup also failed; an internal temporary file may remain.",
+      );
+    } finally {
+      rmMock.mockRestore();
+      renameMock.mockRestore();
+    }
+    expect(await readFile(path, "utf8")).toBe("old");
+    const staging = (await readdir(root)).filter((entry) => entry.includes(".hashline-"));
+    expect(staging).toHaveLength(1);
+    await rm(join(root, staging[0] as string), { force: true });
   });
 
   test("rejects stale, read-only, and aborted replacements before publication", async () => {
@@ -999,6 +1201,57 @@ describe("filesystem publication", () => {
       }
       await expect(assertTargetAbsent(resolved)).resolves.toBeUndefined();
     }
+    expect((await readdir(root)).some((entry) => entry.includes(".hashline-"))).toBe(false);
+  });
+
+  test("normalizes unexpected replacement and create publication errors", async () => {
+    const replacementPath = join(root, "replace-EIO.txt");
+    await writeFile(replacementPath, "old");
+    const replacementResolved = await resolveExistingFile(replacementPath, root);
+    const replacementExpected = await readStableFile(replacementResolved, 1024, true);
+    const renameMock = spyOn(fsPromises, "rename").mockImplementation(async () => {
+      throw Object.assign(new Error("raw EIO"), { code: "EIO" });
+    });
+    let consumed = false;
+    try {
+      await expect(
+        publishReplacement({
+          resolved: replacementResolved,
+          expected: replacementExpected,
+          replacement: encoder.encode("new"),
+          maxBytes: 1024,
+          signal: new AbortController().signal,
+          consume() {
+            consumed = true;
+          },
+        }),
+      ).rejects.toThrow(
+        "RACE_AFTER_WRITE: Replacement publication returned an unexpected filesystem error. Publication may have occurred; inspect the target and take a fresh read before replanning. Do not blindly retry.",
+      );
+    } finally {
+      renameMock.mockRestore();
+    }
+    expect(consumed).toBe(true);
+    expect(await readFile(replacementPath, "utf8")).toBe("old");
+
+    const createResolved = await resolveNewFile("create-EIO.txt", root);
+    const linkMock = spyOn(fsPromises, "link").mockImplementation(async () => {
+      throw Object.assign(new Error("raw EIO"), { code: "EIO" });
+    });
+    try {
+      await expect(
+        publishNewFile({
+          resolved: createResolved,
+          bytes: encoder.encode("new"),
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow(
+        "RACE_AFTER_WRITE: The target link operation returned an unexpected filesystem error. The target file may already be committed; inspect it before retrying. If it exists, take a fresh hashline_read before editing; if it is absent, rebuild the creation plan. Do not blindly retry.",
+      );
+    } finally {
+      linkMock.mockRestore();
+    }
+    await expect(assertTargetAbsent(createResolved)).resolves.toBeUndefined();
     expect((await readdir(root)).some((entry) => entry.includes(".hashline-"))).toBe(false);
   });
 

@@ -34,39 +34,44 @@ function digest(value: string | Uint8Array): string {
 
 type JsonSchemaNode = {
   enum?: string[] | undefined;
+  description?: string | undefined;
   items?: JsonSchemaNode | undefined;
   properties?: Record<string, JsonSchemaNode> | undefined;
   required?: string[] | undefined;
+  type?: string | undefined;
 };
 
-function providerSchemaWireSize(): {
+function rawEditSchemaFixtureWireSize(): {
   scenario: string;
   legacyBytes: number;
   currentBytes: number;
   deltaBytes: number;
   deltaPercent: number;
 } {
-  const legacyDescription =
+  const syntheticBaselineDescription =
     'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. rebase defaults to none; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.';
   const currentParameters = z.toJSONSchema(hashlineEditArgumentsSchema);
-  const legacyParameters = structuredClone(currentParameters) as JsonSchemaNode;
-  const operation = legacyParameters.properties?.operations?.items;
+  const baselineParameters = structuredClone(currentParameters) as JsonSchemaNode;
+  const operation = baselineParameters.properties?.operations?.items;
   const discriminator = operation?.properties?.op;
   if (!operation || !discriminator) {
-    throw new Error("Unexpected hashline_edit provider schema shape.");
+    throw new Error("Unexpected hashline_edit raw JSON Schema fixture shape.");
   }
   discriminator.enum = ["replace", "insert", "replace_file"];
   operation.required = ["op", "lines"];
 
   const encoder = new TextEncoder();
   const legacyBytes = encoder.encode(
-    JSON.stringify({ description: legacyDescription, parameters: legacyParameters }),
+    JSON.stringify({
+      description: syntheticBaselineDescription,
+      parameters: baselineParameters,
+    }),
   ).byteLength;
   const currentBytes = encoder.encode(
     JSON.stringify({ description: hashlineEditDescription, parameters: currentParameters }),
   ).byteLength;
   return {
-    scenario: "hashline_edit description plus JSON Schema",
+    scenario: "hashline_edit description plus raw JSON Schema fixture",
     legacyBytes,
     currentBytes,
     deltaBytes: currentBytes - legacyBytes,
@@ -74,7 +79,7 @@ function providerSchemaWireSize(): {
   };
 }
 
-function writeSchemaWireSize(): {
+function rawWriteSchemaFixtureWireSize(): {
   scenario: string;
   legacyBytes: number;
   currentBytes: number;
@@ -82,16 +87,20 @@ function writeSchemaWireSize(): {
   deltaPercent: number;
 } {
   const currentParameters = z.toJSONSchema(hashlineWriteArgumentsSchema);
-  const legacyParameters = structuredClone(currentParameters) as JsonSchemaNode;
-  if (!legacyParameters.properties?.createParents) {
-    throw new Error("Unexpected hashline_write provider schema shape.");
+  const baselineParameters = structuredClone(currentParameters) as JsonSchemaNode;
+  if (!baselineParameters.properties) {
+    throw new Error("Unexpected hashline_write raw JSON Schema fixture shape.");
   }
-  delete legacyParameters.properties.createParents;
+  baselineParameters.properties.createParents = {
+    description:
+      "Default false: a missing parent fails with PATH_NOT_FOUND. true creates up to 64 missing parents through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
+    type: "boolean",
+  };
   const encoder = new TextEncoder();
-  const legacyBytes = encoder.encode(JSON.stringify(legacyParameters)).byteLength;
+  const legacyBytes = encoder.encode(JSON.stringify(baselineParameters)).byteLength;
   const currentBytes = encoder.encode(JSON.stringify(currentParameters)).byteLength;
   return {
-    scenario: "hashline_write JSON Schema",
+    scenario: "hashline_write raw JSON Schema fixture",
     legacyBytes,
     currentBytes,
     deltaBytes: currentBytes - legacyBytes,
@@ -125,8 +134,8 @@ const implementationSources = await Promise.all(
 const deterministic = runDeterministicSuite();
 const staticSize = runStaticSizeSuite();
 const renderingWireSize = runRenderingWireSuite();
-const operationSchemaWireSize = providerSchemaWireSize();
-const writeOperationSchemaWireSize = writeSchemaWireSize();
+const operationSchemaWireSize = rawEditSchemaFixtureWireSize();
+const writeOperationSchemaWireSize = rawWriteSchemaFixtureWireSize();
 const fileLifecycleCallWireSize = runFileLifecycleCallWireSuite();
 const editProtocolUxCallWireSize = runEditProtocolUxCallWireSuite();
 const transferCallWireSize = runTransferCallWireSuite();
@@ -146,7 +155,7 @@ if (
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 7,
+  schemaVersion: 8,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -171,13 +180,13 @@ const result = {
     renderingWireSize:
       "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",
     operationSchemaWireSize:
-      "Exact compact UTF-8 JSON bytes for the hashline_edit description and provider schema before and after transfer and lifecycle operations.",
+      "Exact compact UTF-8 JSON bytes for the hashline_edit description plus raw z.toJSONSchema fixture, compared with a synthetic baseline derived from that current schema; not a provider projection or token estimate.",
     writeOperationSchemaWireSize:
-      "Exact compact UTF-8 JSON bytes for the hashline_write provider schema before and after opt-in parent creation.",
+      "Exact compact UTF-8 JSON bytes for the hashline_write raw z.toJSONSchema fixture and its reconstructed pre-change baseline with optional createParents; not a provider projection or token estimate.",
     fileLifecycleCallWireSize:
       "Exact compact UTF-8 JSON bytes for valid Better Hashline lifecycle calls and equivalent native apply_patch calls; no semantic or safety advantage is inferred from size.",
     editProtocolUxCallWireSize:
-      "Exact compact UTF-8 JSON bytes for default versus explicit readback-window calls and strict versus opt-in parent-creation calls.",
+      "Exact compact UTF-8 JSON bytes for legacy explicit controls versus inferred readback, empty-file, and parent-creation calls.",
     transferCallWireSize:
       "Exact compact UTF-8 JSON bytes for copy/move calls versus equivalent model-supplied insert/replace payloads.",
     moveCorridorWireSize:
@@ -203,9 +212,9 @@ console.log("\nStatic model-visible size\n");
 console.table(staticSize);
 console.log("\nLong-line rendering wire-size change\n");
 console.table([renderingWireSize]);
-console.log("\nOperation-schema wire-size change\n");
+console.log("\nRaw edit-schema fixture wire-size change\n");
 console.table([operationSchemaWireSize]);
-console.log("\nWrite-schema wire-size change\n");
+console.log("\nRaw write-schema fixture wire-size change\n");
 console.table([writeOperationSchemaWireSize]);
 console.log("\nFile-lifecycle call wire size\n");
 console.table(fileLifecycleCallWireSize);

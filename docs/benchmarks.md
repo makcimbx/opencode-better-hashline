@@ -14,21 +14,22 @@ Better Hashline separates mechanical protocol evidence from model-quality eviden
 
 ## Retained Deterministic Run
 
-Latest retained raw result: [`benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json`](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json)
+Latest retained raw result: [`benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json)
 
 The 15-scenario and 21-scenario results remain available as immutable historical evidence in
 [`2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json) and
 [`2026-07-19-windows-x64.json`](../benchmarks/results/2026-07-19-windows-x64.json). The frozen
 [`2026-07-19-transfer-windows-x64.json`](../benchmarks/results/2026-07-19-transfer-windows-x64.json)
-schema-v5 record adds transfer safety, provider-schema, call-payload, and move-corridor evidence
+schema-v5 record adds transfer safety, raw-schema fixture, call-payload, and move-corridor evidence
 without rewriting either earlier result.
 
 The schema-v5 evidence is frozen. It predates `delete_file`, `move_file`, `file-ops-v1`, and
 `native-aliases/v2`; it must not be relabeled as lifecycle-operation evidence. The immutable
 [`2026-07-22-file-lifecycle-windows-x64.json`](../benchmarks/results/2026-07-22-file-lifecycle-windows-x64.json)
-schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtures. The current
+schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtures. The retained
 schema-v7 record adds the composed-move case and edit/write/readback/parent-create wire fixtures.
-Both are mechanical fixture evidence, not paid model-quality evidence.
+The schema-v8 record keeps those safety cases and measures the simpler inferred defaults. All are
+mechanical fixture evidence, not paid model-quality evidence.
 
 Environment: Windows x64, Bun 1.3.14, AMD64 Family 25 Model 97. Five microbenchmark warmups; 100 measured runs below 10,000 lines and 30 runs at or above it.
 
@@ -50,10 +51,10 @@ The expected outcomes encode this project's conservative relocation contract. Th
 
 ## Schema-v7 Retained Result
 
-The current deterministic runner emits schema v7. It keeps the generated, seed-free, model-free
-classification methodology and adds one allowed move-with-intervening-replacements case to the
-adversarial corpus. It also measures the expanded edit/write schemas and compact readback and parent
-creation calls. Current classifications are:
+The schema-v7 runner emitted schema v7. That retained result used the generated, seed-free, model-free
+classification methodology, added one allowed move-with-intervening-replacements case to the
+adversarial corpus, and measured then-current edit/write raw-schema plus compact readback and parent
+creation fixtures. Its retained classifications are:
 
 | Adapter | Exact applies | Safe rejects | False rejects | Unsafe accepts |
 | --- | ---: | ---: | ---: | ---: |
@@ -68,6 +69,20 @@ These values are retained in
 [`2026-07-22-edit-protocol-ux-windows-x64.json`](../benchmarks/results/2026-07-22-edit-protocol-ux-windows-x64.json).
 The schema-v6 lifecycle record and schema-v5 records remain immutable, as does the closed pilot-v7
 scope. This output makes no paid or model-quality claim.
+
+## Schema-v8 Retained Result
+
+The current runner emits schema v8. It retains the schema-v7 29-case corpus and therefore the same
+classifications: strict `6/18/5/0`, unique `11/18/0/0`, exact search `10/13/1/5`, line numbers
+`7/1/0/21`, endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
+(`exact_apply/safe_reject/false_reject/unsafe_accept`). The new record changes wire fixtures only:
+readback windows imply readback, `lines:[]` implies no final newline, and create-only writes create
+bounded missing parents without a separate option.
+
+These values are retained in
+[`2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json).
+The prior schema records and closed pilot-v7 scope remain immutable. This output makes no paid or
+model-quality claim.
 
 ## Static Size
 
@@ -95,16 +110,16 @@ The change spends 908 additional visible bytes in this fixture to make the compl
 
 ## Transfer Wire Size
 
-Adding both transfer operations and their model-facing coordinate rules grows the compact
-`hashline_edit` description plus generated JSON Schema from 1,300 to 1,541 UTF-8 bytes: +241 bytes,
-or 18.54%. The provider schema remains flat; `lines` is optional at schema level and runtime-required
-for the three payload operations.
+The retained transfer fixture measured the compact `hashline_edit` description plus generated raw
+JSON Schema growing from 1,300 to 1,541 UTF-8 bytes: +241 bytes, or 18.54%. This is a
+`z.toJSONSchema` fixture, not the actual provider projection. It remains flat; `lines` is optional at
+schema level and runtime-required for the three payload operations.
 
-Making every operation-specific field combination and payload constraint explicit, while matching
-the runtime's optional `rebase`, grows the same compact payload from 1,541 to 2,749 UTF-8 bytes:
-+1,208 bytes, or 78.39%. This adds description metadata and relaxes the generated schema to accept an
-already-supported omitted default; existing calls, transcripts, and configuration require no
-migration.
+The subsequent retained fixture made every operation-specific field combination and payload
+constraint explicit while matching the runtime's optional `rebase`. Its compact raw-schema payload
+grew from 1,541 to 2,749 UTF-8 bytes: +1,208 bytes, or 78.39%. This added description metadata and
+relaxed the generated fixture to accept an already-supported omitted default; existing calls,
+transcripts, and configuration required no migration.
 
 The call-size fixture compares one compact transfer call with the equivalent retained text echoed in
 an `insert`, or in an `insert` plus deletion for move:
@@ -127,12 +142,12 @@ different read-economics and should be evaluated independently.
 
 ## File Lifecycle Wire Size
 
-The retained schema-v6 runner compared its then-current flat description and provider schema with its
-pre-transfer/lifecycle baseline:
+The retained schema-v6 runner compared its then-current flat description and raw generated JSON
+Schema fixture with a synthetic pre-transfer/lifecycle baseline derived from that schema:
 
-| Fixture | Baseline bytes | Current bytes | Change |
+| Fixture | Synthetic baseline bytes | Expanded fixture bytes | Change |
 | --- | ---: | ---: | ---: |
-| `hashline_edit` description plus JSON Schema | 3,095 | 4,125 | +1,030 (+33.28%) |
+| `hashline_edit` description plus raw JSON Schema fixture | 3,095 | 4,125 | +1,030 (+33.28%) |
 
 It also compares compact valid lifecycle calls with equivalent native `apply_patch` calls:
 
@@ -150,10 +165,10 @@ claim. The retained schema-v6 JSON records these values without expanding their 
 
 The retained schema-v7 result records the following exact compact UTF-8 fixture sizes:
 
-| Fixture | Baseline bytes | Current bytes | Change |
+| Fixture | Synthetic baseline bytes | Expanded fixture bytes | Change |
 | --- | ---: | ---: | ---: |
-| `hashline_edit` schema | 3,686 | 5,033 | +1,347 (+36.54%) |
-| `hashline_write` schema | 282 | 548 | +266 (+94.33%) |
+| `hashline_edit` raw-schema fixture | 3,686 | 5,033 | +1,347 (+36.54%) |
+| `hashline_write` raw-schema fixture | 282 | 548 | +266 (+94.33%) |
 | Explicit text readback call | 181 | 218 | +37 |
 | Parent-creating write call | 50 | 81 | +31 |
 
@@ -162,6 +177,25 @@ composition, and text readback windows. The write schema delta covers explicit b
 creation. The calls isolate `readbackOffset`/`readbackLimit` and `createParents:true`; they do not
 measure tokens or model behavior. Static-size, long-line rendering, lifecycle-call, transfer-call,
 move-corridor, and timing methodology are unchanged from the earlier retained evidence.
+
+## Schema-v8 Retained Wire Size
+
+The retained schema-v8 result records exact compact UTF-8 fixture sizes for the current defaults:
+
+| Fixture | Legacy explicit bytes | Simplified/current bytes | Change |
+| --- | ---: | ---: | ---: |
+| `hashline_edit` raw-schema fixture | 4,694 | 6,127 | +1,433 (+30.53%) |
+| `hashline_write` raw-schema fixture | 849 | 531 | -318 (-37.46%) |
+| Bounded text readback call | 202 | 186 | -16 (-7.92%) |
+| Empty-file `replace_file` call | 138 | 117 | -21 (-15.22%) |
+| Parent-creating write call | 81 | 60 | -21 (-25.93%) |
+
+The write comparison reconstructs the pre-change optional `createParents` property on the current
+two-field schema; it is not the older schema-v7 JSON fixture. The three call comparisons remove only
+redundant controls: `readback:true`, `finalNewline:false` for `lines:[]`, and `createParents:true`.
+The same run records compact lifecycle calls without redundant `rebase:"none"`: delete is 105 bytes
+versus 79 for native `apply_patch`; move is 138 versus 108. These byte deltas are not token, safety,
+or model-quality claims.
 
 ## Core Timings
 
@@ -176,13 +210,14 @@ bun run bench
 bun run bench --output=benchmarks/results/local/my-run.json
 ```
 
-The schema-v7 runner prints summary tables and optionally writes the complete corpus,
-classifications, environment, static/rendering sizes, edit/write-schema, lifecycle/readback/parent-
-creation call, transfer-call, corridor-read evidence, and microbenchmark distributions.
+The schema-v8 runner prints summary tables and optionally writes the complete corpus,
+classifications, environment, static/rendering sizes, edit/write raw-schema fixtures,
+lifecycle and simplified-default call fixtures, transfer-call evidence, corridor-read evidence,
+and microbenchmark distributions.
 
 Result paths are write-once by default. Use `--force` only when deliberately regenerating an
-unpublished checked result from its final source revision. Never overwrite the retained schema-v7
-record; use a new dated path for a changed runner or protocol.
+unpublished checked result from its final source revision. Never overwrite retained schema-v5,
+schema-v6, schema-v7, or schema-v8 evidence; use a new dated path for a changed runner or protocol.
 
 ## Model Harness
 

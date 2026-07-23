@@ -48,8 +48,8 @@ complete accounting. It covered the earlier text-operation contract and provides
 `delete_file`, `move_file`, `file-ops-v1`, `native-aliases/v2`, or lifecycle metadata. It is
 technical transport evidence without a model-superiority claim; all pilot IDs through v7 are
 closed. There is no paid model result or model-quality claim for the new task or adapter identity.
-The retained schema-v7 deterministic result is likewise model-free mechanical evidence, not a
-continuation of pilot v7 or a paid model-quality result.
+The retained schema-v7 and schema-v8 deterministic results are likewise model-free mechanical
+evidence, not continuations of pilot v7 or paid model-quality results.
 
 `--native-alias-probe` is development evidence only. It accepts the exact focused probe tasks or the
 full `baseline-v1` task set, the native-alias-only probe adapter set or current paired

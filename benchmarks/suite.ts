@@ -639,7 +639,6 @@ function serializedEditCall(operations: readonly EditOperation[]): number {
     JSON.stringify({
       filePath: "src/example.ts",
       snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
-      rebase: "none",
       operations,
     }),
   ).byteLength;
@@ -685,7 +684,6 @@ export function runFileLifecycleCallWireSuite() {
   const hashlineBase = {
     filePath: "src/example.ts",
     snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
-    rebase: "none",
   };
   const calls = [
     {
@@ -721,33 +719,51 @@ export function runFileLifecycleCallWireSuite() {
 
 export function runEditProtocolUxCallWireSuite() {
   const serialized = (value: unknown) => encoder.encode(JSON.stringify(value)).byteLength;
-  const base = {
+  const editBase = {
     filePath: "src/example.ts",
     snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
-    rebase: "none",
     operations: [{ op: "replace", startLine: 10, endLine: 10, lines: ["changed"] }],
-    readback: true,
   };
-  const defaultReadbackBytes = serialized(base);
-  const explicitWindowBytes = serialized({ ...base, readbackOffset: 8, readbackLimit: 5 });
-  const strictWriteBytes = serialized({ filePath: "src/new.ts", content: "export {};\n" });
-  const createParentsBytes = serialized({
+  const inferredReadback = { ...editBase, readbackOffset: 8, readbackLimit: 5 };
+  const explicitReadbackBytes = serialized({ ...inferredReadback, readback: true });
+  const inferredReadbackBytes = serialized(inferredReadback);
+  const emptyFileBase = {
+    filePath: "src/example.ts",
+    snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
+    operations: [{ op: "replace_file", lines: [] }],
+  };
+  const explicitEmptyFileBytes = serialized({
+    ...emptyFileBase,
+    operations: [{ op: "replace_file", lines: [], finalNewline: false }],
+  });
+  const inferredEmptyFileBytes = serialized(emptyFileBase);
+  const automaticParentCreation = {
     filePath: "src/generated/new.ts",
     content: "export {};\n",
+  };
+  const explicitParentCreationBytes = serialized({
+    ...automaticParentCreation,
     createParents: true,
   });
+  const automaticParentCreationBytes = serialized(automaticParentCreation);
   return [
     {
-      scenario: "explicit readback window",
-      baselineBytes: defaultReadbackBytes,
-      currentBytes: explicitWindowBytes,
-      deltaBytes: explicitWindowBytes - defaultReadbackBytes,
+      scenario: "inferred readback window",
+      baselineBytes: explicitReadbackBytes,
+      currentBytes: inferredReadbackBytes,
+      deltaBytes: inferredReadbackBytes - explicitReadbackBytes,
     },
     {
-      scenario: "opt-in parent creation",
-      baselineBytes: strictWriteBytes,
-      currentBytes: createParentsBytes,
-      deltaBytes: createParentsBytes - strictWriteBytes,
+      scenario: "inferred empty-file newline",
+      baselineBytes: explicitEmptyFileBytes,
+      currentBytes: inferredEmptyFileBytes,
+      deltaBytes: inferredEmptyFileBytes - explicitEmptyFileBytes,
+    },
+    {
+      scenario: "automatic parent creation",
+      baselineBytes: explicitParentCreationBytes,
+      currentBytes: automaticParentCreationBytes,
+      deltaBytes: automaticParentCreationBytes - explicitParentCreationBytes,
     },
   ];
 }

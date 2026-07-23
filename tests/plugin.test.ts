@@ -298,7 +298,7 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
-  test("issues only an explicit contiguous post-edit readback window", async () => {
+  test("infers post-edit readback from an offset-only window", async () => {
     const file = join(root, "window.txt");
     const lines = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`);
     await writeFile(file, `${lines.join("\n")}\n`);
@@ -312,9 +312,7 @@ describe("OpenCode plugin protocol", () => {
     const args = {
       filePath: "window.txt",
       snapshotId: String(readResult.metadata.snapshotId),
-      readback: true,
       readbackOffset: 8,
-      readbackLimit: 5,
       operations: [{ op: "replace" as const, startLine: 10, endLine: 10, lines: ["changed"] }],
     };
     const editResult = structured(await hashlineEdit.execute(args, toolContext));
@@ -326,7 +324,8 @@ describe("OpenCode plugin protocol", () => {
     expect(editResult.output).toContain("10|changed");
     expect(editResult.output).toContain("12|line-12");
     expect(editResult.output).not.toContain("7|line-7");
-    expect(editResult.output).not.toContain("13|line-13");
+    expect(editResult.output).toContain("13|line-13");
+    expect(editResult.output).toContain("20|line-20");
 
     await value["tool.execute.after"]?.(
       { tool: "hashline_edit", sessionID: "session", callID: "window-readback", args },
@@ -337,7 +336,7 @@ describe("OpenCode plugin protocol", () => {
         {
           filePath: "window.txt",
           snapshotId: successorId,
-          operations: [{ op: "replace", startLine: 13, endLine: 13, lines: ["outside"] }],
+          operations: [{ op: "replace", startLine: 7, endLine: 7, lines: ["outside"] }],
         },
         toolContext,
       ),
@@ -606,6 +605,8 @@ describe("OpenCode plugin protocol", () => {
     expect(schema.properties?.limit?.maximum).toBe(100_000);
     expect(schema.properties?.limit?.description).toContain("maxOutputBytes");
     expect(schema.properties?.limit?.description).toContain("@more");
+    expect(schema.properties?.limit?.description).toContain("@eof");
+    expect(schema.properties?.limit?.description).toContain("partial=true");
     const result = structured(
       await hashlineRead.execute({ filePath: "many-lines.txt", limit: 2000 }, toolContext),
     );
@@ -614,7 +615,7 @@ describe("OpenCode plugin protocol", () => {
     expect(result.output).toContain("@eof");
     await expect(
       hashlineRead.execute({ filePath: "many-lines.txt", limit: 100_001 }, toolContext),
-    ).rejects.toThrow("INVALID_ARGUMENT: Invalid hashline_read arguments.");
+    ).rejects.toThrow("INVALID_ARGUMENT: limit exceeds its maximum of 100000.");
     await value.dispose?.();
   });
 
@@ -1065,7 +1066,7 @@ describe("OpenCode plugin protocol", () => {
       [malformedLegacy, oversizedLegacy],
     ]) {
       await expect(hashlineEdit.execute({ ...common, operations }, toolContext)).rejects.toThrow(
-        "UNSUPPORTED_FILE: Replacement payload exceeds the configured safety limits.",
+        "UNSUPPORTED_FILE: Replacement payload exceeds maxFileBytes=1024 or maxLines=100000. No publication occurred and the snapshot was not consumed; reduce the payload before retrying.",
       );
     }
     expect(await readFile(file, "utf8")).toBe("old\n");
@@ -1125,7 +1126,8 @@ describe("OpenCode plugin protocol", () => {
           readbackLimit: 1,
           operations: [{ op: "move_file", destinationPath: "other.txt" }],
         },
-        message: "move_file does not support readback.",
+        message:
+          "move_file does not accept readback, readbackOffset, or readbackLimit. Remove them and retry with the same snapshot.",
       },
       {
         args: {
@@ -1133,7 +1135,8 @@ describe("OpenCode plugin protocol", () => {
           readbackOffset: 1,
           operations: [{ op: "move_file", destinationPath: "other.txt" }],
         },
-        message: "move_file does not support readback.",
+        message:
+          "move_file does not accept readback, readbackOffset, or readbackLimit. Remove them and retry with the same snapshot.",
       },
       {
         args: {
@@ -1141,15 +1144,17 @@ describe("OpenCode plugin protocol", () => {
           readbackLimit: 1,
           operations: [{ op: "delete_file" }],
         },
-        message: "delete_file does not support readback.",
+        message:
+          "delete_file does not accept readback, readbackOffset, or readbackLimit. Remove them and retry with the same snapshot.",
       },
       {
         args: {
           ...common,
+          readback: false,
           readbackOffset: 1,
           operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
         },
-        message: "readbackOffset and readbackLimit require readback:true.",
+        message: "readbackOffset and readbackLimit conflict with readback:false.",
       },
       {
         args: {
@@ -1220,7 +1225,7 @@ describe("OpenCode plugin protocol", () => {
       },
       {
         initial: "a\n",
-        operation: { op: "replace_file", lines: [], finalNewline: false },
+        operation: { op: "replace_file", lines: [] },
         expected: "",
       },
       {
@@ -1357,11 +1362,14 @@ describe("OpenCode plugin protocol", () => {
       required?: string[];
       properties?: {
         allowHashlinePrefixes?: SchemaProperty;
+        filePath?: SchemaProperty;
         readback?: SchemaProperty;
         readbackLimit?: SchemaProperty;
         readbackOffset?: SchemaProperty;
         rebase?: SchemaProperty;
+        snapshotId?: SchemaProperty;
         operations?: {
+          description?: string;
           items?: {
             additionalProperties?: boolean;
             description?: string;
@@ -1375,6 +1383,10 @@ describe("OpenCode plugin protocol", () => {
 
     expect(schema.additionalProperties).toBe(false);
     expect(schema.required).toEqual(["filePath", "snapshotId", "operations"]);
+    expect(schema.properties?.filePath?.description).toContain("same canonical file");
+    expect(schema.properties?.snapshotId?.description).toContain("do not invent it or reuse it");
+    expect(schema.properties?.operations?.description).toContain("1..100");
+    expect(schema.properties?.operations?.description).toContain("original immutable snapshot");
     expect(operation?.additionalProperties).toBe(false);
     expect(operation?.properties?.op?.enum).toEqual([
       "replace",
@@ -1411,7 +1423,7 @@ describe("OpenCode plugin protocol", () => {
     expect(operation?.properties?.lines?.description).toContain("without CR, LF, NUL");
     expect(operation?.properties?.finalNewline?.description).toContain("Only for replace_file");
     expect(operation?.properties?.finalNewline?.description).toContain(
-      "an empty file requires false",
+      "lines:[] defaults to false",
     );
     expect(schema.properties?.rebase?.description).toContain(
       "replace_file, delete_file, and move_file forbid unique",
@@ -1419,16 +1431,18 @@ describe("OpenCode plugin protocol", () => {
     expect(schema.properties?.rebase?.description).toContain("still-retained snapshot");
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("Column-0 prefixes");
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("initial call");
-    expect(schema.properties?.readback?.description).toContain("structural verification");
-    expect(schema.properties?.readback?.description).toContain("attested successor");
-    expect(schema.properties?.readback?.description).toContain("potentially partial");
-    expect(schema.properties?.readbackOffset?.description).toContain("post-edit file");
+    expect(schema.properties?.readback?.description).toContain("defaults to false unless");
+    expect(schema.properties?.readback?.description).toContain("attachment can be unavailable");
+    expect(schema.properties?.readback?.description).toContain("Lifecycle operations reject true");
+    expect(schema.properties?.readbackOffset?.description).toContain("implies readback");
     expect(schema.properties?.readbackOffset?.description).toContain("first hunk");
-    expect(schema.properties?.readbackLimit?.description).toContain("contiguous successor page");
+    expect(schema.properties?.readbackLimit?.description).toContain("implies readback");
     expect(schema.properties?.readbackLimit?.description).toContain("defaults to 1000");
     expect(schema.properties?.readbackLimit?.maximum).toBe(100_000);
     expect(schema.properties?.readbackLimit?.description).toContain("maxOutputBytes");
     expect(schema.properties?.readbackLimit?.description).toContain("@more");
+    expect(schema.properties?.readbackLimit?.description).toContain("@eof");
+    expect(schema.properties?.readbackLimit?.description).toContain("partial=true");
     const validEditArguments = {
       filePath: "file.txt",
       snapshotId: "s_0000000000000000000000",
@@ -1451,16 +1465,18 @@ describe("OpenCode plugin protocol", () => {
     );
     expect(hashlineEditDescription).toContain("copy reads pre-edit source");
     expect(hashlineEditDescription).toContain("may touch a destructive endpoint");
-    expect(hashlineEditDescription).toContain("readback:true returns one contiguous");
     expect(hashlineEditDescription).toContain(
-      "readbackOffset selects its one-based post-edit start",
+      "readback:true or either window field requests one successor page",
     );
-    expect(hashlineEditDescription).toContain("maxOutputBytes");
-    expect(hashlineEditDescription).toContain("partial=true");
-    expect(hashlineEditDescription).toContain("@more");
-    expect(hashlineEditDescription).toContain("cannot revive a consumed or unknown snapshot");
-    expect(hashlineEditDescription).toContain("finalNewline is replace_file-only");
-    expect(hashlineEditDescription).toContain("replace lines:[] deletes");
+    expect(hashlineEditDescription).not.toContain("readbackOffset selects");
+    expect(hashlineEditDescription).not.toContain("maxOutputBytes");
+    expect(hashlineEditDescription).toContain("Text batches publish one atomic replacement");
+    expect(hashlineEditDescription).toContain("move_file is nontransactional");
+    expect(hashlineEditDescription).toContain("PARTIAL_PUBLICATION");
+    expect(hashlineEditDescription).toContain("attachment can be unavailable");
+    expect(hashlineEditDescription).not.toContain("@eof");
+    expect(hashlineEditDescription).not.toContain("finalNewline is replace_file-only");
+    expect(hashlineEditDescription).not.toContain("replace lines:[] deletes");
   });
 
   test("validates complete tool arguments before permissions or filesystem access", async () => {
@@ -1471,7 +1487,7 @@ describe("OpenCode plugin protocol", () => {
 
     await expect(
       hashlineRead.execute({ filePath: "missing.txt", unexpected: true } as never, toolContext),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    ).rejects.toThrow("INVALID_ARGUMENT: unexpected is not accepted by hashline_read.");
     await expect(
       hashlineEdit.execute(
         {
@@ -1481,7 +1497,9 @@ describe("OpenCode plugin protocol", () => {
         } as never,
         toolContext,
       ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    ).rejects.toThrow(
+      "INVALID_ARGUMENT: operations[0].unexpected is not accepted by hashline_edit.",
+    );
     await expect(
       hashlineEdit.execute(
         {
@@ -1491,10 +1509,12 @@ describe("OpenCode plugin protocol", () => {
         },
         toolContext,
       ),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    ).rejects.toThrow(
+      "INVALID_ARGUMENT: replace requires startLine, endLine, and lines, and does not accept afterLine or finalNewline.",
+    );
     await expect(
       hashlineWrite.execute({ filePath: "new.txt", content: 1 } as never, toolContext),
-    ).rejects.toThrow("INVALID_ARGUMENT:");
+    ).rejects.toThrow("INVALID_ARGUMENT: content must be a string.");
     expect(asks).toEqual([]);
     await expect(readFile(join(root, "new.txt"))).rejects.toThrow();
   });
@@ -2060,11 +2080,7 @@ describe("OpenCode plugin protocol", () => {
       ).rejects.toThrow("INVALID_ARGUMENT:");
       await expect(
         hashlineWrite.execute(
-          {
-            filePath: "missing/bad.txt:stream",
-            content: "invalid",
-            createParents: true,
-          },
+          { filePath: "missing/bad.txt:stream", content: "invalid" },
           toolContext,
         ),
       ).rejects.toThrow("INVALID_ARGUMENT:");
@@ -2073,43 +2089,45 @@ describe("OpenCode plugin protocol", () => {
     }
   });
 
-  test("creates missing parents only through an explicit fixed plan", async () => {
+  test("creates missing parents through one fixed plan by default", async () => {
     expect(
       hashlineWriteArgumentsSchema.safeParse({
         filePath: "nested/inner/new.txt",
         content: "created\n",
-        createParents: true,
       }).success,
     ).toBe(true);
-    expect(
-      hashlineWriteArgumentsSchema.safeParse({
-        filePath: "nested/inner/new.txt",
-        content: "created\n",
-        createParents: "yes",
-      }).success,
-    ).toBe(false);
+    for (const createParents of [true, false, "yes"]) {
+      expect(
+        hashlineWriteArgumentsSchema.safeParse({
+          filePath: "nested/inner/new.txt",
+          content: "created\n",
+          createParents,
+        }).success,
+      ).toBe(false);
+    }
 
     const asks: AskRecord[] = [];
     const value = await hooks();
     const { hashlineWrite } = registry(value);
     const toolContext = context({ asks });
     await expect(
-      hashlineWrite.execute({ filePath: "strict/inner.txt", content: "strict\n" }, toolContext),
-    ).rejects.toThrow("PATH_NOT_FOUND:");
-    await expect(
       hashlineWrite.execute(
-        { filePath: "strict/inner.txt", content: "strict\n", createParents: false },
+        {
+          filePath: "obsolete/inner.txt",
+          content: "obsolete\n",
+          createParents: true,
+        } as never,
         toolContext,
       ),
-    ).rejects.toThrow("PATH_NOT_FOUND:");
+    ).rejects.toThrow("INVALID_ARGUMENT: createParents is not accepted by hashline_write.");
     expect(asks).toHaveLength(0);
+    expect(await readdir(root)).toEqual([]);
 
     const result = structured(
       await hashlineWrite.execute(
         {
           filePath: "nested/inner/new.txt",
           content: "created\n",
-          createParents: true,
         },
         toolContext,
       ),
@@ -2134,6 +2152,41 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
+  test("invalidates snapshots for every path created by a parent plan", async () => {
+    const parentPath = join(root, "former-file");
+    await writeFile(parentPath, "original\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit, hashlineWrite } = registry(value);
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "former-file" }, context()),
+    );
+    await activateRead(value, readResult);
+    await rm(parentPath);
+
+    await hashlineWrite.execute(
+      {
+        filePath: "former-file/created.txt",
+        content: "created\n",
+      },
+      context(),
+    );
+    await rm(parentPath, { recursive: true });
+    await writeFile(parentPath, "original\n");
+
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "former-file",
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [{ op: "replace_file", lines: ["changed"], finalNewline: true }],
+        },
+        context(),
+      ),
+    ).rejects.toThrow("SNAPSHOT_UNKNOWN:");
+    expect(await readFile(parentPath, "utf8")).toBe("original\n");
+    await value.dispose?.();
+  });
+
   test("authorizes an external parent plan before approval or mutation", async () => {
     const externalRoot = await mkdtemp(join(tmpdir(), "better-hashline-plugin-parents-"));
     const value = await hooks();
@@ -2146,7 +2199,6 @@ describe("OpenCode plugin protocol", () => {
           {
             filePath: join(externalRoot, "denied", "inner", "new.txt"),
             content: "denied\n",
-            createParents: true,
           },
           context({
             asks: deniedAsks,
@@ -2181,7 +2233,6 @@ describe("OpenCode plugin protocol", () => {
         {
           filePath: target,
           content: "allowed\n",
-          createParents: true,
         },
         context({ asks: allowedAsks }),
       );
@@ -2212,39 +2263,32 @@ describe("OpenCode plugin protocol", () => {
     }
   });
 
-  test("preserves existing-parent behavior for explicit false and zero-missing true", async () => {
+  test("uses the same parent plan when no directories are missing", async () => {
     await mkdir(join(root, "existing-parent"));
     const asks: AskRecord[] = [];
     const value = await hooks();
     const { hashlineWrite } = registry(value);
     const toolContext = context({ asks });
 
-    const strict = structured(
+    const first = structured(
       await hashlineWrite.execute(
-        {
-          filePath: "existing-parent/strict.txt",
-          content: "strict\n",
-          createParents: false,
-        },
+        { filePath: "existing-parent/first.txt", content: "first\n" },
         toolContext,
       ),
     );
-    const planned = structured(
+    const second = structured(
       await hashlineWrite.execute(
-        {
-          filePath: "existing-parent/planned.txt",
-          content: "planned\n",
-          createParents: true,
-        },
+        { filePath: "existing-parent/second.txt", content: "second\n" },
         toolContext,
       ),
     );
 
-    expect(strict.output).toContain("Created the file");
-    expect(planned.output).toContain("Created the file");
-    expect(planned.metadata.createdDirectories).toEqual([]);
-    expect(await readFile(join(root, "existing-parent", "strict.txt"), "utf8")).toBe("strict\n");
-    expect(await readFile(join(root, "existing-parent", "planned.txt"), "utf8")).toBe("planned\n");
+    expect(first.output).toContain("Created the file");
+    expect(second.output).toContain("Created the file");
+    expect(first.metadata.createdDirectories).toEqual([]);
+    expect(second.metadata.createdDirectories).toEqual([]);
+    expect(await readFile(join(root, "existing-parent", "first.txt"), "utf8")).toBe("first\n");
+    expect(await readFile(join(root, "existing-parent", "second.txt"), "utf8")).toBe("second\n");
     expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(2);
     await value.dispose?.();
   });
@@ -2264,7 +2308,6 @@ describe("OpenCode plugin protocol", () => {
         {
           filePath: "raced/inner/new.txt",
           content: "planned\n",
-          createParents: true,
         },
         toolContext,
       ),
@@ -2340,7 +2383,22 @@ describe("OpenCode hooks", () => {
     ).resolves.toBeUndefined();
     const system = { system: [] as string[] };
     await value["experimental.chat.system.transform"]?.({} as never, system);
-    expect(system.system.join("\n")).toContain("remain enabled by configuration");
+    const migrationGuidance = system.system.join("\n");
+    expect(migrationGuidance).toContain("two separate workflows");
+    expect(migrationGuidance).toContain("hashline_read followed by hashline_edit");
+    expect(migrationGuidance).toContain("first use native read");
+    expect(migrationGuidance).toContain(
+      "Never pass hashline output or snapshot IDs to native mutators",
+    );
+    const migrationRead = { description: "Read a file", parameters: {} };
+    await value["tool.definition"]?.({ toolID: "read" }, migrationRead as never);
+    expect(migrationRead.description).toContain(
+      "Migration mode has two separate workflows: use native read before a native mutator changes an existing file",
+    );
+    expect(migrationRead.description).toContain(
+      "native write or apply_patch may create an absent target without a preceding read",
+    );
+    expect(migrationRead.description).toContain("Use hashline_read only with hashline_edit");
 
     const invalid = await hooks({ typo: true });
     const invalidMessage = { message: { tools: {} as Record<string, boolean> }, parts: [] };
@@ -2359,6 +2417,9 @@ describe("OpenCode hooks", () => {
     const invalidSystem = { system: [] as string[] };
     await invalid["experimental.chat.system.transform"]?.({} as never, invalidSystem);
     expect(invalidSystem.system.join("\n")).toContain("configuration is invalid");
+    expect(invalidSystem.system.join("\n")).toContain(
+      "Do not bypass this state with shell commands or another mutation tool",
+    );
     const { hashlineRead } = registry(invalid);
     await expect(hashlineRead.execute({ filePath: "file.txt" }, context())).rejects.toThrow(
       "CONFIG_INVALID:",

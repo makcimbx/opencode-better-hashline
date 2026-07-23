@@ -33,7 +33,7 @@ The model addresses logical lines by ordinary one-based numbers. Authority comes
 
 ### Read provenance is explicit
 
-The snapshot store distinguishes bytes retained by the process from line references actually issued to a model. A range cannot be edited when an interior line was omitted or rendered preview-only. Issuance occurs after the host's generic truncation layer, not when the tool initially constructs output. Requested `hashline_read.limit` accepts `1..100,000` and defaults to 1,000, but `maxOutputBytes` remains authoritative (40 KiB by default, configurable to at most 45 KiB); a byte-limited partial page ends in `@more`. Complete-coverage diagnostics aggregate bounded missing ranges and boundary requirements, while recovery suggestions deliberately cap each read at a conservative 1,000 lines.
+The snapshot store distinguishes bytes retained by the process from line references actually issued to a model. A range cannot be edited when an interior line was omitted or rendered preview-only. Issuance occurs after the host's generic truncation layer, not when the tool initially constructs output. Requested `hashline_read.limit` accepts `1..100,000` and defaults to 1,000, but `maxOutputBytes` remains authoritative (40 KiB by default, configurable to at most 45 KiB). `@more` means rendering stopped before EOF; `@eof` means EOF was reached, and `partial=true` may accompany either when complete editable evidence is absent. A preview-only `N!|` line cannot be issued by pagination. Complete-coverage diagnostics aggregate bounded missing ranges and boundary requirements, while recovery suggestions deliberately cap each read at a conservative 1,000 lines.
 
 ### Planning is pure where the operation is textual
 
@@ -41,7 +41,7 @@ The snapshot store distinguishes bytes retained by the process from line referen
 stable rejection. It performs no I/O and asks no permission. This makes exhaustive and property
 testing possible without weakening the filesystem path.
 
-`replace` removes the exact one-based inclusive `startLine..endLine` range, and its `lines` payload is the complete replacement; outside neighbors remain. Every operation in a batch uses coordinates from the immutable original snapshot, not an intermediate result or a line created by another operation.
+`replace` removes the exact one-based inclusive `startLine..endLine` range, and its `lines` payload is the complete replacement; outside neighbors remain. Every operation in a batch uses coordinates from the immutable original snapshot, not an intermediate result or a line created by another operation. For sole `replace_file`, omitted `finalNewline` preserves snapshot state for non-empty `lines`, while empty `lines` infer `false`; explicit `true` with an empty payload rejects.
 
 Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy
 reads retained pre-edit logical texts and inserts them with destination-local EOL rules, even when
@@ -71,10 +71,10 @@ complete source/destination path set. After approval, current bytes, identities,
 binding, parent identity, and destination absence are checked again. The plugin never asks approval
 for one patch, then silently rebases, substitutes a destination, or publishes another.
 
-Opt-in `hashline_write` parent creation follows the same principle. The deepest existing ancestor,
-at most 64 missing directories, target, lock set, and permission metadata are frozen before
-approval. Every directory and the target are authorized and locked, and revalidation never replaces
-the approved chain with a newly observed one.
+Automatic `hashline_write` parent planning follows the same principle. The deepest existing ancestor,
+zero to 64 missing directories, target, lock set, and permission metadata are frozen before approval.
+Every planned directory and the target are authorized and locked, and revalidation never replaces the
+approved chain with a newly observed one. A zero-directory plan delegates directly to file publication.
 
 ### Publication is separate from conflict detection
 
@@ -102,11 +102,14 @@ The default unique tool IDs avoid three OpenCode hazards:
 The plugin keeps native `read` and adds `hashline_read`, `hashline_edit`, and `hashline_write`. With `enforce: true`, `chat.message` disables native mutator IDs on every user turn and `tool.execute.before` is a second tripwire. This is defense in depth, not a shell sandbox.
 
 The explicit native-alias preview instead registers Better Hashline's shared executor as `edit` and
-`apply_patch`, lets OpenCode retain one by model route, and preserves unique read/create tools.
-Activation uses the host-configured SDK transport to observe exact host and schema fingerprints,
-`native-aliases/v2` operation/path markers, delivered-read live-epoch attestation, double argument
-parsing, and native renderer metadata. Registry ownership still cannot be attested, so this surface
-does not replace the unique-ID recommendation.
+`apply_patch`, lets OpenCode retain one by model route, and preserves unique read/create tools. The
+aliases require Better Hashline's top-level `filePath`/`snapshotId`/`operations`, accept only the
+documented optional controls, reject native argument shapes, and restrict source and destination
+paths to the current worktree. Authorized external mutation requires switching to the unique hashline
+surface and restarting. Activation uses the host-configured SDK transport to observe exact host and schema
+fingerprints, `native-aliases/v2` operation/path markers, delivered-read live-epoch attestation,
+double argument parsing, and native renderer metadata. Registry ownership still cannot be attested,
+so this surface does not replace the unique-ID recommendation.
 
 Persisted v1 and v2 history remains subject to bounded exact validation in offline verifier,
 model-trace, and evidence paths. The live executor does not fetch that history to admit edits. The
@@ -133,18 +136,19 @@ Snapshots are process-memory objects. Retained weight accounts for raw bytes plu
 A successful or attempted publication transition invalidates prior snapshots for every affected
 path. Successful output explicitly reports that transition through
 `@hashline-edit previous=consumed successor=none|attached|unavailable`. Text edits require a reread
-by default; with explicit `readback: true`, post-rename verification bytes may instead create a new
-pending snapshot with one contiguous page. `readbackOffset` selects a one-based post-edit start,
-defaulting to the first hunk; requested `readbackLimit` accepts `1..100,000` and defaults to 1,000.
-The same authoritative `maxOutputBytes` budget may stop that page earlier with `partial=true` and
-`@more`. Both window fields require `readback:true`. Only refs on the page attested by the after-hook
-are issued; there is no ID-only successor, and failed delivery reports `unavailable`. Continuation
-never changes the already-completed write into a reported mutation failure. Lifecycle operations
-reject readback
-requests and window fields. Delete invalidates the source; move invalidates source and destination
-immediately before link publication, including when the result becomes `PARTIAL_PUBLICATION`. A
-partial parent publication invalidates affected target snapshots. On the native-alias surface, either
-partial outcome also unbinds the live epoch.
+by default; `readback:true` or either readback window field requests that post-rename verification
+bytes create a new pending snapshot with one contiguous page. `readbackOffset` selects a one-based
+post-edit start, defaulting to the first hunk; requested `readbackLimit` accepts `1..100,000` and
+defaults to 1,000. Explicit `readback:false` conflicts with either window field. A successful
+mutation may still report `successor=unavailable`. The authoritative `maxOutputBytes` budget can stop
+rendering early: `@more` means before EOF, `@eof` means EOF was reached, and either may accompany
+`partial=true`. Only refs on the page attested by the after-hook are issued; there is no ID-only
+successor. Failed delivery does not turn the completed write into a mutation failure. Lifecycle
+operations never return a successor and reject `readback:true`, `readbackOffset`, and `readbackLimit`.
+Delete invalidates the source; move invalidates source and destination immediately before link
+publication, including when the result becomes `PARTIAL_PUBLICATION`. Parent-creating publication
+invalidates snapshots for every planned directory and target path. On the native-alias surface,
+either partial outcome also unbinds the live epoch.
 Multiple exact reads can reuse one retained snapshot only when digest and bytes both match, and
 their issued pages can accumulate complete coverage.
 
@@ -153,16 +157,18 @@ their issued pages can accumulate complete coverage.
 Text edits resolve existing symlinks to one canonical target, which is authorized, locked, reread,
 and replaced. Alias stability is checked around reads and before publication. Lifecycle sources use
 a stricter resolver: the requested terminal entry itself must be a regular file, never a symlink,
-and must remain bound to the canonical source and stable parent. New files and move destinations
-resolve an existing canonical parent and treat every existing terminal entry, including a symlink,
-as occupied.
+and must remain bound to the canonical source and stable parent. New files locate and pin the deepest
+existing canonical ancestor, while move destinations still require an existing canonical parent.
+Every existing terminal entry, including a symlink, is occupied.
 
-`hashline_write` with omitted/false `createParents` retains that existing-parent rule. With explicit
-`true`, it pins the deepest existing requested/canonical ancestor and freezes up to 64 absent
-directory entries. Every directory and the target are canonicalized, authorized, and locked;
-directories are created exclusively from root to leaf and identity-checked before staged no-clobber
-file publication. The first directory observed after an attempted `mkdir`, including an ambiguous
-reported failure, is the no-rollback boundary. `move_file` never enters this path.
+The strict `hashline_write` schema contains only `filePath` and `content`; the obsolete
+`createParents` field is rejected. Every call freezes up to 64 absent directory entries and the target.
+Every planned directory and target are canonicalized, authorized, and locked; missing directories are
+created exclusively from root to leaf and identity-checked before staged no-clobber file publication.
+A zero-missing-directory plan runs no `mkdir` and delegates to the same publication path. The first
+directory observed after an attempted `mkdir`, including an ambiguous reported failure, is the
+no-rollback boundary; a later error can leave the target file and directories present and requires
+inspection and reconciliation before retrying. `move_file` never enters this path.
 
 Supported existing targets are regular, single-link files within the size and UTF-8 policy limits.
 Hardlinks are rejected because replacing, deleting, or moving one directory entry would violate the
@@ -184,10 +190,10 @@ The test suite has separate layers:
 - snapshot provenance, complete-coverage, TTL, pinning, invalidation, and byte-budget tests;
 - renderer truncation and UTF-8 budget tests;
 - real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, fixed parent chains, exclusive directory creation, deterministic path-set locks, no-replace creation and movement, and partial publication;
-- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including readback windows/issuance, deterministic conflict pairs, lifecycle and parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
+- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including inferred readback windows/issuance, deterministic conflict pairs, lifecycle and strict automatic parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
 - packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/fresh-read restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
-- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current deterministic runner is retained as immutable schema-v7 model-free evidence; schema-v6 and pilot-v7 evidence remain immutable.
+- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current deterministic runner is retained as immutable schema-v8 model-free evidence; schema-v5, schema-v6, schema-v7, and pilot-v7 evidence remain immutable.
 
 Timing benchmarks never gate shared CI. Safety regressions do.
 

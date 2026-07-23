@@ -648,7 +648,7 @@ function assertAliasInput(
       (!validLineNumber(input.readbackLimit) ||
         (input.readbackLimit as number) > ABSOLUTE_MAX_LOGICAL_LINES)) ||
     ((input.readbackOffset !== undefined || input.readbackLimit !== undefined) &&
-      input.readback !== true)
+      input.readback === false)
   ) {
     rejectHistory(`Completed historical ${toolName} input is unreadable.`);
   }

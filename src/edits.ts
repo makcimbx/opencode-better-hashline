@@ -588,7 +588,7 @@ function renderWholeFile(
   operation: ReplaceFileOperation,
 ): { text: string; bytes: Uint8Array } {
   assertLogicalLines(operation.lines);
-  const finalNewline = operation.finalNewline ?? base.finalNewline;
+  const finalNewline = operation.finalNewline ?? (operation.lines.length > 0 && base.finalNewline);
   if (operation.lines.length === 0 && finalNewline) {
     fail("INVALID_ARGUMENT", 'Use lines: [""] to represent a file containing one newline.');
   }

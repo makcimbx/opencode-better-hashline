@@ -226,6 +226,7 @@ export async function resolveExistingFile(
 export async function resolveNewFile(
   filePath: string,
   directory: string,
+  missingParentRecovery?: string,
 ): Promise<ResolvedNewFile> {
   const requestedAbsolute = absoluteFrom(filePath, directory);
   const requestedParent = dirname(requestedAbsolute);
@@ -233,8 +234,18 @@ export async function resolveNewFile(
   try {
     canonicalParent = await realpath(requestedParent);
   } catch (error) {
-    if (errorCode(error) === "ENOENT") {
-      fail("PATH_NOT_FOUND", `Parent directory not found: ${requestedParent}`);
+    const code = errorCode(error);
+    if (code === "ENOENT") {
+      fail(
+        "PATH_NOT_FOUND",
+        `Parent directory for ${filePath} does not exist.${missingParentRecovery ? ` ${missingParentRecovery}` : ""}`,
+      );
+    }
+    if (code === "ENOTDIR") {
+      fail(
+        "UNSUPPORTED_FILE",
+        `Parent path for ${filePath} contains a non-directory component. No publication occurred; correct the parent path before retrying.`,
+      );
     }
     throw error;
   }
@@ -411,12 +422,23 @@ async function assertPlannedPathsAbsent(paths: readonly string[], target: boolea
     } catch (error) {
       if (errorCode(error) === "ENOENT") continue;
       if (errorCode(error) === "ENOTDIR") {
-        fail("RACE_BEFORE_WRITE", "The planned parent chain is no longer absent.");
+        fail(
+          "RACE_BEFORE_WRITE",
+          "The planned parent chain is no longer absent. No publication occurred; rebuild the plan before retrying.",
+        );
       }
       fail("UNSUPPORTED_FILE", "A planned path absence could not be verified safely.");
     }
-    if (target) fail("TARGET_EXISTS", "The target already exists.");
-    fail("RACE_BEFORE_WRITE", "A planned parent directory path already exists.");
+    if (target) {
+      fail(
+        "TARGET_EXISTS",
+        "The target already exists; create and move operations never overwrite. Inspect it and choose an absent target.",
+      );
+    }
+    fail(
+      "RACE_BEFORE_WRITE",
+      "A planned parent directory path already exists. No publication occurred; rebuild the plan before retrying.",
+    );
   }
 }
 
@@ -559,6 +581,12 @@ export async function authorizeExternal(
   });
 }
 
+function pathStabilityMessage(error: "PATH_MISMATCH" | "RACE_AFTER_WRITE", detail: string): string {
+  return error === "RACE_AFTER_WRITE"
+    ? `${detail} Publication may have occurred; inspect the affected paths and take a fresh read before replanning. Do not blindly retry.`
+    : detail;
+}
+
 async function assertNewParentStable(
   resolved: ResolvedNewFile,
   error: "PATH_MISMATCH" | "RACE_AFTER_WRITE",
@@ -571,13 +599,13 @@ async function assertNewParentStable(
       stat(resolved.canonicalParent),
     ]);
   } catch {
-    fail(error, "The target parent directory could not be verified.");
+    fail(error, pathStabilityMessage(error, "The target parent directory could not be verified."));
   }
   if (
     !samePath(currentParent, resolved.canonicalParent) ||
     !sameIdentity(currentParentStats, resolved.parentStats)
   ) {
-    fail(error, "The target parent directory was retargeted.");
+    fail(error, pathStabilityMessage(error, "The target parent directory was retargeted."));
   }
 }
 
@@ -666,14 +694,14 @@ async function assertMutableStable(
       stat(resolved.canonicalPath),
     ]);
   } catch {
-    fail(error, "The source path could not be verified.");
+    fail(error, pathStabilityMessage(error, "The source path could not be verified."));
   }
   if (
     terminalStats.isSymbolicLink() ||
     !terminalStats.isFile() ||
     !sameIdentity(terminalStats, canonicalStats)
   ) {
-    fail(error, "The source path was retargeted.");
+    fail(error, pathStabilityMessage(error, "The source path was retargeted."));
   }
 }
 
@@ -792,6 +820,15 @@ export async function withPathLocks<T>(
     }
   }
 }
+const MOVE_PARTIAL_RECOVERY =
+  "Inspect and reconcile both source and destination before retrying. Do not retry until their names match the intended state. Restart the plugin or host if necessary, then run a fresh hashline_read; old snapshots remain unusable.";
+
+function failAfterNewFilePublication(detail: string): never {
+  fail(
+    "RACE_AFTER_WRITE",
+    `${detail} The target file may already be committed; inspect it before retrying. If it exists, take a fresh hashline_read before editing; if it is absent, rebuild the creation plan. Do not blindly retry.`,
+  );
+}
 
 export async function publishReplacement(input: {
   resolved: ResolvedFile;
@@ -817,7 +854,10 @@ export async function publishReplacement(input: {
     !sameMetadata(expected.stats, beforeTemp.stats) ||
     !bytesEqual(expected.bytes, beforeTemp.bytes)
   ) {
-    fail("RACE_BEFORE_WRITE", "The file changed while edit permission was pending.");
+    fail(
+      "RACE_BEFORE_WRITE",
+      "The file changed while edit permission was pending. No publication occurred; take a fresh read and replan before retrying.",
+    );
   }
 
   const temporaryPath = join(
@@ -825,6 +865,9 @@ export async function publishReplacement(input: {
     `.${basename(resolved.canonicalPath)}.hashline-${process.pid}-${randomUUID()}.tmp`,
   );
   let temporaryExists = false;
+  let result: StableFile | undefined;
+  let hasPrimaryError = false;
+  let primaryError: unknown;
   try {
     const handle = await open(temporaryPath, "wx", expected.stats.mode & 0o7777);
     temporaryExists = true;
@@ -850,7 +893,10 @@ export async function publishReplacement(input: {
       !sameMetadata(expected.stats, beforeRename.stats) ||
       !bytesEqual(expected.bytes, beforeRename.bytes)
     ) {
-      fail("RACE_BEFORE_WRITE", "The file changed before the replacement could be published.");
+      fail(
+        "RACE_BEFORE_WRITE",
+        "The file changed before the replacement could be published. No publication occurred; take a fresh read and replan before retrying.",
+      );
     }
 
     consume();
@@ -858,21 +904,54 @@ export async function publishReplacement(input: {
       await rename(temporaryPath, resolved.canonicalPath);
     } catch (error) {
       if (["EPERM", "EACCES", "EBUSY"].includes(errorCode(error) ?? "")) {
-        fail("UNSUPPORTED_FILE", "The filesystem could not atomically replace the target.");
+        fail(
+          "UNSUPPORTED_FILE",
+          "The filesystem could not atomically replace the target. No replacement was published, but the snapshot was consumed; take a fresh read before choosing another workflow.",
+        );
       }
-      throw error;
+      fail(
+        "RACE_AFTER_WRITE",
+        "Replacement publication returned an unexpected filesystem error. Publication may have occurred; inspect the target and take a fresh read before replanning. Do not blindly retry.",
+      );
     }
     temporaryExists = false;
-    await syncDirectory(dirname(resolved.canonicalPath));
-
-    const verified = await readStableFile(resolved, maxBytes, false, signal);
-    if (!bytesEqual(verified.bytes, replacement)) {
-      fail("RACE_AFTER_WRITE", "The published file was changed by another writer.");
+    try {
+      await syncDirectory(dirname(resolved.canonicalPath));
+      const verified = await readStableFile(resolved, maxBytes, false, signal);
+      if (!bytesEqual(verified.bytes, replacement)) {
+        fail(
+          "RACE_AFTER_WRITE",
+          "The published file was changed by another writer. Publication occurred; inspect the target and take a fresh read before replanning. Do not blindly retry.",
+        );
+      }
+      result = verified;
+    } catch (error) {
+      if (error instanceof HashlineError && error.code === "RACE_AFTER_WRITE") throw error;
+      fail(
+        "RACE_AFTER_WRITE",
+        "Replacement was published, but post-publication verification failed. Inspect the target and take a fresh read before replanning. Do not blindly retry.",
+      );
     }
-    return verified;
-  } finally {
-    if (temporaryExists) await rm(temporaryPath, { force: true });
+  } catch (error) {
+    hasPrimaryError = true;
+    primaryError = error;
   }
+  if (temporaryExists) {
+    try {
+      await rm(temporaryPath, { force: true });
+    } catch (cleanupError) {
+      if (!hasPrimaryError) throw cleanupError;
+      if (primaryError instanceof HashlineError) {
+        primaryError.message = `${primaryError.message} Staging cleanup also failed; an internal temporary file may remain.`;
+      }
+    }
+  }
+  if (hasPrimaryError) throw primaryError;
+  if (result !== undefined) return result;
+  throw new HashlineError(
+    "RACE_AFTER_WRITE",
+    "Replacement ended without a verified result. Publication may have occurred; inspect the target and take a fresh read before replanning. Do not blindly retry.",
+  );
 }
 
 export async function publishNewFile(input: {
@@ -899,7 +978,10 @@ export async function publishNewFile(input: {
     stagedStats = await handle.stat();
     assertRegular(stagedStats);
     if (stagedStats.size !== bytes.byteLength || stagedStats.nlink !== 1) {
-      fail("RACE_BEFORE_WRITE", "The staged file changed before publication.");
+      fail(
+        "RACE_BEFORE_WRITE",
+        "The staged file changed before publication. No target publication occurred; rebuild the plan before retrying.",
+      );
     }
     await handle.close();
     handle = undefined;
@@ -910,7 +992,10 @@ export async function publishNewFile(input: {
       stagedPathStats.size !== bytes.byteLength ||
       stagedPathStats.nlink !== 1
     ) {
-      fail("RACE_BEFORE_WRITE", "The staged file changed before publication.");
+      fail(
+        "RACE_BEFORE_WRITE",
+        "The staged file changed before publication. No target publication occurred; rebuild the plan before retrying.",
+      );
     }
     await assertNewParentStable(resolved, "PATH_MISMATCH");
     throwIfAborted(signal);
@@ -918,15 +1003,25 @@ export async function publishNewFile(input: {
     try {
       await link(temporaryPath, resolved.canonicalPath);
     } catch (error) {
-      if (errorCode(error) === "EEXIST") fail("TARGET_EXISTS", "The target already exists.");
+      if (errorCode(error) === "EEXIST") {
+        fail(
+          "TARGET_EXISTS",
+          "The target appeared before no-replace publication; create operations never overwrite. Inspect it and choose an absent target before retrying.",
+        );
+      }
       if (
         ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EXDEV", "EMLINK"].includes(
           errorCode(error) ?? "",
         )
       ) {
-        fail("UNSUPPORTED_FILE", "The filesystem cannot publish a no-replace hard link.");
+        fail(
+          "UNSUPPORTED_FILE",
+          "The filesystem cannot publish a no-replace hard link. No target was published; choose another supported filesystem workflow.",
+        );
       }
-      throw error;
+      failAfterNewFilePublication(
+        "The target link operation returned an unexpected filesystem error.",
+      );
     }
 
     let linkedStats: Stats;
@@ -937,7 +1032,7 @@ export async function publishNewFile(input: {
         stat(temporaryPath),
       ]);
     } catch {
-      fail("RACE_AFTER_WRITE", "The created file changed before it could be verified.");
+      failAfterNewFilePublication("The created file changed before it could be verified.");
     }
     if (
       !sameIdentity(stagedStats, linkedStats) ||
@@ -945,13 +1040,13 @@ export async function publishNewFile(input: {
       linkedStats.nlink !== 2 ||
       stagedAfterLink.nlink !== 2
     ) {
-      fail("RACE_AFTER_WRITE", "The created file identity changed during publication.");
+      failAfterNewFilePublication("The created file identity changed during publication.");
     }
 
     try {
       await rm(temporaryPath);
     } catch {
-      fail("RACE_AFTER_WRITE", "The created file was committed but staging cleanup failed.");
+      failAfterNewFilePublication("The created file was committed but staging cleanup failed.");
     }
     await syncDirectory(resolved.canonicalParent);
 
@@ -959,14 +1054,14 @@ export async function publishNewFile(input: {
     try {
       verified = await readStableFile(resolved, bytes.byteLength, false, signal);
     } catch {
-      fail("RACE_AFTER_WRITE", "The created file could not be verified after publication.");
+      failAfterNewFilePublication("The created file could not be verified after publication.");
     }
     if (
       !sameIdentity(stagedStats, verified.stats) ||
       verified.stats.nlink !== 1 ||
       !bytesEqual(verified.bytes, bytes)
     ) {
-      fail("RACE_AFTER_WRITE", "The created file changed after publication.");
+      failAfterNewFilePublication("The created file changed after publication.");
     }
     await assertNewParentStable(resolved, "RACE_AFTER_WRITE");
   } finally {
@@ -1040,7 +1135,10 @@ async function verifyCreatedNewFileDirectories(
 function failBeforeParentCreation(error: unknown): never {
   const code = errorCode(error);
   if (code === "EEXIST") {
-    fail("RACE_BEFORE_WRITE", "A planned parent directory appeared before exclusive creation.");
+    fail(
+      "RACE_BEFORE_WRITE",
+      "A planned parent directory appeared before exclusive creation. No directory or target was published by this call; rebuild the fixed plan before retrying.",
+    );
   }
   if (["ENOENT", "ENOTDIR", "ELOOP"].includes(code ?? "")) {
     fail("PATH_MISMATCH", "The planned parent chain changed before directory creation.");
@@ -1051,7 +1149,7 @@ function failBeforeParentCreation(error: unknown): never {
 function failPartialParentCreation(): never {
   fail(
     "PARTIAL_PUBLICATION",
-    "Parent creation started but could not complete safely. Inspect and repair the requested tree and target, restart the plugin or host if necessary, then rerun hashline_read and resume this same session; created directories are intentionally retained.",
+    "Parent creation started but could not complete safely. Created directories are intentionally retained, and the target file may or may not exist. Inspect and reconcile the requested tree and target before retrying; restart the plugin or host if necessary, then run a fresh hashline_read. Old snapshots remain unusable.",
   );
 }
 
@@ -1136,7 +1234,10 @@ export async function publishDeletedFile(input: {
   await assertMutableStable(resolved, "PATH_MISMATCH");
   const current = await readStableFile(resolved, maxBytes, true, signal);
   if (!sameMetadata(expected.stats, current.stats) || !bytesEqual(expected.bytes, current.bytes)) {
-    fail("RACE_BEFORE_WRITE", "The file changed while delete permission was pending.");
+    fail(
+      "RACE_BEFORE_WRITE",
+      "The file changed while delete permission was pending. No deletion occurred; take a fresh read and replan before retrying.",
+    );
   }
   await assertNewParentStable(resolved, "PATH_MISMATCH");
   await assertMutableStable(resolved, "PATH_MISMATCH");
@@ -1146,23 +1247,41 @@ export async function publishDeletedFile(input: {
     await unlink(resolved.canonicalPath);
   } catch (error) {
     if (errorCode(error) === "ENOENT") {
-      fail("RACE_BEFORE_WRITE", "The file disappeared during delete publication.");
+      fail(
+        "RACE_BEFORE_WRITE",
+        "The file disappeared during delete publication. This call did not remove it, but the snapshot was consumed; inspect the path and take a fresh read before replanning.",
+      );
     }
     if (
       ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBUSY"].includes(
         errorCode(error) ?? "",
       )
     ) {
-      fail("UNSUPPORTED_FILE", "The filesystem could not delete the file.");
+      fail(
+        "UNSUPPORTED_FILE",
+        "The filesystem could not delete the file. No deletion was reported, but the snapshot was consumed; take a fresh read before another workflow.",
+      );
     }
-    throw error;
+    fail(
+      "RACE_AFTER_WRITE",
+      "Delete publication returned an unexpected filesystem error. Deletion may have occurred; inspect the path and take a fresh read before replanning. Do not blindly retry.",
+    );
   }
   await syncDirectory(resolved.canonicalParent);
   try {
     await lstat(resolved.canonicalPath);
-    fail("RACE_AFTER_WRITE", "The deleted path exists after publication.");
+    fail(
+      "RACE_AFTER_WRITE",
+      "The deleted path exists after publication. Deletion and recreation may both have occurred; inspect the path and take a fresh read before replanning.",
+    );
   } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error;
+    if (error instanceof HashlineError) throw error;
+    if (errorCode(error) !== "ENOENT") {
+      fail(
+        "RACE_AFTER_WRITE",
+        "The deleted path could not be verified. Deletion may have occurred; inspect the path and take a fresh read before replanning. Do not blindly retry.",
+      );
+    }
   }
   await assertNewParentStable(resolved, "RACE_AFTER_WRITE");
 }
@@ -1190,7 +1309,10 @@ export async function publishMovedFile(input: {
   await assertMutableStable(source, "PATH_MISMATCH");
   const current = await readStableFile(source, maxBytes, true, signal);
   if (!sameMetadata(expected.stats, current.stats) || !bytesEqual(expected.bytes, current.bytes)) {
-    fail("RACE_BEFORE_WRITE", "The file changed while move permission was pending.");
+    fail(
+      "RACE_BEFORE_WRITE",
+      "The file changed while move permission was pending. No move was published; take a fresh read and replan before retrying.",
+    );
   }
   await assertTargetAbsent(destination);
   await Promise.all([
@@ -1207,16 +1329,26 @@ export async function publishMovedFile(input: {
       await link(source.canonicalPath, destination.canonicalPath);
       linked = true;
     } catch (error) {
-      if (errorCode(error) === "EEXIST")
-        fail("TARGET_EXISTS", "The move destination already exists.");
+      if (errorCode(error) === "EEXIST") {
+        fail(
+          "TARGET_EXISTS",
+          "The move destination appeared before no-replace publication. No move link was published, but the source snapshot was consumed; inspect the destination, choose an absent path, and take a fresh source read before retrying.",
+        );
+      }
       if (
         ["ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EXDEV", "EMLINK"].includes(
           errorCode(error) ?? "",
         )
       ) {
-        fail("UNSUPPORTED_FILE", "The filesystem cannot publish a no-replace file move.");
+        fail(
+          "UNSUPPORTED_FILE",
+          "The filesystem cannot publish a no-replace file move. No move was reported, but the source snapshot was consumed; take a fresh source read before another workflow.",
+        );
       }
-      throw error;
+      fail(
+        "PARTIAL_PUBLICATION",
+        `The destination link operation returned an unexpected filesystem error, so the destination may exist. ${MOVE_PARTIAL_RECOVERY}`,
+      );
     }
 
     const [linkedSource, linkedDestination] = await Promise.all([
@@ -1232,7 +1364,7 @@ export async function publishMovedFile(input: {
     ) {
       fail(
         "PARTIAL_PUBLICATION",
-        "The linked move state changed before source removal. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+        `The linked move state changed before source removal. ${MOVE_PARTIAL_RECOVERY}`,
       );
     }
     await assertMutableStable(source, "RACE_AFTER_WRITE");
@@ -1242,7 +1374,7 @@ export async function publishMovedFile(input: {
     } catch {
       fail(
         "PARTIAL_PUBLICATION",
-        "The destination was linked, but the source could not be removed. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+        `The destination was linked, but the source could not be removed. ${MOVE_PARTIAL_RECOVERY}`,
       );
     }
     const directories = [...new Set([source.canonicalParent, destination.canonicalParent])];
@@ -1252,7 +1384,7 @@ export async function publishMovedFile(input: {
       await lstat(source.canonicalPath);
       fail(
         "PARTIAL_PUBLICATION",
-        "The source still exists after move publication. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+        `The source still exists after move publication. ${MOVE_PARTIAL_RECOVERY}`,
       );
     } catch (error) {
       if (errorCode(error) !== "ENOENT") throw error;
@@ -1265,7 +1397,7 @@ export async function publishMovedFile(input: {
     ) {
       fail(
         "PARTIAL_PUBLICATION",
-        "The destination changed after move publication. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+        `The destination changed after move publication. ${MOVE_PARTIAL_RECOVERY}`,
       );
     }
     await Promise.all([
@@ -1279,7 +1411,7 @@ export async function publishMovedFile(input: {
     }
     fail(
       "PARTIAL_PUBLICATION",
-      "Move publication started but could not be verified. Inspect and repair both paths, restart the plugin or host if necessary, then rerun hashline_read and resume this same session.",
+      `Move publication started but could not be verified. ${MOVE_PARTIAL_RECOVERY}`,
     );
   }
 }
@@ -1287,7 +1419,10 @@ export async function publishMovedFile(input: {
 export async function assertTargetAbsent(resolved: ResolvedNewFile): Promise<void> {
   try {
     await lstat(resolved.canonicalPath);
-    fail("TARGET_EXISTS", "The target already exists.");
+    fail(
+      "TARGET_EXISTS",
+      "The target already exists; create and move operations never overwrite. Inspect it and choose an absent target.",
+    );
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
   }

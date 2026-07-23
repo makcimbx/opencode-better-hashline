@@ -197,11 +197,7 @@ function expectedNestedCreationEvidence() {
   const diff = createFilePatch(target, NESTED_CREATE_BYTES);
   return {
     creation: {
-      input: {
-        content: NESTED_CREATE_BYTES,
-        createParents: true,
-        filePath: NESTED_CREATE_PATH,
-      },
+      input: { content: NESTED_CREATE_BYTES, filePath: NESTED_CREATE_PATH },
       metadata: { created: true, createdDirectories: directories, diff, truncated: false },
       output: "Created 2 parent directories and the file. Use hashline_read before editing it.",
       status: "completed",
@@ -271,7 +267,7 @@ function expectedReadbackEvidence(editTool: VerificationCaseReport["editTool"]) 
       input: editInput(
         READBACK_PATH,
         [{ endLine: 10, lines: ["readback-changed"], op: "replace", startLine: 10 }],
-        { readback: true, readbackLimit: 5, readbackOffset: 8 },
+        { readbackLimit: 5, readbackOffset: 8 },
       ),
       output: readbackOutput,
       pendingRemoved: true,
@@ -620,11 +616,13 @@ function isMalformedState(value: unknown, editTool: VerificationCaseReport["edit
           patchText: `*** Begin Patch\n*** Update File: malformed.txt\n@@\n-${PRIVATE_CANARY}\n+changed\n*** End Patch`,
         }
       : { filePath: "malformed.txt", newString: "changed", oldString: PRIVATE_CANARY };
+  const rejectedField = editTool === "apply_patch" ? "patchText" : "newString";
   return (
     state !== undefined &&
     hasExactKeys(state, ["error", "input", "status"]) &&
     state.status === "error" &&
-    state.error === `INVALID_ARGUMENT: Invalid ${editTool} arguments.` &&
+    state.error ===
+      `INVALID_ARGUMENT: ${rejectedField} is not accepted by ${editTool}. No mutation occurred; a valid supplied snapshot remains usable.` &&
     sameJson(state.input, input)
   );
 }
@@ -671,7 +669,8 @@ function isNoClobberState(value: unknown): boolean {
     state !== undefined &&
     hasExactKeys(state, ["error", "input", "status"]) &&
     state.status === "error" &&
-    state.error === "TARGET_EXISTS: The target already exists." &&
+    state.error ===
+      "TARGET_EXISTS: The target already exists; create and move operations never overwrite. Inspect it and choose an absent target." &&
     isFileOperationInput(
       state.input,
       LIFECYCLE_NO_CLOBBER_PATH,
@@ -890,15 +889,10 @@ export function assertFullVerificationReport(
   if (
     !writeSchemaRecord ||
     !writeProperties ||
-    !hasExactKeys(writeProperties, ["content", "createParents", "filePath"]) ||
-    !sameJson(writeRequired, ["filePath", "content"]) ||
-    !sameJson(record(writeProperties.createParents), {
-      description:
-        "Default false. When true, create up to 64 missing parent directories through one fixed, approved no-rollback plan; after a directory exists or a mkdir outcome becomes ambiguous, failures return PARTIAL_PUBLICATION.",
-      type: "boolean",
-    })
+    !hasExactKeys(writeProperties, ["content", "filePath"]) ||
+    !sameJson(writeRequired, ["filePath", "content"])
   ) {
-    throw new Error("Verifier write schema does not expose optional boolean createParents.");
+    throw new Error("Verifier write schema does not expose the exact create-only fields.");
   }
   const writeSchemaSha256 = jsonSha256(writeSchema);
   const finalBytesSha256 = sha256(VERIFIER_RENDERED_BYTES);

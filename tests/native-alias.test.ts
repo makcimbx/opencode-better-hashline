@@ -1133,6 +1133,28 @@ describe("native alias session protocol", () => {
     ).not.toThrow();
   });
 
+  test("accepts either persisted readback window unless readback is explicitly false", () => {
+    for (const window of [{ readbackOffset: 1 }, { readbackLimit: 1 }]) {
+      const part = completedPart("edit");
+      const input = {
+        filePath: "src/a.ts",
+        snapshotId: "s_0000000000000000000000",
+        operations: [{ op: "replace_file", lines: ["x"] }],
+        ...window,
+      };
+      (part.state as Record<string, unknown>).input = input;
+
+      expect(() =>
+        assertNativeAliasHistory([{ parts: [part] }], identity, { directory: worktree }),
+      ).not.toThrow();
+
+      Object.assign(input, { readback: false });
+      expect(() =>
+        assertNativeAliasHistory([{ parts: [part] }], identity, { directory: worktree }),
+      ).toThrow("SESSION_PROTOCOL_MISMATCH:");
+    }
+  });
+
   test("resolves a surviving symlink parent for deleted historical files", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "better-hashline-history-symlink-"));
     try {

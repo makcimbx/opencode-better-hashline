@@ -231,7 +231,8 @@ describe("model benchmark trace inspection", () => {
             state: {
               status: "error",
               input: { filePath: "a.ts", oldString: "a", newString: "b" },
-              error: "INVALID_ARGUMENT: Invalid edit arguments.",
+              error:
+                "INVALID_ARGUMENT: newString is not accepted by edit. No mutation occurred; a valid supplied snapshot remains usable.",
             },
           },
         }),

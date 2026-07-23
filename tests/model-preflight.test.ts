@@ -79,7 +79,7 @@ const editInput = (
 ) => ({ filePath, ...extra, operations, snapshotId: "<snapshot>" });
 const nestedCreationEvidence = canonicalJson({
   creation: {
-    input: { content: nestedCreateBytes, createParents: true, filePath: nestedCreatePath },
+    input: { content: nestedCreateBytes, filePath: nestedCreatePath },
     metadata: {
       created: true,
       createdDirectories: [fixturePath("nested"), fixturePath("nested/inner")],
@@ -137,7 +137,7 @@ const readbackEvidence = (editTool: "hashline_edit" | "edit" | "apply_patch") =>
       input: editInput(
         readbackPath,
         [{ endLine: 10, lines: ["readback-changed"], op: "replace", startLine: 10 }],
-        { readback: true, readbackLimit: 5, readbackOffset: 8 },
+        { readbackLimit: 5, readbackOffset: 8 },
       ),
       output: [
         "Applied 1 operation.",
@@ -359,10 +359,11 @@ const caseReport = (
           patchText: `*** Begin Patch\n*** Update File: malformed.txt\n@@\n-${privateCanary}\n+changed\n*** End Patch`,
         }
       : { filePath: "malformed.txt", newString: "changed", oldString: privateCanary };
+  const rejectedField = editTool === "apply_patch" ? "patchText" : "newString";
   const metadataSnapshot = canonicalJson([
     {
       state: {
-        error: `INVALID_ARGUMENT: Invalid ${editTool} arguments.`,
+        error: `INVALID_ARGUMENT: ${rejectedField} is not accepted by ${editTool}. No mutation occurred; a valid supplied snapshot remains usable.`,
         input: malformedInput,
         status: "error",
       },
@@ -394,7 +395,8 @@ const caseReport = (
     readEvent("lifecycle-no-clobber.txt", lifecycleNoClobberBytes),
     {
       state: {
-        error: "TARGET_EXISTS: The target already exists.",
+        error:
+          "TARGET_EXISTS: The target already exists; create and move operations never overwrite. Inspect it and choose an absent target.",
         input: operationInput("lifecycle-no-clobber.txt", "move_file", "lifecycle-occupied.txt"),
         status: "error",
       },
@@ -817,7 +819,7 @@ describe("native alias preflight receipt", () => {
       forgedEvidence(0, "nestedCreationEvidence", "nestedCreationEvidenceSha256", (evidence) => {
         const creation = evidence.creation as Record<string, unknown>;
         const input = creation.input as Record<string, unknown>;
-        input.createParents = false;
+        input.createParents = true;
       }),
       forgedEvidence(1, "readbackEvidence", "readbackEvidenceSha256", (evidence) => {
         const delivered = evidence.delivered as Record<string, unknown>;
