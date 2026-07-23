@@ -9,6 +9,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added a redesigned, quick-start-oriented project README and a packaged Russian-language guide.
+
 ### Changed
 
 ### Fixed

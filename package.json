@@ -25,7 +25,8 @@
     "docs",
     "CHANGELOG.md",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "README.ru.md"
   ],
   "sideEffects": false,
   "engines": {
