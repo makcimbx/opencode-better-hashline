@@ -5,14 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.8.0...v0.8.1) (2026-07-24)
+## [Unreleased]
 
+### Added
+
+### Changed
 
 ### Fixed
 
-* recover safe filesystem races internally ([#42](https://github.com/makcimbx/opencode-better-hashline/issues/42)) ([205baec](https://github.com/makcimbx/opencode-better-hashline/commit/205baeced3fc3261be998a6376d26218525cd9d2))
-
-## [Unreleased]
+## [0.8.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.8.0...v0.8.1) (2026-07-24)
 
 ### Added
 
