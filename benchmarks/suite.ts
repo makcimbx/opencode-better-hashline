@@ -631,7 +631,11 @@ export function runRenderingWireSuite() {
   const maxOutputBytes = 4096;
   const current = renderSnapshotPage({ snapshot, offset: 1, limit: 1, maxOutputBytes });
   const header = current.output.split("\n", 1)[0] ?? "";
-  const legacyPreview = `${header}\n1!|${line.slice(0, 2000)}... [preview only; line not issued]\n@eof\n@note lines marked ! cannot be edited by line reference`;
+  const legacyHeader = header.replace(/ coverage=(?:partial|complete)$/u, "");
+  if (legacyHeader === header) {
+    throw new Error("Current rendering fixture is missing its coverage marker.");
+  }
+  const legacyPreview = `${legacyHeader}\n1!|${line.slice(0, 2000)}... [preview only; line not issued]\n@eof\n@note lines marked ! cannot be edited by line reference`;
   const legacyPreviewBytes = encoder.encode(legacyPreview).byteLength;
   const currentIssuedBytes = encoder.encode(current.output).byteLength;
   return {
@@ -642,6 +646,69 @@ export function runRenderingWireSuite() {
     currentIssued: current.page.ranges.some(({ start, end }) => start === 1 && end === 1),
     deltaBytes: currentIssuedBytes - legacyPreviewBytes,
   };
+}
+
+export function runCoverageHeaderWireSuite() {
+  const store = new SnapshotStore({
+    maxCacheBytes: 64 * 1024,
+    maxSnapshots: 1,
+    maxSnapshotsPerPath: 1,
+    maxSnapshotsPerSession: 1,
+    snapshotTtlMs: 60_000,
+  });
+  const snapshot = store.remember(
+    { sessionId: "benchmark", worktree: "/benchmark" },
+    "/benchmark/coverage.txt",
+    document("a\nb\nc"),
+  );
+  const row = (
+    scenario: string,
+    rendered: ReturnType<typeof renderSnapshotPage>,
+    priorIssuedLines: number,
+  ) => {
+    const currentHeader = rendered.output.split("\n", 1)[0] ?? "";
+    const match = /^(.*) coverage=(partial|complete)$/u.exec(currentHeader);
+    if (!match) throw new Error("Coverage-header fixture did not render a coverage marker.");
+    const legacyHeader = match[1] ?? "";
+    const currentHeaderBytes = encoder.encode(currentHeader).byteLength;
+    const legacyHeaderBytes = encoder.encode(legacyHeader).byteLength;
+    return {
+      scenario,
+      coverage: match[2],
+      pagePartial: currentHeader.includes(" partial=true"),
+      priorIssuedLines,
+      pageIssuedLines: rendered.page.ranges.reduce(
+        (total, range) => total + range.end - range.start + 1,
+        0,
+      ),
+      legacyHeaderBytes,
+      currentHeaderBytes,
+      overheadBytes: currentHeaderBytes - legacyHeaderBytes,
+    };
+  };
+
+  const complete = renderSnapshotPage({
+    snapshot,
+    offset: 1,
+    limit: 3,
+    maxOutputBytes: 4096,
+  });
+  const first = renderSnapshotPage({
+    snapshot,
+    offset: 1,
+    limit: 2,
+    maxOutputBytes: 4096,
+  });
+  const rows = [row("complete single page", complete, 0), row("initial partial page", first, 0)];
+  store.issue(snapshot, first.page);
+  const completion = renderSnapshotPage({
+    snapshot,
+    offset: 3,
+    limit: 1,
+    maxOutputBytes: 4096,
+  });
+  rows.push(row("cumulative completion page", completion, 2));
+  return rows;
 }
 
 function serializedEditCall(operations: readonly EditOperation[]): number {
@@ -776,6 +843,33 @@ export function runEditProtocolUxCallWireSuite() {
       deltaBytes: automaticParentCreationBytes - explicitParentCreationBytes,
     },
   ];
+}
+
+export function runReplaceFileReadbackCallWireSuite() {
+  const serialized = (value: unknown) => encoder.encode(JSON.stringify(value)).byteLength;
+  const omittedReadback = {
+    filePath: "src/example.ts",
+    snapshotId: "s_AAAAAAAAAAAAAAAAAAAAAA",
+    operations: [{ op: "replace_file", lines: ["export {};"], finalNewline: true }],
+  };
+  const explicitReadback = { ...omittedReadback, readback: true };
+  const omittedEditBytes = serialized(omittedReadback);
+  const explicitReadbackEditBytes = serialized(explicitReadback);
+  const standaloneReadCallBytes = serialized({ filePath: omittedReadback.filePath });
+  const explicitOptInCostBytes = explicitReadbackEditBytes - omittedEditBytes;
+  const separateCallInputBytes = omittedEditBytes + standaloneReadCallBytes;
+  return {
+    scenario: "replace_file explicit successor readback",
+    omittedRequestsReadback: "readback" in omittedReadback,
+    explicitRequestsReadback: explicitReadback.readback === true,
+    omittedEditBytes,
+    explicitReadbackEditBytes,
+    explicitOptInCostBytes,
+    standaloneReadCallBytes,
+    separateCallInputBytes,
+    attachedSuccessorCallInputBytes: explicitReadbackEditBytes,
+    attachedSuccessorSavingsBytes: separateCallInputBytes - explicitReadbackEditBytes,
+  };
 }
 
 export function runMoveCorridorWireSuite() {

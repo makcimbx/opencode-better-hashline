@@ -1945,7 +1945,7 @@ async function verifyScenario(
     const expectedReadbackOutput = [
       "Applied 1 operation.",
       "@hashline-edit previous=consumed successor=attached",
-      `@hashline snapshot=<snapshot> sha256=${sha256(READBACK_EDITED_BYTES).slice(0, 12)} lines=20 partial=true`,
+      `@hashline snapshot=<snapshot> sha256=${sha256(READBACK_EDITED_BYTES).slice(0, 12)} lines=20 partial=true coverage=partial`,
       ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
       "@more offset=13",
     ].join("\n");
@@ -2140,8 +2140,9 @@ async function verifyScenario(
       ({ label, hook, tool }) => label === "last" && hook === "after" && tool === "hashline_read",
     );
     invariant(
-      readAfter?.output?.startsWith("@hashline snapshot="),
-      "Read refs were not activated after host hooks",
+      readAfter?.output?.startsWith("@hashline snapshot=") &&
+        readAfter.output.split("\n", 1)[0]?.endsWith(" coverage=complete"),
+      "Read refs were not activated with complete coverage after host hooks",
     );
     const editAfter = hookLines.find(
       ({ label, hook, tool }) => label === "last" && hook === "after" && tool === scenario.editTool,

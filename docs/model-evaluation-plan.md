@@ -6,9 +6,11 @@ Frozen evidence note: when this plan was frozen, the deterministic runner emitte
 immutable model-free record retained the 29-case corpus and added wire fixtures for inferred
 readback, empty-file newline, and parent-creation defaults:
 [`2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json).
-The current schema-v9 deterministic record is documented separately and does not revise this frozen
-plan. The schema-v5 through schema-v9 and closed pilot-v7 records remain immutable. Neither those
-model-free results nor this plan supports a paid or model-quality claim.
+The retained schema-v9 record and current write-once retained schema-v10
+[`2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json)
+are documented separately and do not revise this frozen plan. Schema-v5 through schema-v9 and closed
+pilot-v7 remain immutable. Neither those model-free results nor this plan supports a paid or
+model-quality claim.
 
 | Field | Value |
 | --- | --- |

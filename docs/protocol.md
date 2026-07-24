@@ -83,18 +83,18 @@ Tool: `hashline_read`
 Output grammar:
 
 ```text
-@hashline snapshot=s_<22-base64url> sha256=<12-hex> lines=<count>[ partial=true]
+@hashline snapshot=s_<22-base64url> sha256=<12-hex> lines=<count>[ partial=true] coverage=<partial|complete>
 <line>|<exact text>
 <line>!|<preview>... [preview only; line not issued]
 @more offset=<next one-based line>
 @eof
 ```
 
-`lines` is the file's total logical-line count, not the number rendered in this result. The optional `partial=true` token means this rendered page does not itself cover complete editable BOF-to-EOF evidence; pagination, preview-only lines, and bounded edit readback can all produce it. A header without the token means this one page covers the complete file. Multiple attested partial pages for the same unchanged snapshot may cumulatively issue complete coverage.
+`lines` is the file's total logical-line count, not the number rendered in this result. The optional `partial=true` token is page-local: it means this rendered page does not itself cover complete editable BOF-to-EOF evidence. The mandatory `coverage=partial|complete` token is computed when the header is rendered from evidence already issued at that moment plus this exact candidate page. `coverage=complete` means those inputs are sufficient for cumulative complete BOF-to-EOF coverage; if the candidate remains valid and the exact page is delivered and attested, completeness is monotonic as other pages issue. `coverage=partial` means those inputs were not sufficient at render time, but another page delivered and attested later or out of order may complete the snapshot before this candidate is attested, making the rendered prediction conservative. The token contains no ranges. Rendering and pending output issue no evidence, and an invalidated candidate issues no evidence. `partial=true coverage=complete` is valid when the render-time inputs are cumulatively sufficient. A header without `partial=true` means this one page covers the complete file and therefore reports `coverage=complete`.
 
 `offset` is one-based and defaults to 1. Requested `limit` accepts `1..100,000` and defaults to 1,000. `maxOutputBytes` is the authoritative page bound: it defaults to 40 KiB and is configurable only up to 45 KiB. Rendering can therefore stop before the requested line count. `@more` means the cursor stopped before EOF; `@eof` means it reached EOF. `partial=true` may accompany either footer when the page lacks complete editable BOF-to-EOF evidence.
 
-`hashline_read` first prepares a pending snapshot. `N|` lines become editable only after `tool.execute.after` confirms that OpenCode delivered the result without generic truncation or mutation. A line is rendered as preview-only `N!|` when its complete annotated form cannot fit in one configured output page; preview-only lines never become issued, and pagination cannot make such a line editable. Raise `maxOutputBytes` within its cap when safe, or stop for a configuration change or manual file restructuring without treating the preview as source content. Marker loss, host truncation, or output mutation issues no new refs; previously issued refs on a reused snapshot remain valid. Cache eviction and publication still invalidate affected snapshots rather than guessing what the model received.
+`hashline_read` first prepares a pending snapshot. `N|` lines become editable only after `tool.execute.after` confirms that OpenCode delivered the result without generic truncation or mutation; only then does the valid candidate issue its refs. A line is rendered as preview-only `N!|` when its complete annotated form cannot fit in one configured output page; preview-only lines never become issued, and pagination cannot make such a line editable. Raise `maxOutputBytes` within its cap when safe, or stop for a configuration change or manual file restructuring without treating the preview as source content. Marker loss, host truncation, output mutation, or candidate invalidation issues no new refs; previously issued refs on a reused snapshot remain valid unless that snapshot is invalidated. Cache eviction and publication still invalidate affected snapshots rather than guessing what the model received.
 
 ## Edit
 
@@ -140,14 +140,17 @@ When `rebase` is omitted, a batch containing only `replace`, `insert`, `copy_ran
 `move_range` resolves to `"unique"`; a sole `replace_file`, `delete_file`, or `move_file` resolves to
 `"none"`. Explicit `"none"` requests full-byte freshness. Explicit `"unique"` retains the same
 incremental-operation constraints and exact ambiguity-rejecting behavior as omission.
-For text edits, `readback` is optional. `readback:true` or either window field requests one contiguous
-successor page; when none is supplied, readback defaults to `false`. `readbackOffset` is an optional
-one-based post-edit line, and requested `readbackLimit` accepts integers from 1 through 100,000.
-Explicit `readback:false` with either window is invalid. Lifecycle operations reject `readback:true`,
+For text edits, including sole strict `replace_file`, `readback` is optional. `readback:true` or either
+window field requests one contiguous successor page; when none is supplied, readback defaults to
+`false`. `readbackOffset` is an optional one-based post-edit line, and requested `readbackLimit`
+accepts integers from 1 through 100,000. Explicit `readback:false` with either window is invalid.
+Only `delete_file` and `move_file` are lifecycle operations; they reject `readback:true`,
 `readbackOffset`, and `readbackLimit`, and never return a successor. The offset defaults to the first
 new-file hunk line, and the limit defaults to 1,000. The authoritative `maxOutputBytes` budget can
 stop rendering before the requested line count; `@more` means before EOF, `@eof` means EOF was
-reached, and `partial=true` may accompany either.
+reached, and `partial=true` may accompany either. Every attached header preserves the cumulative
+`coverage` prediction computed at render time, but only exact delivery attestation of a still-valid
+candidate issues its refs. Another page issued after rendering can make `coverage=partial` conservative.
 `allowHashlinePrefixes` is optional and defaults to `false`. Before any path lookup or permission,
 the executor rejects literal `replace`, `insert`, and `replace_file` lines beginning in column zero
 with a positive non-zero decimal annotation (`17|` or `17!|`) or the exact markers `@hashline`,
@@ -164,16 +167,18 @@ evidence. It never establishes or restores the live epoch. An already bound proc
 after restart, live continuation requires a fresh delivered and attested `hashline_read`. Text
 matching alone never makes a rejected native-looking call compatible.
 
-For text edits, `readback` defaults to `false` only when neither window field is supplied. Explicit
-`true` requests structural verification or a dependent follow-up edit with the first-hunk/1,000-line
-defaults; supplying `readbackOffset` or `readbackLimit` implies the same request. Explicit `false`
-cannot be combined with a window. The request produces exactly one contiguous successor page; asking
-for more lines never creates a second page, and a successful mutation may report
-`successor=unavailable` instead of attaching the page. `maxOutputBytes` can stop rendering early with
-`@more`; a page that reaches EOF uses `@eof`, and either may be marked `partial=true`. File lifecycle
-operations reject `readback:true` and both window fields and never attach a successor. A
-successful text edit begins with `Applied N operations.`. When current bytes differed and exact
-unique rebase succeeded, that line is `Applied N operations. Exact unique rebase occurred.` instead.
+For text edits, including sole strict `replace_file`, `readback` defaults to `false` only when neither
+window field is supplied. Explicit `true` requests structural verification or a dependent follow-up
+edit with the first-hunk/1,000-line defaults; supplying `readbackOffset` or `readbackLimit` implies
+the same request. Explicit `false` cannot be combined with a window. The request produces exactly
+one contiguous successor page; asking for more lines never creates a second page, and a successful
+mutation may report `successor=unavailable` instead of attaching the page. `maxOutputBytes` can stop
+rendering early with `@more`; a page that reaches EOF uses `@eof`, and either may be marked
+`partial=true`. Its mandatory `coverage` token preserves the render-time cumulative prediction
+without issuing pending refs; an invalidated successor candidate also issues nothing. Only lifecycle
+`delete_file` and `move_file` reject `readback:true` and both window fields and never attach a successor. A successful text edit begins
+with `Applied N operations.`. When current bytes differed and exact unique rebase succeeded, that
+line is `Applied N operations. Exact unique rebase occurred.` instead.
 This means base and current bytes differed; it does not imply that any operation's coordinates moved.
 Fresh bytes do not produce the suffix. Lifecycle success begins with `Deleted <source>.` or `Moved
 <source> to <destination>.`. Every successful mutation then includes one
@@ -193,14 +198,21 @@ without its page. If delivery checks fail, the write remains successful but the 
 the result with `unavailable`; the pending successor issues nothing and is not exposed by ID.
 
 A bounded readback that starts after line 1, stops before EOF, reaches the byte budget, or contains a
-preview-only line is explicitly marked `partial=true` in its header. `@more` means rendering stopped
-before EOF; `@eof` means EOF was reached, including when a preview-only line keeps the page partial.
-Displayed `N|` refs remain usable, but `N!|` previews never become issued. Whole-file replacement
-still requires cumulative issued coverage of all lines plus BOF and EOF. Coverage diagnostics
-aggregate every bounded missing line gap plus required internal-neighbor, BOF, and EOF evidence.
-Their recovery calls deliberately request at most 1,000 lines and follow `@more`; 1,000 is a
-conservative recovery chunk, not the public requested-limit ceiling. For `replace_file`,
-`delete_file`, or `move_file`, incomplete coverage reports concise recovery:
+preview-only line is explicitly marked `partial=true` in its header. This remains page-local even
+when the same header reports `coverage=complete` because evidence issued when it was rendered plus
+the candidate page was cumulatively sufficient. `coverage=partial` means the same render-time inputs
+were insufficient; concurrent or reordered delivery and attestation of another page may later
+complete the snapshot and make that prediction conservative. `@more` means rendering stopped before
+EOF; `@eof` means EOF
+was reached, including when a preview-only line keeps the page partial. Displayed `N|` refs remain
+unusable until delivery attestation of the still-valid candidate and then become issued; `N!|`
+previews never do. Pending output and invalidated candidates issue nothing. Whole-file replacement
+still requires actual cumulative issued coverage of all lines plus BOF and EOF. Coverage diagnostics
+aggregate every bounded missing line gap plus required internal-neighbor, BOF, and EOF evidence. Their
+recovery
+calls deliberately request at most 1,000 lines and follow `@more`; 1,000 is a conservative recovery
+chunk, not the public requested-limit ceiling. For `replace_file`, `delete_file`, or `move_file`,
+incomplete coverage reports concise recovery:
 `Read the file from offset=1 through @eof with the same snapshotId, then retry.`
 
 ### Replace
@@ -260,7 +272,7 @@ Transfer operations never accept `lines` or `finalNewline`; their source is exac
 }
 ```
 
-`replace_file` must be the sole operation. Omitted or explicit `rebase: "none"` requires exact current bytes and a completely issued snapshot including BOF and EOF; `unique` is forbidden. `finalNewline` is optional only for `replace_file`. For non-empty `lines`, omitting it preserves the snapshot's final-newline state. For `lines: []`, omission infers `false` and writes an empty file; explicit `true` remains invalid. Use `lines: [""]` to represent a file containing one newline.
+`replace_file` must be the sole operation. It is a strict text operation, not a lifecycle operation. Omitted or explicit `rebase: "none"` requires exact current bytes and a completely issued snapshot including BOF and EOF; `unique` is forbidden. It supports the text readback controls described above only when explicitly requested, and omission never requests a successor. `finalNewline` is optional only for `replace_file`. For non-empty `lines`, omitting it preserves the snapshot's final-newline state. For `lines: []`, omission infers `false` and writes an empty file; explicit `true` remains invalid. Use `lines: [""]` to represent a file containing one newline.
 
 ### Delete File
 
@@ -484,9 +496,9 @@ invariant is scoped to Better Hashline and does not cover loss of OpenCode's own
 
 ## Permission and Publication Order
 
-Text edits and file lifecycle operations share strict snapshot authority but use separate planners.
-`planEdits` remains the pure text planner; it does not plan deletion or movement of filesystem
-entries.
+Text edits, including sole strict `replace_file`, and lifecycle `delete_file`/`move_file` operations
+share strict snapshot authority but use separate planners. `planEdits` remains the pure text planner;
+it does not plan deletion or movement of filesystem entries.
 
 For a text edit:
 
@@ -508,7 +520,7 @@ For a text edit:
 15. Issue only that page's refs after `tool.execute.after` attests the delivered output; otherwise
     expose no successor ID and report `successor=unavailable`.
 
-For a file lifecycle operation:
+For lifecycle `delete_file` or `move_file`:
 
 1. Validate the sole operation, strict rebase, absence of requested readback, snapshot scope, canonical source path, and complete issued BOF-to-EOF provenance.
 2. Resolve a direct mutable source and, for move, an absent destination under an existing canonical parent; authorize every external source or destination path.
@@ -523,7 +535,7 @@ For a file lifecycle operation:
 
 No rebase, destination substitution, patch change, metadata change, or lifecycle replan occurs after
 permission approval. If approved state changed while permission was pending, publication rejects.
-Lifecycle operations never create a readback successor.
+Lifecycle `delete_file` and `move_file` never create a readback successor.
 
 For a new file, `hashline_write` is create-only and its strict schema accepts exactly `filePath` and
 `content`. Unknown fields, including the obsolete `createParents`, are rejected before mutation.
@@ -679,9 +691,9 @@ The provider descriptions and schema identity change, and an upgraded package ha
 package identity, while the marker remains `native-aliases/v2`. Restart the plugin or host as
 applicable, then obtain a fresh delivered and attested `hashline_read` in the same session before
 native-alias mutation. Persisted history cannot bind the new live epoch, and 0.7.0 snapshot IDs remain
-unusable. Deterministic contract evidence uses the same normalized fixture as the preceding release:
+unusable. The immutable schema-v9 operation-aware migration used this exact normalized fixture:
 
-| Evidence | 0.7.0 normalized fixture | Updated normalized fixture |
+| Evidence | 0.7.0 normalized fixture | Schema-v9 updated normalized fixture |
 | --- | --- | --- |
 | `hashline` provider-contract UTF-8 bytes | 6,041 | 6,551 (+510) |
 | `hashline` serialized SHA-256 | `d88fa0b43b27662a6cd00b15e259b27fd0285b046a10f800b3b44e5ca042e0a9` | `dcde4192f763a53e5a2cf4306426693a3546fe8dfb7cfed1066929a4ec38946f` |
@@ -702,6 +714,29 @@ model-free textual protocol evidence, not semantic or model-quality evidence; st
 are covered by runtime tests rather than that corpus. The schema-v8
 default-simplification result remains immutable historical 0.7.0-era evidence, and its stored values
 and earlier migration tables are not rewritten.
+
+The current schema-v10 contract adds mandatory cumulative coverage predictions to every header and
+explicit readback support for sole strict `replace_file`; omission still requests no successor, and
+only `delete_file` and `move_file` reject readback controls. The table below keeps the historical
+normalized presentation fixture inputs, including synthetic package version `0.2.1` and host version
+`1.18.3`, so it isolates contract/schema byte changes. Its protocol fingerprint is not the runtime
+fingerprint of either released package version; package identity remains a live fingerprint input.
+
+| Evidence | 0.7.0-era normalized fixture | Schema-v10 normalized fixture |
+| --- | --- | --- |
+| `hashline` provider-contract UTF-8 bytes | 6,041 | 7,051 (+1,010) |
+| `hashline` serialized SHA-256 | `d88fa0b43b27662a6cd00b15e259b27fd0285b046a10f800b3b44e5ca042e0a9` | `f798c285feef269c51a7dc4aa4168f3966603d937d7cd9e07f1adf4becd391fe` |
+| `hashline` canonical SHA-256 | `67c6c7cc2ffc8cb60fa35aa8083ea2885a258845b3df94efbdf677721a3e1298` | `f0792053d4d5ffebb01b05c8aa1a729affcfa838d811f1e80a0c089e56dd7af8` |
+| Native-alias provider-contract UTF-8 bytes | 6,297 | 7,617 (+1,320) |
+| Native-alias serialized SHA-256 | `96bd65e8295d462a6f44ba97ab7d0aef2a670a552ec68aca64eab918a4e000e3` | `482a5e6cb72b179f1ef536ccb2149dd575ef6a205e4f6d8bc6d3d13481a3ec4d` |
+| Native-alias canonical SHA-256 | `fd9e41d4424fa454073a89f330f5edc51af930b96798f89a06fcd6262af1a44e` | `9be8113b1a5731afcede7cbd0d6799a16551fafbe3970a63ed5a5811e24db071` |
+| Raw schema SHA-256 | `4f9a2ae9f4fb4aa17efc6be7078e34101fad043db5e091c735d8426192ee0438` | `d549c7644708b147d8b21eabf8423718a9f2cbe57729157c44de6d7571f59477` |
+| Provider schema SHA-256 | `cc27fd62d927605cec08729f858bdc8fc3bb5bc0c7a637b5e8d49843b0cc8279` | `9c0186692c14007dea77b96a929737a5174d1e85661fc7dd65b197c3007f8e88` |
+| Protocol fingerprint | `705a7542e0a2ca4abc4a9d7c53d3600f19f2659e1ad0e6fa22b99a594187214e` | `ce26359500cef74902fcdc64df947789aeddab245d459408b48ec4dc43f3004b` |
+
+The write-once deterministic result is retained at
+[`2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json).
+Schema-v5 through schema-v9 and pilot-v7 remain immutable.
 
 ## Migration From 0.6.1
 

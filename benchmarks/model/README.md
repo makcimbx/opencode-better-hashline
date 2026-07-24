@@ -11,11 +11,12 @@ session/request approvals, a reported-cost stop threshold (not a provider billin
 auth source, and `BENCHMARK_ACK_COSTS=yes` are all present. Every isolated agent is capped at 12
 steps.
 
-The marker name remains `native-aliases/v2`, but the current edit-schema expansion changes the
-canonical schema SHA and protocol fingerprint. For live plugin use, restart the plugin or host as
-applicable and obtain a fresh delivered `hashline_read` in the same OpenCode session/task; old
-snapshot IDs cannot revive. Marker-name equality alone does not make the identities compatible.
-This does not reopen or extend the immutable pilot-v7 schedule.
+The marker name remains `native-aliases/v2`, but the current cumulative-coverage and
+`replace_file`-readback provider-contract changes alter canonical schema SHA and protocol fingerprint
+identity. For live plugin use, restart the plugin or host as applicable and obtain a fresh delivered
+and attested `hashline_read` in the same OpenCode session/task; old snapshot IDs cannot revive.
+Marker-name equality alone does not make the identities compatible. This does not reopen or extend
+the immutable pilot-v7 schedule.
 
 Use `--preflight --output=<new-directory>` to build, pack, install, probe adapter isolation, and run
 the stock-host verifier without a model request. Preflight may use the npm registry and writes local
@@ -49,7 +50,9 @@ complete accounting. It covered the earlier text-operation contract and provides
 technical transport evidence without a model-superiority claim; all pilot IDs through v7 are
 closed. There is no paid model result or model-quality claim for the new task or adapter identity.
 The retained schema-v7 through schema-v9 deterministic results are likewise model-free mechanical
-evidence, not continuations of pilot v7 or paid model-quality results.
+evidence, not continuations of pilot v7 or paid model-quality results. The current schema-v10
+write-once result is retained at `../results/2026-07-24-coverage-readback-ux-windows-x64.json` as
+the same kind of mechanical evidence; it is not a paid model result or model-quality claim.
 
 `--native-alias-probe` is development evidence only. It accepts the exact focused probe tasks or the
 full `baseline-v1` task set, the native-alias-only probe adapter set or current paired

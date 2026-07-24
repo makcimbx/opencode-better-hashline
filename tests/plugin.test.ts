@@ -300,6 +300,48 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
+  test("attests replace_file readback for a dependent edit without another read", async () => {
+    const file = join(root, "replace-file-readback.txt");
+    await writeFile(file, "one\ntwo\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "replace-file-readback.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const args = {
+      filePath: "replace-file-readback.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+      readback: true,
+      operations: [{ op: "replace_file" as const, lines: ["alpha", "beta"], finalNewline: true }],
+    };
+    const editResult = structured(await hashlineEdit.execute(args, toolContext));
+    const successorId = /@hashline snapshot=(s_[A-Za-z0-9_-]{22})/u.exec(editResult.output)?.[1];
+
+    expect(successorId).toBeDefined();
+    expect(editResult.output).toContain(
+      "@hashline-edit previous=consumed successor=attached\n@hashline snapshot=",
+    );
+    expect(editResult.output).toContain("coverage=complete");
+
+    await value["tool.execute.after"]?.(
+      { tool: "hashline_edit", sessionID: "session", callID: "replace-file-readback", args },
+      editResult,
+    );
+    expect(editResult.metadata.hashlinePending).toBeUndefined();
+    await hashlineEdit.execute(
+      {
+        filePath: "replace-file-readback.txt",
+        snapshotId: successorId,
+        operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["BETA"] }],
+      },
+      toolContext,
+    );
+    expect(await readFile(file, "utf8")).toBe("alpha\nBETA\n");
+    await value.dispose?.();
+  });
+
   test("infers post-edit readback from an offset-only window", async () => {
     const file = join(root, "window.txt");
     const lines = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`);
@@ -378,7 +420,7 @@ describe("OpenCode plugin protocol", () => {
     const successorId = String(
       /@hashline snapshot=(s_[A-Za-z0-9_-]{22})/u.exec(editResult.output)?.[1],
     );
-    expect(editResult.output).toContain("lines=3 partial=true\n@eof");
+    expect(editResult.output).toContain("lines=3 partial=true coverage=partial\n@eof");
     expect(editResult.output).not.toMatch(/\n\d+[|!]/u);
     expect(editResult.metadata.hashlinePending).toBeString();
 
@@ -643,6 +685,10 @@ describe("OpenCode plugin protocol", () => {
     expect(schema.properties?.limit?.description).toContain("@more");
     expect(schema.properties?.limit?.description).toContain("@eof");
     expect(schema.properties?.limit?.description).toContain("partial=true");
+    expect(schema.properties?.limit?.description).toContain("coverage=partial|complete");
+    expect(schema.properties?.limit?.description).toContain("delivered and attested");
+    expect(schema.properties?.limit?.description).toContain("issued when rendered");
+    expect(schema.properties?.limit?.description).toContain("after another page");
     const result = structured(
       await hashlineRead.execute({ filePath: "many-lines.txt", limit: 2000 }, toolContext),
     );
@@ -666,6 +712,7 @@ describe("OpenCode plugin protocol", () => {
 
     expect(Buffer.byteLength(result.output, "utf8")).toBeLessThanOrEqual(1024);
     expect(result.output).toContain("partial=true");
+    expect(result.output).toContain("coverage=partial");
     expect(result.output).toContain("@more offset=");
     expect(result.metadata.displayedLines).toBeLessThan(5000);
     await value.dispose?.();
@@ -1459,7 +1506,7 @@ describe("OpenCode plugin protocol", () => {
     ]);
     expect(operation?.required).toEqual(["op"]);
     expect(operation?.description).toBe(
-      "Fields not listed for the selected op are invalid; replace_file and file lifecycle operations must be sole. One move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor must be issued and unchanged.",
+      "Fields not listed for the selected op are invalid; replace_file is a text edit that supports readback and must be sole; file lifecycle operations must be sole. One move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor must be issued and unchanged.",
     );
     expect(operation?.properties?.op?.description).toBe(
       "Required: replace(startLine,endLine,lines); insert(afterLine,lines); replace_file(lines); copy_range/move_range(startLine,endLine,afterLine); delete_file; move_file(destinationPath). Optional only: replace_file(finalNewline). All other fields are forbidden.",
@@ -1501,10 +1548,21 @@ describe("OpenCode plugin protocol", () => {
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("Column-0 prefixes");
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("initial call");
     expect(schema.properties?.readback?.description).toContain("defaults to false unless");
+    expect(schema.properties?.readback?.description).toContain(
+      "For a text edit, including replace_file",
+    );
     expect(schema.properties?.readback?.description).toContain("attachment can be unavailable");
-    expect(schema.properties?.readback?.description).toContain("Lifecycle operations reject true");
+    expect(schema.properties?.readback?.description).toContain(
+      "Only delete_file and move_file reject true and all readback window fields",
+    );
+    expect(schema.properties?.readbackOffset?.description).toContain(
+      "For text edits, including replace_file",
+    );
     expect(schema.properties?.readbackOffset?.description).toContain("implies readback");
     expect(schema.properties?.readbackOffset?.description).toContain("first hunk");
+    expect(schema.properties?.readbackLimit?.description).toContain(
+      "For text edits, including replace_file",
+    );
     expect(schema.properties?.readbackLimit?.description).toContain("implies readback");
     expect(schema.properties?.readbackLimit?.description).toContain("defaults to 1000");
     expect(schema.properties?.readbackLimit?.maximum).toBe(100_000);
@@ -1512,6 +1570,10 @@ describe("OpenCode plugin protocol", () => {
     expect(schema.properties?.readbackLimit?.description).toContain("@more");
     expect(schema.properties?.readbackLimit?.description).toContain("@eof");
     expect(schema.properties?.readbackLimit?.description).toContain("partial=true");
+    expect(schema.properties?.readbackLimit?.description).toContain("coverage=partial|complete");
+    expect(schema.properties?.readbackLimit?.description).toContain("delivered and attested");
+    expect(schema.properties?.readbackLimit?.description).toContain("issued when rendered");
+    expect(schema.properties?.readbackLimit?.description).toContain("after another page");
     const validEditArguments = {
       filePath: "file.txt",
       snapshotId: "s_0000000000000000000000",
@@ -1541,11 +1603,16 @@ describe("OpenCode plugin protocol", () => {
     );
     expect(hashlineEditDescription).toContain("may touch a destructive endpoint");
     expect(hashlineEditDescription).toContain(
-      "readback:true or either window field requests one successor page",
+      "For text edits, including replace_file, readback:true or either window field requests one successor page",
+    );
+    expect(hashlineEditDescription).toContain(
+      "Only delete_file and move_file are lifecycle operations; they never return successor readback and reject readback:true or either window field",
     );
     expect(hashlineEditDescription).not.toContain("readbackOffset selects");
     expect(hashlineEditDescription).not.toContain("maxOutputBytes");
-    expect(hashlineEditDescription).toContain("Text batches publish one atomic replacement");
+    expect(hashlineEditDescription).toContain(
+      "Text batches, including sole strict replace_file, publish one atomic replacement",
+    );
     expect(hashlineEditDescription).toContain("move_file is nontransactional");
     expect(hashlineEditDescription).toContain("PARTIAL_PUBLICATION");
     expect(hashlineEditDescription).toContain("attachment can be unavailable");

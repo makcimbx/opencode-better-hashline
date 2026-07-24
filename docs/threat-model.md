@@ -10,6 +10,7 @@ Better Hashline is designed to prevent these failures during cooperative agent e
 - accepting only range endpoints while an interior line changed;
 - composing overlapping or same-boundary text operations except one explicitly bounded move with pairwise-disjoint replacements wholly inside its intervening corridor and outside its source;
 - mutating content that was retained internally but not issued to the model;
+- treating a render-time coverage prediction, pending output, or an invalidated candidate as issued evidence;
 - copying retained source text that was not issued to the model;
 - moving through unseen corridor content or composing a range move from evolving coordinates;
 - deleting or moving a file without complete issued BOF-to-EOF source coverage;
@@ -94,7 +95,7 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | --- | --- |
 | Mode resolution | Omitted incremental batches select exact `unique`; omitted `replace_file` and lifecycle operations select strict `none`; explicit `none` remains available for full-byte freshness |
 | Snapshot freshness | Exact byte equality in `none`; exact selected text, boundaries, context, and topology in `unique` |
-| Issued authority | Required text ranges/boundaries, or complete lifecycle BOF-to-EOF source coverage; readback issues only one delivered page and never an ID alone |
+| Issued authority | Required text ranges/boundaries, or complete delete/move BOF-to-EOF source coverage; each header computes coverage from evidence issued at render time plus its candidate page: `complete` means those inputs are sufficient and remains so if the valid candidate is attested, while `partial` means they were insufficient then and may become conservative after another page is delivered and attested; only attested valid pages issue refs, never pending output, invalidated candidates, or an ID alone |
 | Target identity | Canonical path plus stable metadata; lifecycle also requires direct terminal and parent binding |
 | Relocation | Exact textual selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges; no semantic or history-causality claim |
 | Text-batch validation | One immutable pre-batch file, declared read/write effects checked before mutation, stable conflict codes with deterministic zero-based pair evidence |
@@ -124,13 +125,15 @@ empty-text moves from merging a lone CR with a relocated LF or changing the no-p
 When failed exact relocation detects only delimiter changes at the original selected coordinates,
 it adds a reread explanation but still returns `TARGET_CHANGED`; it does not normalize or fuzzy-match.
 
-File lifecycle operations are not text transfers. They are sole, strict operations planned outside
-`planEdits`; line fields, requested readback (`true` or either window), unique relocation, overwrite,
-parent creation, and cross-filesystem movement are unavailable. Their exact delete/move patch and v2 metadata are
-immutable across approval. Delete revalidates the direct terminal binding before unlink. Move
-publishes destination first with a verified hard link and can therefore truthfully report a
-nontransactional state in which both names remain. After `PARTIAL_PUBLICATION`, both paths must be
-inspected and reconciled before any retry.
+Only `delete_file` and `move_file` are lifecycle operations. They are sole, strict operations planned
+outside `planEdits`; line fields, requested readback (`true` or either window), unique relocation,
+overwrite, parent creation, and cross-filesystem movement are unavailable. `replace_file` is instead
+a sole strict text operation: it requires complete issued coverage, supports explicit readback, and
+never requests readback automatically. Lifecycle delete/move patch and v2 metadata are immutable
+across approval. Delete revalidates the direct terminal binding before unlink. Move publishes
+destination first with a verified hard link and can therefore truthfully report a nontransactional
+state in which both names remain. After `PARTIAL_PUBLICATION`, both paths must be inspected and
+reconciled before any retry.
 
 Native aliases accept only the Better Hashline argument shape and restrict source and destination
 mutation to the current worktree. Authorized external paths require the unique hashline surface;

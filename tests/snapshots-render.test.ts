@@ -395,24 +395,93 @@ describe("snapshot store", () => {
 });
 
 describe("snapshot rendering", () => {
-  test("renders paginated editable lines and exact continuation offsets", () => {
+  test("renders complete and cumulatively completing pages without issuing during rendering", () => {
     const store = new SnapshotStore(options());
-    const snapshot = store.remember(scope, "/worktree/file", document("a\nb\nc"));
-    const first = renderSnapshotPage({ snapshot, offset: 1, limit: 2, maxOutputBytes: 4096 });
-    expect(first.output).toContain(`@hashline snapshot=${snapshot.id}`);
-    expect(first.output).toContain("lines=3 partial=true");
+    const completeSnapshot = store.remember(scope, "/worktree/complete", document("a\nb"));
+    const complete = renderSnapshotPage({
+      snapshot: completeSnapshot,
+      offset: 1,
+      limit: 2,
+      maxOutputBytes: 4096,
+    });
+    expect(complete.output.split("\n")[0]).toBe(
+      `@hashline snapshot=${completeSnapshot.id} sha256=${completeSnapshot.digest.slice(0, 12)} lines=2 coverage=complete`,
+    );
+    expect(complete.page).toEqual({ ranges: [{ start: 1, end: 2 }], bof: true, eof: true });
+    expect(completeSnapshot.issued).toEqual([]);
+    expect(completeSnapshot.complete).toBeFalse();
+    expect(completeSnapshot.delivered).toBeFalse();
+
+    const snapshot = store.remember(scope, "/worktree/paginated", document("a\nb\nc"));
+    const first = renderSnapshotPage({
+      snapshot,
+      offset: 1,
+      limit: 2,
+      maxOutputBytes: 4096,
+    });
+    expect(first.output.split("\n")[0]).toBe(
+      `@hashline snapshot=${snapshot.id} sha256=${snapshot.digest.slice(0, 12)} lines=3 partial=true coverage=partial`,
+    );
     expect(first.output).toContain("1|a\n2|b\n@more offset=3");
     expect(first.page).toEqual({ ranges: [{ start: 1, end: 2 }], bof: true, eof: false });
     expect(first.nextOffset).toBe(3);
+    expect(snapshot.issued).toEqual([]);
 
-    const second = renderSnapshotPage({ snapshot, offset: 3, limit: 2, maxOutputBytes: 4096 });
+    store.issue(snapshot, first.page);
+    const evidenceBeforeSecondRender = {
+      issued: snapshot.issued.map((range) => ({ ...range })),
+      issuedBof: snapshot.issuedBof,
+      issuedEof: snapshot.issuedEof,
+      complete: snapshot.complete,
+      delivered: snapshot.delivered,
+      lastUsedAt: snapshot.lastUsedAt,
+    };
+    const second = renderSnapshotPage({
+      snapshot,
+      offset: 3,
+      limit: 2,
+      maxOutputBytes: 4096,
+    });
+    expect(second.output.split("\n")[0]).toBe(
+      `@hashline snapshot=${snapshot.id} sha256=${snapshot.digest.slice(0, 12)} lines=3 partial=true coverage=complete`,
+    );
     expect(second.output).toContain("3|c\n@eof");
-    expect(second.output).toContain("lines=3 partial=true");
     expect(second.page).toEqual({ ranges: [{ start: 3, end: 3 }], bof: false, eof: true });
     expect(second.nextOffset).toBeUndefined();
+    expect({
+      issued: snapshot.issued,
+      issuedBof: snapshot.issuedBof,
+      issuedEof: snapshot.issuedEof,
+      complete: snapshot.complete,
+      delivered: snapshot.delivered,
+      lastUsedAt: snapshot.lastUsedAt,
+    }).toEqual(evidenceBeforeSecondRender);
   });
 
-  test("issues long lines that fit and previews lines that exceed the byte budget", () => {
+  test("keeps a pending partial prediction conservative across reordered delivery", () => {
+    const store = new SnapshotStore(options());
+    const snapshot = store.remember(scope, "/worktree/reordered", document("a\nb\nc"));
+    const trailing = renderSnapshotPage({
+      snapshot,
+      offset: 3,
+      limit: 1,
+      maxOutputBytes: 4096,
+    });
+    const leading = renderSnapshotPage({
+      snapshot,
+      offset: 1,
+      limit: 2,
+      maxOutputBytes: 4096,
+    });
+
+    expect(trailing.output).toContain("partial=true coverage=partial");
+    expect(leading.output).toContain("partial=true coverage=partial");
+    store.issue(snapshot, leading.page);
+    store.issue(snapshot, trailing.page);
+    expect(snapshot.complete).toBeTrue();
+  });
+
+  test("reserves the longest coverage marker at exact byte boundaries", () => {
     const store = new SnapshotStore(options());
     const snapshot = store.remember(scope, "/worktree/file", document("x".repeat(3000)));
     const complete = renderSnapshotPage({
@@ -422,16 +491,29 @@ describe("snapshot rendering", () => {
       maxOutputBytes: 4096,
     });
     expect(complete.output).toContain(`1|${"x".repeat(3000)}`);
+    expect(complete.output).toContain("lines=1 coverage=complete");
     expect(complete.output).not.toContain("partial=true");
     expect(complete.page.ranges).toEqual([{ start: 1, end: 1 }]);
 
+    const exactBytes = Buffer.byteLength(complete.output, "utf8");
     const exactBudget = renderSnapshotPage({
       snapshot,
       offset: 1,
       limit: 1,
-      maxOutputBytes: Buffer.byteLength(complete.output, "utf8"),
+      maxOutputBytes: exactBytes,
     });
     expect(exactBudget.output).toBe(complete.output);
+
+    const oneByteShort = renderSnapshotPage({
+      snapshot,
+      offset: 1,
+      limit: 1,
+      maxOutputBytes: exactBytes - 1,
+    });
+    expect(Buffer.byteLength(oneByteShort.output, "utf8")).toBeLessThanOrEqual(exactBytes - 1);
+    expect(oneByteShort.output).toContain("partial=true coverage=partial");
+    expect(oneByteShort.output).toContain("1!|");
+    expect(oneByteShort.page.ranges).toEqual([]);
 
     const displacedSnapshot = store.remember(
       scope,
@@ -445,10 +527,14 @@ describe("snapshot rendering", () => {
       maxOutputBytes: 1024,
     });
     expect(Buffer.byteLength(displaced.output, "utf8")).toBeLessThanOrEqual(1024);
-    expect(displaced.output).toContain("partial=true");
+    expect(displaced.output).toContain("partial=true coverage=partial");
     expect(displaced.output).toContain("1!|");
     expect(displaced.page.ranges).toEqual([]);
+  });
 
+  test("marks preview-only pages as partial cumulative coverage", () => {
+    const store = new SnapshotStore(options());
+    const snapshot = store.remember(scope, "/worktree/preview", document("x".repeat(3000)));
     const rendered = renderSnapshotPage({
       snapshot,
       offset: 1,
@@ -458,8 +544,11 @@ describe("snapshot rendering", () => {
     expect(Buffer.byteLength(rendered.output, "utf8")).toBeLessThanOrEqual(1024);
     expect(rendered.output).toContain("1!|");
     expect(rendered.output).toContain("line not issued");
-    expect(rendered.output).toContain("partial=true");
-    expect(rendered.page.ranges).toEqual([]);
+    expect(rendered.output).toContain("partial=true coverage=partial");
+    expect(rendered.page).toEqual({ ranges: [], bof: true, eof: true });
+    expect(snapshot.issued).toEqual([]);
+    expect(snapshot.delivered).toBeFalse();
+
     store.issue(snapshot, rendered.page);
     const previewOnly = thrownMessage(() =>
       store.assertIssuedCoverage(snapshot, {
@@ -472,9 +561,9 @@ describe("snapshot rendering", () => {
     expect(previewOnly).toContain("preview-only N!| lines remain unissued");
   });
 
-  test("uses byte budgets for multibyte lines and handles empty/out-of-range pages", () => {
+  test("uses byte budgets for multibyte preview lines", () => {
     const store = new SnapshotStore(options());
-    const snapshot = store.remember(scope, "/worktree/file", document("😀".repeat(1000)));
+    const snapshot = store.remember(scope, "/worktree/multibyte", document("😀".repeat(1000)));
     const rendered = renderSnapshotPage({
       snapshot,
       offset: 1,
@@ -482,6 +571,7 @@ describe("snapshot rendering", () => {
       maxOutputBytes: 1024,
     });
     expect(Buffer.byteLength(rendered.output, "utf8")).toBeLessThanOrEqual(1024);
+    expect(rendered.output).toContain("partial=true coverage=partial");
     expect(rendered.page.ranges).toEqual([]);
     expect(() => new TextEncoder().encode(rendered.output)).not.toThrow();
     for (let index = 0; index < rendered.output.length; index += 1) {
@@ -493,7 +583,10 @@ describe("snapshot rendering", () => {
         expect(code < 0xdc00 || code > 0xdfff).toBe(true);
       }
     }
+  });
 
+  test("reports complete empty coverage and partial out-of-range coverage", () => {
+    const store = new SnapshotStore(options());
     const empty = store.remember(scope, "/worktree/empty", document(""));
     const emptyPage = renderSnapshotPage({
       snapshot: empty,
@@ -501,11 +594,20 @@ describe("snapshot rendering", () => {
       limit: 1,
       maxOutputBytes: 1024,
     });
-    expect(emptyPage.output).toContain("lines=0\n@eof");
+    expect(emptyPage.output).toContain("lines=0 coverage=complete\n@eof");
+    expect(emptyPage.output).not.toContain("partial=true");
     expect(emptyPage.page).toEqual({ ranges: [], bof: true, eof: true });
 
-    const pastEnd = renderSnapshotPage({ snapshot, offset: 99, limit: 1, maxOutputBytes: 1024 });
+    const snapshot = store.remember(scope, "/worktree/out-of-range", document("line"));
+    const pastEnd = renderSnapshotPage({
+      snapshot,
+      offset: 99,
+      limit: 1,
+      maxOutputBytes: 1024,
+    });
     expect(pastEnd.page).toEqual({ ranges: [], bof: false, eof: true });
-    expect(pastEnd.output).toContain("lines=1 partial=true");
+    expect(pastEnd.output).toContain("lines=1 partial=true coverage=partial");
+    expect(snapshot.issued).toEqual([]);
+    expect(snapshot.delivered).toBeFalse();
   });
 });

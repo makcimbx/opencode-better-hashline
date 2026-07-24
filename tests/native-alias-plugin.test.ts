@@ -330,6 +330,9 @@ describe("native alias activation and visibility", () => {
     expect(nativeAliasEditDescription).toContain(
       "Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.",
     );
+    expect(nativeAliasEditDescription).toContain(
+      "Only delete_file and move_file are lifecycle operations; they never return successor readback and reject readback:true or either window field",
+    );
     const guidance = await systemGuidance(value);
     expect(guidance).toContain("native-alias-session=unbound");
     expect(guidance).toContain("Do not call edit or apply_patch");

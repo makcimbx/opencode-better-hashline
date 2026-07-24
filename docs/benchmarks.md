@@ -14,7 +14,9 @@ Better Hashline separates mechanical protocol evidence from model-quality eviden
 
 ## Retained Deterministic Run
 
-Latest retained raw result: [`benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json`](../benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json)
+Preceding retained raw result: [`benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json`](../benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json)
+
+Current write-once retained schema-v10 result: [`benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json)
 
 The 15-scenario and 21-scenario results remain available as immutable historical evidence in
 [`2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json) and
@@ -30,8 +32,11 @@ schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtur
 schema-v7 record adds the composed-move case and edit/write/readback/parent-create wire fixtures.
 The schema-v8 record keeps those safety cases and measures the simpler inferred defaults. The
 schema-v9 record adds an omitted/default adapter using the incremental branch of the shared runtime
-policy resolver. Strict-only defaults are covered by runtime tests rather than this corpus.
-All are mechanical textual fixture evidence, not semantic, paid, or model-quality evidence.
+policy resolver. The current schema-v10 runner keeps those classifications and adds wire fixtures
+for cumulative coverage headers and explicit `replace_file` readback. Strict-only defaults are
+covered by runtime tests rather than this corpus. Schema-v5 through schema-v9 and pilot-v7 remain
+immutable. All are mechanical textual fixture evidence, not semantic, paid, or model-quality
+evidence.
 
 Environment: Windows x64, Bun 1.3.14, AMD64 Family 25 Model 97. Five microbenchmark warmups; 100 measured runs below 10,000 lines and 30 runs at or above it.
 
@@ -88,11 +93,11 @@ model-quality claim.
 
 ## Schema-v9 Retained Result
 
-The current runner emits schema v9. It retains the same 29-case corpus and explicit adapter outcomes,
-then adds `better-hashline-default`, which omits `rebase` and resolves the effective mode through the
-incremental branch of the same pure policy function used by the plugin. Its classifications are strict `6/18/5/0`, explicit
-unique `11/18/0/0`, omitted/default `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`,
-endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
+The retained schema-v9 runner used the same 29-case corpus and explicit adapter outcomes, then added
+`better-hashline-default`, which omits `rebase` and resolves the effective mode through the
+incremental branch of the same pure policy function used by the plugin. Its classifications are
+strict `6/18/5/0`, explicit unique `11/18/0/0`, omitted/default `11/18/0/0`, exact search
+`10/13/1/5`, line numbers `7/1/0/21`, endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
 (`exact_apply/safe_reject/false_reject/unsafe_accept`).
 
 These values are retained in
@@ -100,6 +105,15 @@ These values are retained in
 The omitted arm establishes equivalence with explicit unique for this textual corpus only. It does
 not prove semantic independence, model quality, hook behavior, permission behavior, or filesystem
 publication safety. Historical records and the closed pilot-v7 scope remain immutable.
+
+## Schema-v10 Retained Result
+
+The current schema-v10 result preserves the schema-v9 29-case classifications and adds deterministic
+wire fixtures for mandatory cumulative `coverage` headers and explicitly requested `replace_file`
+readback. Its write-once path is
+[`2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json).
+This is mechanical textual fixture evidence. Strict-only defaults remain runtime-test evidence, not
+corpus evidence; no semantic, paid, or model-quality claim is made.
 
 ## Static Size
 
@@ -216,7 +230,7 @@ or model-quality claims.
 
 ## Schema-v9 Retained Wire Size
 
-The retained schema-v9 result records the operation-aware wording in the current edit fixture:
+The retained schema-v9 result records the operation-aware wording in the then-current edit fixture:
 
 | Fixture | Synthetic baseline bytes | Current bytes | Change |
 | --- | ---: | ---: | ---: |
@@ -226,6 +240,13 @@ The same run retains the schema-v8 write and compact inferred-call fixtures: wri
 `849 -> 531`, readback `202 -> 186`, empty-file newline `138 -> 117`, and parent creation `81 -> 60`.
 The raw edit fixture is generated schema plus description text, not a provider projection or token
 estimate. Exact normalized provider-contract sizes and hashes are recorded in the protocol migration.
+
+## Schema-v10 Retained Wire Evidence
+
+Schema v10 adds exact fixtures for the mandatory cumulative-coverage header and explicit
+`replace_file` readback. Their final byte counts, hashes, and deltas are retained in the write-once
+JSON and are not inferred from schema v9. All retained schema-v5 through schema-v9 wire values above
+remain immutable.
 
 ## Core Timings
 
@@ -240,14 +261,16 @@ bun run bench
 bun run bench --output=benchmarks/results/local/my-run.json
 ```
 
-The schema-v9 runner prints summary tables and optionally writes the complete corpus,
-classifications, environment, static/rendering sizes, edit/write raw-schema fixtures,
-lifecycle and simplified-default call fixtures, transfer-call evidence, corridor-read evidence,
-and microbenchmark distributions.
+The schema-v10 runner prints summary tables and optionally writes the complete corpus,
+classifications, environment, static/rendering sizes, edit/write raw-schema fixtures, cumulative
+coverage and explicit `replace_file` readback fixtures, lifecycle and simplified-default call
+fixtures, transfer-call evidence, corridor-read evidence, and microbenchmark distributions.
 
 Result paths are write-once by default. Use `--force` only when deliberately regenerating an
-unpublished checked result from its final source revision. Never overwrite retained schema-v5 through
-schema-v9 evidence; use a new dated path for a changed runner or protocol.
+unpublished checked result from its final source revision. Never overwrite retained evidence.
+Schema v10 uses the dated
+`benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json` path; schema-v5 through
+schema-v9 evidence remains immutable.
 
 ## Model Harness
 

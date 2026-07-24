@@ -34,7 +34,7 @@ const commonInput = {
 } satisfies Omit<NativeAliasMetadataInput, "surface">;
 
 describe("native alias presentation contracts", () => {
-  test("fingerprints the actual hashline and native-alias provider contracts", () => {
+  test("fingerprints the normalized hashline and native-alias provider contracts", () => {
     const hashlineContract = { description: hashlineEditDescription, parameters: schema };
     const nativeAliasContract = { description: nativeAliasEditDescription, parameters: schema };
     const hashlineSerialized = JSON.stringify(hashlineContract);
@@ -51,17 +51,17 @@ describe("native alias presentation contracts", () => {
       providerSchemaSha256: schemaSha256,
       protocolFingerprint: nativeAliasProtocolFingerprint(commonInput),
     }).toEqual({
-      hashlineBytes: 6_551,
-      hashlineSerializedSha256: "dcde4192f763a53e5a2cf4306426693a3546fe8dfb7cfed1066929a4ec38946f",
-      hashlineCanonicalSha256: "67a86166c1434e27003e1e631a2046e95b68dece8eb83ddb7594e22d9e3275c3",
-      nativeAliasBytes: 7_117,
+      hashlineBytes: 7_051,
+      hashlineSerializedSha256: "f798c285feef269c51a7dc4aa4168f3966603d937d7cd9e07f1adf4becd391fe",
+      hashlineCanonicalSha256: "f0792053d4d5ffebb01b05c8aa1a729affcfa838d811f1e80a0c089e56dd7af8",
+      nativeAliasBytes: 7_617,
       nativeAliasSerializedSha256:
-        "ac7da33ee1c3ab3f02416a61e5ab0428a1eeacdea50cb08bf2a18a72dba6910a",
+        "482a5e6cb72b179f1ef536ccb2149dd575ef6a205e4f6d8bc6d3d13481a3ec4d",
       nativeAliasCanonicalSha256:
-        "20a3e47cbaa85361bbeddb0515531559ca9415f04fed20f167e9f44d8399951a",
-      rawSchemaSha256: "62ce47b2adb4142f5054862f55e06762c4aab5216b8dd814c22cd25376b2933a",
-      providerSchemaSha256: "811bc44209d78451d4f2ecc09422a4dcfec43cdad2f38eb607c19bfbbacb7a4a",
-      protocolFingerprint: "4e0e12443c791def69c1c69bdb35e35499c98b3e0c317a179580a0513e43dbad",
+        "9be8113b1a5731afcede7cbd0d6799a16551fafbe3970a63ed5a5811e24db071",
+      rawSchemaSha256: "d549c7644708b147d8b21eabf8423718a9f2cbe57729157c44de6d7571f59477",
+      providerSchemaSha256: "9c0186692c14007dea77b96a929737a5174d1e85661fc7dd65b197c3007f8e88",
+      protocolFingerprint: "ce26359500cef74902fcdc64df947789aeddab245d459408b48ec4dc43f3004b",
     });
   });
 
