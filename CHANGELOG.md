@@ -16,6 +16,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Folded Better Hashline guidance into OpenCode's leading system block instead of appending a second `system` message, preserving in-place hook semantics while supporting strict local chat templates such as Qwen.
+
 ## [0.8.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.8.0...v0.8.1) (2026-07-24)
 
 ### Added

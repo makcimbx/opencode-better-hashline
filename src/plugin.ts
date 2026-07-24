@@ -2671,7 +2671,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       } else {
         guidance = `Better Hashline migration mode exposes two separate workflows. Prefer hashline_read followed by hashline_edit for an existing UTF-8 text file, and hashline_write for a new file; hashline_write creates missing parents automatically. When a native mutator changes an existing file, first use native read. Native write or apply_patch may create an absent target without a preceding read. Never pass hashline output or snapshot IDs to native mutators. ${EDIT_SEMANTICS_GUIDANCE}`;
       }
-      output.system.push(guidance);
+      output.system[0] = output.system[0] ? `${output.system[0]}\n\n${guidance}` : guidance;
     },
     async "tool.definition"(input, output) {
       if (input.toolID === "read") {

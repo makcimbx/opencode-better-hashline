@@ -474,6 +474,11 @@ restrict mutation paths to the current worktree. While unbound or mismatched, na
 attested by `tool.execute.after`; edit admission then also requires the supplied snapshot to have been
 delivered. Live admission never fetches persisted history.
 
+Better Hashline mutates OpenCode's live system array in place and folds its guidance into the leading
+block, creating that block only when the array is empty. It does not append another wire-level
+`system` message or collapse blocks owned by other plugins. This preserves system-level instruction
+authority while avoiding the second-system-message shape rejected by strict local chat templates.
+
 Reads prepared for the same fingerprint and canonical worktree may reuse the current candidate authority. Preparing a differing identity retires active authority immediately. Only the current candidate delivered and attested by `tool.execute.after` can commit, and a snapshot's authority token must equal the active authority. Stale, reordered, and ABA completions therefore cannot bind or revive old IDs.
 
 Once bound to the current package/schema/host/worktree fingerprint, alias calls may overlap only when
