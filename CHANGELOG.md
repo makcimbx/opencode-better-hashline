@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.8.1...v0.9.0) (2026-07-24)
+
+
+### Added
+
+* add managed LSP diagnostics ([#44](https://github.com/makcimbx/opencode-better-hashline/issues/44)) ([bd776c7](https://github.com/makcimbx/opencode-better-hashline/commit/bd776c70d355316e24774b2e6d27b9a423a28d69))
+
 ## [Unreleased]
 
 ### Added
