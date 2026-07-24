@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import {
   BoundedStreamMessageReader,
   BoundedStreamMessageWriter,
@@ -21,10 +21,14 @@ const mode = process.env.FAKE_LSP_MODE ?? "pull-full";
 const logPath = process.env.FAKE_LSP_LOG;
 const serverId = process.env.FAKE_LSP_SERVER_ID ?? "fake";
 const delayMs = Number(process.env.FAKE_LSP_DELAY_MS ?? "0");
+const diagnosticGatePath = process.env.FAKE_LSP_DIAGNOSTIC_GATE_PATH;
+const diagnosticGateTimeoutMs = Number(process.env.FAKE_LSP_DIAGNOSTIC_GATE_TIMEOUT_MS ?? "5000");
 const documents = new Map<string, { text: string; version: number }>();
 const typescriptDiagnosticState = new Map<string, boolean>();
 const timers = new Set<ReturnType<typeof setTimeout>>();
 let diagnosticResult = 0;
+let diagnosticGatePending = diagnosticGatePath !== undefined;
+// A configured marker gates only the first pull request; later requests proceed independently.
 let reopenOpenCount = 0;
 let reopenClosedVersion: number | undefined;
 let documentSync = Promise.resolve();
@@ -44,6 +48,65 @@ function enqueueDocumentSync(action: () => void | Promise<void>): Promise<void> 
     } catch {}
   });
   return documentSync;
+}
+
+async function awaitBeforeDeadline(
+  promise: Promise<void>,
+  deadline: number,
+  message: string,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), Math.max(0, deadline - Date.now()));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function awaitDocumentSyncBarrier(): Promise<void> {
+  const deadline = Date.now() + 250;
+  const timeoutMessage = "Timed out waiting for preceding document notifications.";
+  let synchronized = documentSync;
+  let stableHandoffs = 0;
+  while (Date.now() < deadline) {
+    await awaitBeforeDeadline(synchronized, deadline, timeoutMessage);
+    await awaitBeforeDeadline(
+      new Promise<void>((resolve) => setImmediate(resolve)),
+      deadline,
+      timeoutMessage,
+    );
+    if (documentSync === synchronized) {
+      stableHandoffs += 1;
+      if (stableHandoffs === 2) return;
+    } else {
+      synchronized = documentSync;
+      stableHandoffs = 0;
+    }
+  }
+  throw new Error(timeoutMessage);
+}
+
+async function awaitDiagnosticGate(signal: AbortSignal): Promise<void> {
+  if (!diagnosticGatePending || !diagnosticGatePath) return;
+  diagnosticGatePending = false;
+  log("diagnostic-gated", { releaseMarkerPath: diagnosticGatePath });
+  const deadline = Date.now() + diagnosticGateTimeoutMs;
+  while (Date.now() < deadline) {
+    if (signal.aborted) {
+      throw new JsonRpcResponseError(JSON_RPC_ERROR.requestCancelled, "Request cancelled.");
+    }
+    if (existsSync(diagnosticGatePath)) {
+      log("diagnostic-released");
+      return;
+    }
+    await sleep(10);
+  }
+  throw new Error("Timed out waiting for the diagnostic release marker.");
 }
 
 function diagnostic(text: string): Diagnostic {
@@ -303,7 +366,7 @@ if (mode === "oversized-frame") {
   );
 
   peer.onRequest("textDocument/diagnostic", async (params, context) => {
-    await documentSync;
+    await awaitDocumentSyncBarrier();
     const value = record(params);
     const uri = String(record(value.textDocument).uri ?? "");
     log("diagnostic", {
@@ -311,6 +374,7 @@ if (mode === "oversized-frame") {
       previousResultId: value.previousResultId,
       identifier: value.identifier,
     });
+    await awaitDiagnosticGate(context.signal);
     if (mode === "timeout-ignore-cancel") return new Promise(() => {});
     if (mode === "timeout") {
       return new Promise((_resolve, reject) => {
@@ -346,7 +410,7 @@ if (mode === "oversized-frame") {
 
   if (mode.startsWith("typescript-sync")) {
     peer.onRequest("workspace/executeCommand", async (params) => {
-      await documentSync;
+      await awaitDocumentSyncBarrier();
       const value = record(params);
       const argumentsValue = Array.isArray(value.arguments) ? value.arguments : [];
       const command = String(argumentsValue[0] ?? "");
@@ -449,9 +513,7 @@ if (mode === "oversized-frame") {
     }
     if (mode === "push-empty") {
       sendPublication({ uri: publishedUri, version, diagnostics: [diagnostic(text)] });
-      schedule(10, () => {
-        sendPublication({ uri: publishedUri, version, diagnostics: [] });
-      });
+      sendPublication({ uri: publishedUri, version, diagnostics: [] });
       return;
     }
     if (mode === "push-malformed") {

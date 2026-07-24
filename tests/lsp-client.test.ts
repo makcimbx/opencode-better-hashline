@@ -92,6 +92,13 @@ async function processExited(pid: number, timeoutMs = 2_000): Promise<boolean> {
   return false;
 }
 
+async function waitForClientExit(client: LspClient, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (client.isAlive && Date.now() < deadline) await Bun.sleep(10);
+  if (client.isAlive)
+    throw new Error("Timed out waiting for the LSP client to observe process exit.");
+}
+
 function killProcess(pid: number): void {
   try {
     process.kill(pid, "SIGKILL");
@@ -633,6 +640,7 @@ describe("persistent LSP client", () => {
     const exited = await processExited(childPid, 1_500);
     if (!exited) killProcess(childPid);
     if (process.platform !== "win32") expect(exited).toBe(true);
+    await waitForClientExit(client);
     expect(client.isAlive).toBe(false);
   });
 });

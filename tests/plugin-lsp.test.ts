@@ -11,7 +11,6 @@ import {
   rm,
   stat,
   symlink,
-  watch,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -188,6 +187,18 @@ async function lspHooks(
   return { value, log };
 }
 
+async function gatedLspHooks(
+  name: string,
+): Promise<{ value: Hooks; log: string; release: string }> {
+  const release = join(root, `${name}-${randomUUID()}.release`);
+  const hooks = await lspHooks("pull-full", {
+    name,
+    config: { diagnosticsTimeoutMs: 3_000 },
+    serverEnv: { FAKE_LSP_DIAGNOSTIC_GATE_PATH: release },
+  });
+  return { ...hooks, release };
+}
+
 function effectiveServer(id: string, mode: string, log: string, extensions: string[] = [".ts"]) {
   return {
     command: [process.execPath, fakeServer],
@@ -260,41 +271,19 @@ async function events(log: string): Promise<FakeEvent[]> {
     .map((line) => JSON.parse(line) as FakeEvent);
 }
 
-async function actAfterFakeEvent(
+async function waitForFakeEvent(
   log: string,
   event: string,
-  action: () => Promise<void>,
   offset = 0,
-): Promise<void> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3_000);
-  const iterator = watch(root, { signal: controller.signal })[Symbol.asyncIterator]();
-  let nextUpdate = iterator.next();
-  try {
-    while (true) {
-      if ((await events(log)).slice(offset).some((entry) => entry.event === event)) {
-        await action();
-        return;
-      }
-      const update = await nextUpdate;
-      if (update.done) throw new Error("Fake LSP event watcher ended unexpectedly.");
-      nextUpdate = iterator.next();
-    }
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error(`Timed out waiting for fake LSP event '${event}'.`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    controller.abort();
-    try {
-      await nextUpdate;
-    } catch {}
-    try {
-      await iterator.return?.();
-    } catch {}
+  timeoutMs = 3_000,
+): Promise<FakeEvent> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = (await events(log)).slice(offset).find((entry) => entry.event === event);
+    if (found) return found;
+    await Bun.sleep(10);
   }
+  throw new Error(`Timed out waiting for fake LSP event '${event}'.`);
 }
 
 async function fakeEventOffset(log: string): Promise<number> {
@@ -525,6 +514,7 @@ describe("managed LSP plugin integration", () => {
     const { value, log } = await lspHooks("pull-full");
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "diagnostic.ts");
+    await waitForFakeEvent(log, "open");
     const result = structured(
       await registry(value).hashlineEdit.execute(
         {
@@ -541,8 +531,13 @@ describe("managed LSP plugin integration", () => {
     expect(await readFile(file, "utf8")).toBe("TWO\n");
     const protocol = await events(log);
     expect(protocol.filter((entry) => entry.event === "started")).toHaveLength(1);
-    expect(protocol.find((entry) => entry.event === "open")?.text).toBe("TWO\n");
-    expect(protocol.some((entry) => entry.event === "change")).toBe(false);
+    const synchronization = protocol.filter(
+      (entry) => entry.event === "open" || entry.event === "change",
+    );
+    expect(synchronization.map((entry) => [entry.event, entry.text])).toEqual([
+      ["open", "one\n"],
+      ["change", "TWO\n"],
+    ]);
   });
 
   test("keeps clean enabled output byte-identical", async () => {
@@ -664,20 +659,10 @@ describe("managed LSP plugin integration", () => {
   test("suppresses diagnostics and invalidates readback on post-publication drift", async () => {
     const file = join(root, "drift.ts");
     await writeFile(file, "before\n");
-    const { value, log } = await lspHooks("timeout", {
-      config: { diagnosticsTimeoutMs: 1_000 },
-    });
+    const { value, log, release } = await gatedLspHooks("drift");
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "drift.ts");
     const diagnosticOffset = await fakeEventOffset(log);
-    const drift = actAfterFakeEvent(
-      log,
-      "diagnostic",
-      async () => {
-        await writeFile(file, "external\n");
-      },
-      diagnosticOffset,
-    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "drift.ts",
@@ -688,7 +673,9 @@ describe("managed LSP plugin integration", () => {
       toolContext,
     );
 
-    await drift;
+    await waitForFakeEvent(log, "diagnostic", diagnosticOffset);
+    await writeFile(file, "external\n");
+    await writeFile(release, "release\n");
     const result = structured(await pending);
     expect(result.output).toContain(
       "diagnostics were suppressed because the target changed again after publication",
@@ -704,28 +691,11 @@ describe("managed LSP plugin integration", () => {
     const file = join(root, "same-byte-drift.ts");
     const replacement = join(root, "same-byte-replacement.tmp");
     await writeFile(file, "before\n");
-    const { value, log } = await lspHooks("timeout", {
-      config: { diagnosticsTimeoutMs: 1_000 },
-    });
+    const { value, log, release } = await gatedLspHooks("same-byte-drift");
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "same-byte-drift.ts");
     const diagnosticOffset = await fakeEventOffset(log);
     let identityObservable = false;
-    const drift = actAfterFakeEvent(
-      log,
-      "diagnostic",
-      async () => {
-        const committedStats = await stat(file);
-        await writeFile(replacement, "published\n");
-        const replacementStats = await stat(replacement);
-        identityObservable =
-          committedStats.dev !== replacementStats.dev ||
-          committedStats.ino !== replacementStats.ino;
-        await rm(file);
-        await rename(replacement, file);
-      },
-      diagnosticOffset,
-    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "same-byte-drift.ts",
@@ -736,7 +706,15 @@ describe("managed LSP plugin integration", () => {
       toolContext,
     );
 
-    await drift;
+    await waitForFakeEvent(log, "diagnostic", diagnosticOffset);
+    const committedStats = await stat(file);
+    await writeFile(replacement, "published\n");
+    const replacementStats = await stat(replacement);
+    identityObservable =
+      committedStats.dev !== replacementStats.dev || committedStats.ino !== replacementStats.ino;
+    await rm(file);
+    await rename(replacement, file);
+    await writeFile(release, "release\n");
     const result = structured(await pending);
     if (identityObservable) {
       expect(result.output).toContain(
@@ -752,28 +730,11 @@ describe("managed LSP plugin integration", () => {
     const file = join(root, "nlink-drift.ts");
     const alias = join(root, "nlink-drift-alias.ts");
     await writeFile(file, "before\n");
-    const { value, log } = await lspHooks("timeout", {
-      config: { diagnosticsTimeoutMs: 1_000 },
-    });
+    const { value, log, release } = await gatedLspHooks("nlink-drift");
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "nlink-drift.ts");
     const diagnosticOffset = await fakeEventOffset(log);
     let linkCountObservable = false;
-    const drift = actAfterFakeEvent(
-      log,
-      "diagnostic",
-      async () => {
-        try {
-          await link(file, alias);
-          linkCountObservable = (await stat(file)).nlink > 1;
-        } catch (error) {
-          const code =
-            error && typeof error === "object" && "code" in error ? String(error.code) : "";
-          if (!["EACCES", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM"].includes(code)) throw error;
-        }
-      },
-      diagnosticOffset,
-    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "nlink-drift.ts",
@@ -784,7 +745,15 @@ describe("managed LSP plugin integration", () => {
       toolContext,
     );
 
-    await drift;
+    await waitForFakeEvent(log, "diagnostic", diagnosticOffset);
+    try {
+      await link(file, alias);
+      linkCountObservable = (await stat(file)).nlink > 1;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+      if (!["EACCES", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM"].includes(code)) throw error;
+    }
+    await writeFile(release, "release\n");
     const result = structured(await pending);
     if (linkCountObservable) {
       expect(result.output).toContain(
@@ -799,18 +768,10 @@ describe("managed LSP plugin integration", () => {
     const source = join(root, "move-drift.ts");
     const destination = join(root, "moved-drift.ts");
     await writeFile(source, "move\n");
-    const { value, log } = await lspHooks("timeout", {
-      config: { diagnosticsTimeoutMs: 1_000 },
-    });
+    const { value, log, release } = await gatedLspHooks("move-drift");
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "move-drift.ts");
     const diagnosticOffset = await fakeEventOffset(log);
-    const recreate = actAfterFakeEvent(
-      log,
-      "diagnostic",
-      () => writeFile(source, "move\n"),
-      diagnosticOffset,
-    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "move-drift.ts",
@@ -820,7 +781,9 @@ describe("managed LSP plugin integration", () => {
       toolContext,
     );
 
-    await recreate;
+    await waitForFakeEvent(log, "diagnostic", diagnosticOffset);
+    await writeFile(source, "move\n");
+    await writeFile(release, "release\n");
     const result = structured(await pending);
     expect(result.output).toContain(
       "diagnostics were suppressed because the target changed again after publication",
@@ -881,7 +844,7 @@ describe("managed LSP plugin integration", () => {
         deleteContext,
       ),
     );
-    await actAfterFakeEvent(deletePlugin.log, "close", () => Promise.resolve(), deleteEventOffset);
+    await waitForFakeEvent(deletePlugin.log, "close", deleteEventOffset);
     expect(deleted.output).not.toContain("@better-hashline-lsp");
     expect(deleted.output).not.toContain("LSP_DIAGNOSTICS_UNAVAILABLE");
     await expect(readFile(deleteFile, "utf8")).rejects.toThrow();
@@ -916,7 +879,7 @@ describe("managed LSP plugin integration", () => {
         moveContext,
       ),
     );
-    await actAfterFakeEvent(movePlugin.log, "open", () => Promise.resolve(), moveEventOffset);
+    await waitForFakeEvent(movePlugin.log, "open", moveEventOffset);
     expect(moved.output).toContain("LSP| moved.ts:1:1 [typescript] typescript:move\\n");
     expect(await readFile(join(root, "moved.ts"), "utf8")).toBe("move\n");
     const moveEvents = await events(movePlugin.log);
@@ -1469,10 +1432,7 @@ describe("managed LSP plugin integration", () => {
   test("preserves a newer successor when an older operation detects final drift", async () => {
     const file = join(root, "newer-successor.ts");
     await writeFile(file, "before\n");
-    const { value, log } = await lspHooks("timeout", {
-      config: { diagnosticsTimeoutMs: 700 },
-      name: "newer-successor",
-    });
+    const { value, log, release } = await gatedLspHooks("newer-successor");
     const toolContext = context({ sessionID: "newer-successor" });
     const firstSnapshot = await issueSnapshot(value, toolContext, "newer-successor.ts");
     const diagnosticOffset = await fakeEventOffset(log);
@@ -1485,7 +1445,7 @@ describe("managed LSP plugin integration", () => {
       },
       toolContext,
     );
-    await actAfterFakeEvent(log, "diagnostic", () => Promise.resolve(), diagnosticOffset);
+    await waitForFakeEvent(log, "diagnostic", diagnosticOffset);
 
     const secondSnapshot = await issueSnapshot(value, toolContext, "newer-successor.ts");
     const secondPending = registry(value).hashlineEdit.execute(
@@ -1498,6 +1458,7 @@ describe("managed LSP plugin integration", () => {
       toolContext,
     );
     await waitForFileText(file, "second\n");
+    await writeFile(release, "release\n");
 
     const firstResult = structured(await firstPending);
     const secondResult = structured(await secondPending);
@@ -1522,10 +1483,7 @@ describe("managed LSP plugin integration", () => {
   test("blocks new plugin admissions and drains active work during single-flight disposal", async () => {
     const file = join(root, "active-plugin-dispose.ts");
     await writeFile(file, "before\n");
-    const { value, log } = await lspHooks("timeout", {
-      config: { diagnosticsTimeoutMs: 500 },
-      name: "active-plugin-dispose",
-    });
+    const { value, log, release } = await gatedLspHooks("active-plugin-dispose");
     const toolContext = context({ sessionID: "active-plugin-dispose" });
     const snapshot = await issueSnapshot(value, toolContext, "active-plugin-dispose.ts");
     const diagnosticOffset = await fakeEventOffset(log);
@@ -1537,15 +1495,18 @@ describe("managed LSP plugin integration", () => {
       },
       toolContext,
     );
-    await actAfterFakeEvent(log, "diagnostic", () => Promise.resolve(), diagnosticOffset);
+    await waitForFakeEvent(log, "diagnostic", diagnosticOffset);
 
     const firstDispose = value.dispose?.();
     const secondDispose = value.dispose?.();
     await expect(
       registry(value).hashlineRead.execute({ filePath: "active-plugin-dispose.ts" }, toolContext),
     ).rejects.toThrow("CONFIG_INVALID:");
+    await writeFile(release, "release\n");
     const result = structured(await pending);
-    expect(result.output).toContain("LSP_DIAGNOSTICS_UNAVAILABLE");
+    expect(result.output).toContain(
+      "LSP| active-plugin-dispose.ts:1:1 [typescript] typescript:after\\n",
+    );
     await Promise.all([firstDispose, secondDispose]);
     const protocol = await events(log);
     expect(
