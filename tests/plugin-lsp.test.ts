@@ -264,6 +264,7 @@ async function actAfterFakeEvent(
   log: string,
   event: string,
   action: () => Promise<void>,
+  offset = 0,
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3_000);
@@ -271,7 +272,7 @@ async function actAfterFakeEvent(
   let nextUpdate = iterator.next();
   try {
     while (true) {
-      if ((await events(log)).some((entry) => entry.event === event)) {
+      if ((await events(log)).slice(offset).some((entry) => entry.event === event)) {
         await action();
         return;
       }
@@ -294,6 +295,11 @@ async function actAfterFakeEvent(
       await iterator.return?.();
     } catch {}
   }
+}
+
+async function fakeEventOffset(log: string, event: string): Promise<number> {
+  await actAfterFakeEvent(log, event, () => Promise.resolve());
+  return (await events(log)).length;
 }
 
 async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
@@ -664,9 +670,15 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "drift.ts");
-    const drift = actAfterFakeEvent(log, "diagnostic", async () => {
-      await writeFile(file, "external\n");
-    });
+    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const drift = actAfterFakeEvent(
+      log,
+      "diagnostic",
+      async () => {
+        await writeFile(file, "external\n");
+      },
+      diagnosticOffset,
+    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "drift.ts",
@@ -698,16 +710,23 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "same-byte-drift.ts");
+    const diagnosticOffset = await fakeEventOffset(log, "open");
     let identityObservable = false;
-    const drift = actAfterFakeEvent(log, "diagnostic", async () => {
-      const committedStats = await stat(file);
-      await writeFile(replacement, "published\n");
-      const replacementStats = await stat(replacement);
-      identityObservable =
-        committedStats.dev !== replacementStats.dev || committedStats.ino !== replacementStats.ino;
-      await rm(file);
-      await rename(replacement, file);
-    });
+    const drift = actAfterFakeEvent(
+      log,
+      "diagnostic",
+      async () => {
+        const committedStats = await stat(file);
+        await writeFile(replacement, "published\n");
+        const replacementStats = await stat(replacement);
+        identityObservable =
+          committedStats.dev !== replacementStats.dev ||
+          committedStats.ino !== replacementStats.ino;
+        await rm(file);
+        await rename(replacement, file);
+      },
+      diagnosticOffset,
+    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "same-byte-drift.ts",
@@ -739,17 +758,23 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "nlink-drift.ts");
+    const diagnosticOffset = await fakeEventOffset(log, "open");
     let linkCountObservable = false;
-    const drift = actAfterFakeEvent(log, "diagnostic", async () => {
-      try {
-        await link(file, alias);
-        linkCountObservable = (await stat(file)).nlink > 1;
-      } catch (error) {
-        const code =
-          error && typeof error === "object" && "code" in error ? String(error.code) : "";
-        if (!["EACCES", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM"].includes(code)) throw error;
-      }
-    });
+    const drift = actAfterFakeEvent(
+      log,
+      "diagnostic",
+      async () => {
+        try {
+          await link(file, alias);
+          linkCountObservable = (await stat(file)).nlink > 1;
+        } catch (error) {
+          const code =
+            error && typeof error === "object" && "code" in error ? String(error.code) : "";
+          if (!["EACCES", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM"].includes(code)) throw error;
+        }
+      },
+      diagnosticOffset,
+    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "nlink-drift.ts",
@@ -780,7 +805,13 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "move-drift.ts");
-    const recreate = actAfterFakeEvent(log, "diagnostic", () => writeFile(source, "move\n"));
+    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const recreate = actAfterFakeEvent(
+      log,
+      "diagnostic",
+      () => writeFile(source, "move\n"),
+      diagnosticOffset,
+    );
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "move-drift.ts",
@@ -801,7 +832,9 @@ describe("managed LSP plugin integration", () => {
 
   test("checks newly created files after publication", async () => {
     const metadata: Array<Record<string, unknown>> = [];
-    const { value, log } = await lspHooks("pull-full");
+    const { value, log } = await lspHooks("pull-full", {
+      config: { diagnosticsTimeoutMs: 1_000 },
+    });
     const result = structured(
       await registry(value).hashlineWrite.execute(
         { filePath: "created.ts", content: "created\n" },
@@ -819,7 +852,10 @@ describe("managed LSP plugin integration", () => {
   test("notifies delete and move lifecycle after publication", async () => {
     const deleteFile = join(root, "delete.ts");
     await writeFile(deleteFile, "delete\n");
-    const deletePlugin = await lspHooks("pull-full", { name: "delete-lifecycle" });
+    const deletePlugin = await lspHooks("pull-full", {
+      config: { diagnosticsTimeoutMs: 1_000 },
+      name: "delete-lifecycle",
+    });
     const deleteContext = context({ sessionID: "delete-session" });
     const deleteSnapshot = await issueSnapshot(deletePlugin.value, deleteContext, "delete.ts");
     await actAfterFakeEvent(deletePlugin.log, "open", () => Promise.resolve());
@@ -841,7 +877,10 @@ describe("managed LSP plugin integration", () => {
 
     const moveFile = join(root, "move.ts");
     await writeFile(moveFile, "move\n");
-    const movePlugin = await lspHooks("pull-full", { name: "move-lifecycle" });
+    const movePlugin = await lspHooks("pull-full", {
+      config: { diagnosticsTimeoutMs: 1_000 },
+      name: "move-lifecycle",
+    });
     const moveContext = context({ sessionID: "move-session" });
     const moveSnapshot = await issueSnapshot(movePlugin.value, moveContext, "move.ts");
     await actAfterFakeEvent(movePlugin.log, "open", () => Promise.resolve());
@@ -1213,7 +1252,9 @@ describe("managed LSP plugin integration", () => {
       const log = join(root, "sentinel.jsonl");
       const { value } = await configuredHooks({
         worktree: "/",
-        options: { lspDiagnostics: lspConfig("pull-full", log) },
+        options: {
+          lspDiagnostics: lspConfig("pull-full", log, { diagnosticsTimeoutMs: 1_000 }),
+        },
       });
       await writeFile(join(outside, "outside.ts"), "outside\n");
       const escapePath = join(root, "escape");
@@ -1256,7 +1297,10 @@ describe("managed LSP plugin integration", () => {
     const { value } = await configuredHooks({
       options: {
         maxOutputBytes: 1_024,
-        lspDiagnostics: lspConfig("pull-full", log, { maxDiagnosticsBytes: 1_024 }),
+        lspDiagnostics: lspConfig("pull-full", log, {
+          diagnosticsTimeoutMs: 1_000,
+          maxDiagnosticsBytes: 1_024,
+        }),
       },
       effectiveConfig: { tool_output: { max_bytes: 1_400, max_lines: 2_000 } },
       captureWithHook: true,
@@ -1408,6 +1452,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context({ sessionID: "newer-successor" });
     const firstSnapshot = await issueSnapshot(value, toolContext, "newer-successor.ts");
+    const diagnosticOffset = await fakeEventOffset(log, "open");
     const firstPending = registry(value).hashlineEdit.execute(
       {
         filePath: "newer-successor.ts",
@@ -1417,7 +1462,7 @@ describe("managed LSP plugin integration", () => {
       },
       toolContext,
     );
-    await actAfterFakeEvent(log, "diagnostic", () => Promise.resolve());
+    await actAfterFakeEvent(log, "diagnostic", () => Promise.resolve(), diagnosticOffset);
 
     const secondSnapshot = await issueSnapshot(value, toolContext, "newer-successor.ts");
     const secondPending = registry(value).hashlineEdit.execute(
@@ -1460,6 +1505,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context({ sessionID: "active-plugin-dispose" });
     const snapshot = await issueSnapshot(value, toolContext, "active-plugin-dispose.ts");
+    const diagnosticOffset = await fakeEventOffset(log, "open");
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "active-plugin-dispose.ts",
@@ -1468,7 +1514,7 @@ describe("managed LSP plugin integration", () => {
       },
       toolContext,
     );
-    await actAfterFakeEvent(log, "diagnostic", () => Promise.resolve());
+    await actAfterFakeEvent(log, "diagnostic", () => Promise.resolve(), diagnosticOffset);
 
     const firstDispose = value.dispose?.();
     const secondDispose = value.dispose?.();
