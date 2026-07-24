@@ -49,7 +49,7 @@ function rawEditSchemaFixtureWireSize(): {
   deltaPercent: number;
 } {
   const syntheticBaselineDescription =
-    'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. rebase defaults to none; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.';
+    'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. Omitted rebase uses unique for relocation-capable text batches and none for strict-only operations; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.';
   const currentParameters = z.toJSONSchema(hashlineEditArgumentsSchema);
   const baselineParameters = structuredClone(currentParameters) as JsonSchemaNode;
   const operation = baselineParameters.properties?.operations?.items;
@@ -149,13 +149,17 @@ if (
   summary.get("better-hashline-strict")?.unsafe_accept !== 0 ||
   summary.get("better-hashline-unique")?.unsafe_accept !== 0 ||
   summary.get("better-hashline-unique")?.false_reject !== 0 ||
+  summary.get("better-hashline-default")?.exact_apply !== 11 ||
+  summary.get("better-hashline-default")?.safe_reject !== 18 ||
+  summary.get("better-hashline-default")?.false_reject !== 0 ||
+  summary.get("better-hashline-default")?.unsafe_accept !== 0 ||
   (summary.get("endpoint-hash-8")?.unsafe_accept ?? 0) < 1 ||
   (summary.get("endpoint-hash-16")?.unsafe_accept ?? 0) < 1
 ) {
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 8,
+  schemaVersion: 9,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -175,7 +179,7 @@ const result = {
   },
   methodology: {
     deterministic:
-      "In-memory protocol mechanics only; no model, OpenCode baseline, or semantic-code claim.",
+      "In-memory protocol mechanics only; the omitted adapter passes no rebase property and exercises the incremental branch of the shared runtime policy resolver. Strict-only defaults are covered by runtime tests, not this corpus. No model, OpenCode baseline, or semantic-code claim.",
     staticSize: "Exact UTF-8 bytes for one generated 1,000-line fixture; not token estimates.",
     renderingWireSize:
       "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",

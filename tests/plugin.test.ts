@@ -187,6 +187,8 @@ describe("OpenCode plugin protocol", () => {
     expect(editResult.output).toBe(
       "Applied 1 operation.\n@hashline-edit previous=consumed successor=none next=hashline_read",
     );
+    expect(editResult.metadata.rebased).toBe(false);
+    expect(editResult.output).not.toContain("Exact unique rebase occurred");
     expect(await readFile(file, "utf8")).toBe("one\nTWO\nthree\n");
     expect(asks.at(-1)).toMatchObject({ permission: "edit" });
     expect(String(asks.at(-1)?.metadata?.diff)).toContain("-two");
@@ -493,7 +495,7 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
-  test("supports explicit unique relocation but keeps strict mode as default", async () => {
+  test("defaults incremental edits to unique relocation while explicit none stays strict", async () => {
     const file = join(root, "file.txt");
     await writeFile(file, "one\ntwo\nthree\n");
     const value = await hooks();
@@ -516,21 +518,55 @@ describe("OpenCode plugin protocol", () => {
         },
         toolContext,
       ),
-    ).rejects.toThrow("TARGET_CHANGED:");
+    ).rejects.toThrow(
+      "TARGET_CHANGED: The file changed since hashline_read. No mutation occurred and the snapshot remains retained, but do not retry it unchanged. Run a fresh hashline_read and replan before retrying.",
+    );
 
     const result = structured(
       await hashlineEdit.execute(
         {
           filePath: "file.txt",
           snapshotId,
-          rebase: "unique",
           operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["TWO"] }],
         },
         toolContext,
       ),
     );
     expect(result.metadata.rebased).toBe(true);
+    expect(result.output).toBe(
+      "Applied 1 operation. Exact unique rebase occurred.\n@hashline-edit previous=consumed successor=none next=hashline_read",
+    );
     expect(await readFile(file, "utf8")).toBe("prefix\none\nTWO\nthree\n");
+  });
+
+  test("rejects ambiguous omitted unique relocation without mutation", async () => {
+    const file = join(root, "ambiguous.txt");
+    await writeFile(file, "left\ntarget\nright\n");
+    const asks: AskRecord[] = [];
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context({ asks });
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "ambiguous.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    await writeFile(file, "left\ntarget\ninserted\ntarget\nright\n");
+
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "ambiguous.txt",
+          snapshotId: String(readResult.metadata.snapshotId),
+          operations: [{ op: "replace", startLine: 2, endLine: 2, lines: ["changed"] }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      "AMBIGUOUS_RELOCATION: Lines 2-2 have contradictory unique relocation evidence. No mutation occurred and the snapshot remains retained, but do not retry it unchanged. Run a fresh hashline_read and replan before retrying.",
+    );
+    expect(asks.map(({ permission }) => permission)).toEqual(["read"]);
+    expect(await readFile(file, "utf8")).toBe("left\ntarget\ninserted\ntarget\nright\n");
+    await value.dispose?.();
   });
 
   test("diagnoses EOL-only unique relocation failure before edit permission", async () => {
@@ -557,7 +593,7 @@ describe("OpenCode plugin protocol", () => {
         toolContext,
       ),
     ).rejects.toThrow(
-      "TARGET_CHANGED: Lines 2-2 are no longer unchanged. Exact line delimiters changed; reread the file before retrying.",
+      "TARGET_CHANGED: Lines 2-2 are no longer unchanged. Exact line delimiters changed; reread the file before retrying. No mutation occurred and the snapshot remains retained, but do not retry it unchanged. Run a fresh hashline_read and replan before retrying.",
     );
     expect(asks.map(({ permission }) => permission)).toEqual(["read"]);
     expect(await readFile(file, "utf8")).toBe("one\r\ntwo\r\nthree\r\n");
@@ -1116,7 +1152,17 @@ describe("OpenCode plugin protocol", () => {
       },
       {
         args: { ...common, rebase: "unique", operations: [{ op: "delete_file" }] },
-        message: "delete_file does not support unique rebase.",
+        message:
+          "delete_file does not support unique rebase. No mutation occurred. An otherwise-valid supplied snapshot remains usable; omit rebase or set it to none, then retry.",
+      },
+      {
+        args: {
+          ...common,
+          rebase: "unique",
+          operations: [{ op: "move_file", destinationPath: "other.txt" }],
+        },
+        message:
+          "move_file does not support unique rebase. No mutation occurred. An otherwise-valid supplied snapshot remains usable; omit rebase or set it to none, then retry.",
       },
       {
         args: {
@@ -1339,7 +1385,9 @@ describe("OpenCode plugin protocol", () => {
         },
         toolContext,
       ),
-    ).rejects.toThrow("INVALID_ARGUMENT: replace_file does not support unique rebase.");
+    ).rejects.toThrow(
+      "INVALID_ARGUMENT: replace_file does not support unique rebase. No mutation occurred. An otherwise-valid supplied snapshot remains usable; omit rebase or set it to none, then retry.",
+    );
     await expect(
       hashlineEdit.execute(
         {
@@ -1352,7 +1400,19 @@ describe("OpenCode plugin protocol", () => {
         toolContext,
       ),
     ).rejects.toThrow("INVALID_ARGUMENT: replace_file must be the only operation.");
-    expect(await readFile(file, "utf8")).toBe("old\n");
+    await writeFile(file, "externally changed\n");
+    await expect(
+      hashlineEdit.execute(
+        {
+          ...common,
+          operations: [{ op: "replace_file", lines: ["new"] }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      "TARGET_CHANGED: The file changed since hashline_read. No mutation occurred and the snapshot remains retained, but do not retry it unchanged. Run a fresh hashline_read and replan before retrying.",
+    );
+    expect(await readFile(file, "utf8")).toBe("externally changed\n");
   });
 
   test("publishes the intended flat transfer schema and coordinate guidance", () => {
@@ -1426,9 +1486,18 @@ describe("OpenCode plugin protocol", () => {
       "lines:[] defaults to false",
     );
     expect(schema.properties?.rebase?.description).toContain(
-      "replace_file, delete_file, and move_file forbid unique",
+      "valid incremental batches (replace, insert, copy_range, move_range) use unique",
+    );
+    expect(schema.properties?.rebase?.description).toContain(
+      "replace_file, delete_file, and move_file use none",
+    );
+    expect(schema.properties?.rebase?.description).toContain(
+      "Explicit none requires full-byte freshness",
     );
     expect(schema.properties?.rebase?.description).toContain("still-retained snapshot");
+    expect(schema.properties?.rebase?.description).toContain(
+      "Exact unique proves textual identity only, not semantic independence or edit-history causality",
+    );
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("Column-0 prefixes");
     expect(schema.properties?.allowHashlinePrefixes?.description).toContain("initial call");
     expect(schema.properties?.readback?.description).toContain("defaults to false unless");
@@ -1464,6 +1533,12 @@ describe("OpenCode plugin protocol", () => {
       "Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.",
     );
     expect(hashlineEditDescription).toContain("copy reads pre-edit source");
+    expect(hashlineEditDescription).toContain(
+      "When rebase is omitted, valid incremental batches use exact unique relocation after byte drift; fresh bytes require no relocation.",
+    );
+    expect(hashlineEditDescription).toContain(
+      'A changed-byte unique success reports "Exact unique rebase occurred." This does not imply coordinate movement.',
+    );
     expect(hashlineEditDescription).toContain("may touch a destructive endpoint");
     expect(hashlineEditDescription).toContain(
       "readback:true or either window field requests one successor page",
@@ -1936,17 +2011,60 @@ describe("OpenCode plugin protocol", () => {
     expect(await readFile(file, "utf8")).toBe("raced\n");
   });
 
-  test("deletes and moves exact files without overwriting", async () => {
+  test("keeps omitted lifecycle operations valid and strict without overwriting", async () => {
     const deletePath = join(root, "delete.txt");
+    const staleDeletePath = join(root, "stale-delete.txt");
+    const staleMovePath = join(root, "stale-move.txt");
     const movePath = join(root, "move.txt");
     const occupiedPath = join(root, "occupied.txt");
     await writeFile(deletePath, "delete me\n");
+    await writeFile(staleDeletePath, "delete me\n");
+    await writeFile(staleMovePath, "move me\n");
     await writeFile(movePath, "move me\n");
     await writeFile(occupiedPath, "keep me\n");
     const asks: AskRecord[] = [];
     const value = await hooks();
     const { hashlineRead, hashlineEdit } = registry(value);
     const toolContext = context({ asks });
+
+    const staleDeleteRead = structured(
+      await hashlineRead.execute({ filePath: "stale-delete.txt" }, toolContext),
+    );
+    await activateRead(value, staleDeleteRead);
+    await writeFile(staleDeletePath, "externally changed\n");
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "stale-delete.txt",
+          snapshotId: String(staleDeleteRead.metadata.snapshotId),
+          operations: [{ op: "delete_file" }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      "TARGET_CHANGED: The file no longer matches the exact issued snapshot bytes. This call published nothing; the stale snapshot remains retained but cannot be reused for this strict operation. Run a fresh hashline_read and replan before retrying.",
+    );
+    expect(await readFile(staleDeletePath, "utf8")).toBe("externally changed\n");
+
+    const staleMoveRead = structured(
+      await hashlineRead.execute({ filePath: "stale-move.txt" }, toolContext),
+    );
+    await activateRead(value, staleMoveRead);
+    await writeFile(staleMovePath, "externally changed\n");
+    await expect(
+      hashlineEdit.execute(
+        {
+          filePath: "stale-move.txt",
+          snapshotId: String(staleMoveRead.metadata.snapshotId),
+          operations: [{ op: "move_file", destinationPath: "stale-moved.txt" }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      "TARGET_CHANGED: The file no longer matches the exact issued snapshot bytes. This call published nothing; the stale snapshot remains retained but cannot be reused for this strict operation. Run a fresh hashline_read and replan before retrying.",
+    );
+    expect(await readFile(staleMovePath, "utf8")).toBe("externally changed\n");
+    await expect(readFile(join(root, "stale-moved.txt"))).rejects.toThrow();
 
     const deleteRead = structured(
       await hashlineRead.execute({ filePath: "delete.txt" }, toolContext),

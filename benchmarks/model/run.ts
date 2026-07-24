@@ -927,6 +927,7 @@ export default async () => ({
     const evaluation = await evaluateExactTree(fixture, input.task);
     const initialTrace = inspectJsonlTrace(traceWithinLimit ? stdout : "", {
       allowedPathRoot: fixture,
+      rebaseOmissionPolicy: "operation-aware-v1",
     });
     const sessionId = initialTrace.sessionIds.length === 1 ? initialTrace.sessionIds[0] : undefined;
     const nativeAliasExport =
@@ -949,6 +950,7 @@ export default async () => ({
             allowedPathRoot: fixture,
             expectedDirectory: fixture,
             expectedWorktree,
+            rebaseOmissionPolicy: "operation-aware-v1",
             requireNativeAliasMarker:
               Boolean(input.task.fileOperations?.length) ||
               !Object.keys(input.task.expectedFiles).some((path) => !(path in input.task.files)),

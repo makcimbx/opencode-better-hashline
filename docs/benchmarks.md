@@ -14,7 +14,7 @@ Better Hashline separates mechanical protocol evidence from model-quality eviden
 
 ## Retained Deterministic Run
 
-Latest retained raw result: [`benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json)
+Latest retained raw result: [`benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json`](../benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json)
 
 The 15-scenario and 21-scenario results remain available as immutable historical evidence in
 [`2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json) and
@@ -28,8 +28,10 @@ The schema-v5 evidence is frozen. It predates `delete_file`, `move_file`, `file-
 [`2026-07-22-file-lifecycle-windows-x64.json`](../benchmarks/results/2026-07-22-file-lifecycle-windows-x64.json)
 schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtures. The retained
 schema-v7 record adds the composed-move case and edit/write/readback/parent-create wire fixtures.
-The schema-v8 record keeps those safety cases and measures the simpler inferred defaults. All are
-mechanical fixture evidence, not paid model-quality evidence.
+The schema-v8 record keeps those safety cases and measures the simpler inferred defaults. The
+schema-v9 record adds an omitted/default adapter using the incremental branch of the shared runtime
+policy resolver. Strict-only defaults are covered by runtime tests rather than this corpus.
+All are mechanical textual fixture evidence, not semantic, paid, or model-quality evidence.
 
 Environment: Windows x64, Bun 1.3.14, AMD64 Family 25 Model 97. Five microbenchmark warmups; 100 measured runs below 10,000 lines and 30 runs at or above it.
 
@@ -72,7 +74,7 @@ scope. This output makes no paid or model-quality claim.
 
 ## Schema-v8 Retained Result
 
-The current runner emits schema v8. It retains the schema-v7 29-case corpus and therefore the same
+The schema-v8 runner retained the schema-v7 29-case corpus and therefore the same
 classifications: strict `6/18/5/0`, unique `11/18/0/0`, exact search `10/13/1/5`, line numbers
 `7/1/0/21`, endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
 (`exact_apply/safe_reject/false_reject/unsafe_accept`). The new record changes wire fixtures only:
@@ -83,6 +85,21 @@ These values are retained in
 [`2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json).
 The prior schema records and closed pilot-v7 scope remain immutable. This output makes no paid or
 model-quality claim.
+
+## Schema-v9 Retained Result
+
+The current runner emits schema v9. It retains the same 29-case corpus and explicit adapter outcomes,
+then adds `better-hashline-default`, which omits `rebase` and resolves the effective mode through the
+incremental branch of the same pure policy function used by the plugin. Its classifications are strict `6/18/5/0`, explicit
+unique `11/18/0/0`, omitted/default `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`,
+endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
+(`exact_apply/safe_reject/false_reject/unsafe_accept`).
+
+These values are retained in
+[`2026-07-23-operation-aware-rebase-default-windows-x64.json`](../benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json).
+The omitted arm establishes equivalence with explicit unique for this textual corpus only. It does
+not prove semantic independence, model quality, hook behavior, permission behavior, or filesystem
+publication safety. Historical records and the closed pilot-v7 scope remain immutable.
 
 ## Static Size
 
@@ -180,7 +197,7 @@ move-corridor, and timing methodology are unchanged from the earlier retained ev
 
 ## Schema-v8 Retained Wire Size
 
-The retained schema-v8 result records exact compact UTF-8 fixture sizes for the current defaults:
+The retained schema-v8 result records exact compact UTF-8 fixture sizes for its then-current defaults:
 
 | Fixture | Legacy explicit bytes | Simplified/current bytes | Change |
 | --- | ---: | ---: | ---: |
@@ -197,6 +214,19 @@ The same run records compact lifecycle calls without redundant `rebase:"none"`: 
 versus 79 for native `apply_patch`; move is 138 versus 108. These byte deltas are not token, safety,
 or model-quality claims.
 
+## Schema-v9 Retained Wire Size
+
+The retained schema-v9 result records the operation-aware wording in the current edit fixture:
+
+| Fixture | Synthetic baseline bytes | Current bytes | Change |
+| --- | ---: | ---: | ---: |
+| `hashline_edit` raw-schema fixture | 5,035 | 6,637 | +1,602 (+31.82%) |
+
+The same run retains the schema-v8 write and compact inferred-call fixtures: write schema
+`849 -> 531`, readback `202 -> 186`, empty-file newline `138 -> 117`, and parent creation `81 -> 60`.
+The raw edit fixture is generated schema plus description text, not a provider projection or token
+estimate. Exact normalized provider-contract sizes and hashes are recorded in the protocol migration.
+
 ## Core Timings
 
 The raw result contains median and p95 timings for SHA-256, strict UTF-8 decoding, and one-line edit planning from 10 through 20,000 lines. These are non-gating wall-clock measurements from one named machine. They do not establish cross-platform performance and should be rerun after material protocol changes.
@@ -210,14 +240,14 @@ bun run bench
 bun run bench --output=benchmarks/results/local/my-run.json
 ```
 
-The schema-v8 runner prints summary tables and optionally writes the complete corpus,
+The schema-v9 runner prints summary tables and optionally writes the complete corpus,
 classifications, environment, static/rendering sizes, edit/write raw-schema fixtures,
 lifecycle and simplified-default call fixtures, transfer-call evidence, corridor-read evidence,
 and microbenchmark distributions.
 
 Result paths are write-once by default. Use `--force` only when deliberately regenerating an
-unpublished checked result from its final source revision. Never overwrite retained schema-v5,
-schema-v6, schema-v7, or schema-v8 evidence; use a new dated path for a changed runner or protocol.
+unpublished checked result from its final source revision. Never overwrite retained schema-v5 through
+schema-v9 evidence; use a new dated path for a changed runner or protocol.
 
 ## Model Harness
 

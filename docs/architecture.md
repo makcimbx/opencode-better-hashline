@@ -41,6 +41,12 @@ The snapshot store distinguishes bytes retained by the process from line referen
 stable rejection. It performs no I/O and asks no permission. This makes exhaustive and property
 testing possible without weakening the filesystem path.
 
+Before planning, omitted `rebase` resolves from the validated operation set. Batches limited to
+`replace`, `insert`, `copy_range`, and `move_range` select exact, ambiguity-rejecting `unique`;
+sole `replace_file`, `delete_file`, and `move_file` select strict `none`. Explicit `none` requires
+full-byte freshness, while explicit `unique` retains the same incremental-only constraints as
+omission. This is selection, not fallback: a failed strict check never activates relocation.
+
 `replace` removes the exact one-based inclusive `startLine..endLine` range, and its `lines` payload is the complete replacement; outside neighbors remain. Every operation in a batch uses coordinates from the immutable original snapshot, not an intermediate result or a line created by another operation. For sole `replace_file`, omitted `finalNewline` preserves snapshot state for non-empty `lines`, while empty `lines` infer `false`; explicit `true` with an empty payload rejects.
 
 Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy
@@ -113,8 +119,9 @@ so this surface does not replace the unique-ID recommendation.
 
 Persisted v1 and v2 history remains subject to bounded exact validation in offline verifier,
 model-trace, and evidence paths. The live executor does not fetch that history to admit edits. The
-marker string remains v2 across the current schema expansion, but canonical schema SHA-256 and the
-protocol fingerprint are exact identity. An identity change invalidates the process-local epoch;
+marker string remains v2 across provider-contract changes, but package version, canonical schema
+SHA-256, and protocol fingerprint are exact identity. An identity change invalidates the process-local
+epoch;
 restart the plugin as required and use a fresh delivered `hashline_read` to rebind in the same
 session. Old snapshot IDs remain unusable.
 
@@ -193,7 +200,7 @@ The test suite has separate layers:
 - plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including inferred readback windows/issuance, deterministic conflict pairs, lifecycle and strict automatic parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
 - packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/fresh-read restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
-- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current deterministic runner is retained as immutable schema-v8 model-free evidence; schema-v5, schema-v6, schema-v7, and pilot-v7 evidence remain immutable.
+- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The schema-v9 model-free result measures explicit strict, explicit unique, and the incremental branch of the operation-aware omitted adapter; strict-only defaults remain runtime-test evidence. It is textual protocol evidence, not semantic or model-quality evidence. The historical schema-v5 through schema-v8 results and pilot-v7 evidence remain immutable.
 
 Timing benchmarks never gate shared CI. Safety regressions do.
 

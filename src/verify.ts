@@ -2278,6 +2278,7 @@ async function verifyScenario(
           allowedPathRoot: canonicalWorkspace,
           expectedDirectory: workspace,
           expectedWorktree,
+          rebaseOmissionPolicy: "operation-aware-v1",
         },
       );
       invariant(

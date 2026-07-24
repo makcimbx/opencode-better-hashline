@@ -9,9 +9,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added immutable schema-v9 model-free evidence for the incremental omitted-rebase adapter and updated edit-schema wire fixture; strict-only defaults remain covered by runtime tests rather than that corpus.
+
 ### Changed
 
+- Made omitted `rebase` operation-aware: incremental `replace`/`insert`/`copy_range`/`move_range` batches select exact ambiguity-rejecting `unique`, while `replace_file` and lifecycle operations remain strict `none`; explicit `none` retains full-byte freshness, and a successful changed-byte unique rebase is reported in the result.
+
 ### Fixed
+
+- Added phase-correct recovery guidance to stale/ambiguous planning, strict-only rebase misuse, stable-read races, and oversized native-alias metadata failures.
 
 ## [0.7.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.6.1...v0.7.0) (2026-07-23)
 

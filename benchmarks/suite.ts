@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { type EditOperation, planEdits } from "../src/edits.js";
+import {
+  type EditOperation,
+  planEdits,
+  type RebaseMode,
+  resolveTextRebaseMode,
+} from "../src/edits.js";
 import { renderSnapshotPage } from "../src/render.js";
 import { SnapshotStore, sha256 } from "../src/snapshots.js";
 import { decodeTextDocument, type TextDocument } from "../src/text.js";
@@ -48,12 +53,12 @@ function attempt(operation: () => string): AdapterOutcome {
   }
 }
 
-function planScenario(scenario: Scenario, rebase: "none" | "unique"): string {
+function planScenario(scenario: Scenario, rebase?: RebaseMode): string {
   return planEdits({
     base: document(scenario.base),
     current: document(scenario.current),
     operations: scenario.operations,
-    rebase,
+    rebase: resolveTextRebaseMode(scenario.operations, rebase),
     maxContextLines: 4,
   }).text;
 }
@@ -470,6 +475,11 @@ export function adapters(): Adapter[] {
       id: "better-hashline-unique",
       description: "Exact snapshot plus explicit conservative unique relocation.",
       run: (scenario) => attempt(() => planScenario(scenario, "unique")),
+    },
+    {
+      id: "better-hashline-default",
+      description: "Omitted incremental rebase uses the shared runtime policy resolver.",
+      run: (scenario) => attempt(() => planScenario(scenario)),
     },
     {
       id: "exact-search-replace",

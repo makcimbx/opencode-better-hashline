@@ -4,7 +4,8 @@
 
 Better Hashline is designed to prevent these failures during cooperative agent editing:
 
-- applying an edit, delete, or move to bytes different from the approved strict snapshot;
+- applying an explicit or operation-selected strict edit, delete, or move to bytes different from the approved snapshot;
+- relocating an incremental operation without exact textual identity, agreement across successful bounded contexts, and ambiguity rejection;
 - selecting a wrong duplicate target through fuzzy or nearest matching;
 - accepting only range endpoints while an interior line changed;
 - composing overlapping or same-boundary text operations except one explicitly bounded move with pairwise-disjoint replacements wholly inside its intervening corridor and outside its source;
@@ -33,7 +34,7 @@ Better Hashline is designed to prevent these failures during cooperative agent e
 - The configured OpenCode permission policy and human approval UI.
 - Other code loaded into the same OpenCode process.
 
-The model is not trusted to copy annotations correctly, choose unique targets, detect staleness, or honor prose instructions by itself. Those checks are enforced in code.
+The model is not trusted to copy annotations correctly, establish unique textual identity, detect staleness, or honor prose instructions by itself. Those checks are enforced in code.
 
 ## Adversaries Outside Scope
 
@@ -91,10 +92,11 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 
 | Property | Scope |
 | --- | --- |
-| Snapshot freshness | Exact byte equality in strict mode |
+| Mode resolution | Omitted incremental batches select exact `unique`; omitted `replace_file` and lifecycle operations select strict `none`; explicit `none` remains available for full-byte freshness |
+| Snapshot freshness | Exact byte equality in `none`; exact selected text, boundaries, context, and topology in `unique` |
 | Issued authority | Required text ranges/boundaries, or complete lifecycle BOF-to-EOF source coverage; readback issues only one delivered page and never an ID alone |
 | Target identity | Canonical path plus stable metadata; lifecycle also requires direct terminal and parent binding |
-| Relocation | Exact selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges |
+| Relocation | Exact textual selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges; no semantic or history-causality claim |
 | Text-batch validation | One immutable pre-batch file, declared read/write effects checked before mutation, stable conflict codes with deterministic zero-based pair evidence |
 | Permission binding | Exact planned patch and complete source/destination or parent-chain path set before approval |
 | New file safety | Strict `filePath`/`content` schema, one fixed zero-to-64-parent plan, staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
@@ -114,7 +116,8 @@ One move may include pairwise-disjoint replacements wholly inside the intervenin
 outside its source; all replacement inputs still come from immutable pre-batch bytes, and the whole
 corridor remains freshness and issuance authority. All other destructive intersections reject.
 Exact-unique relocation maps every source, corridor, and destination anchor through one cumulative
-budget, then rejects changed topology. Copy amplification is projected against configured output
+budget, then rejects changed topology. It proves textual identity and mapping only, not semantic
+independence or edit-history causality. Copy amplification is projected against configured output
 limits before materializing the final document. Projection composes CRLF across segment boundaries,
 and move rendering is reparsed against its expected logical texts and EOL slots. This prevents
 empty-text moves from merging a lone CR with a relocated LF or changing the no-phantom EOF model.

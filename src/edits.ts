@@ -1,4 +1,4 @@
-import { fail } from "./errors.js";
+import { fail, HashlineError } from "./errors.js";
 import { createUniqueMapper } from "./rebase.js";
 import {
   assertLogicalLines,
@@ -49,6 +49,16 @@ export type EditOperation =
   | ReplaceFileOperation
   | TransferOperation;
 export type RebaseMode = "none" | "unique";
+
+export function resolveTextRebaseMode(
+  operations: readonly { op: EditOperation["op"] }[],
+  requested?: RebaseMode,
+): RebaseMode {
+  if (requested !== undefined) return requested;
+  return operations.length > 0 && operations.every((operation) => operation.op !== "replace_file")
+    ? "unique"
+    : "none";
+}
 
 type OperationKind = Exclude<EditOperation["op"], "replace_file">;
 
@@ -1560,7 +1570,7 @@ function planTransferOperations(input: {
   };
 }
 
-export function planEdits(input: {
+type PlanEditsInput = {
   base: TextDocument;
   current: TextDocument;
   operations: readonly EditOperation[];
@@ -1568,7 +1578,9 @@ export function planEdits(input: {
   maxContextLines: number;
   maxFileBytes?: number;
   maxLines?: number;
-}): EditPlan {
+};
+
+function planEditsInternal(input: PlanEditsInput): EditPlan {
   const {
     base,
     current,
@@ -1581,11 +1593,14 @@ export function planEdits(input: {
   validateEditOperations(base, operations);
   const wholeFile = operations.find((operation) => operation.op === "replace_file");
   if (wholeFile && rebase !== "none") {
-    fail("INVALID_ARGUMENT", "replace_file does not support unique rebase.");
+    fail(
+      "INVALID_ARGUMENT",
+      "replace_file does not support unique rebase. No mutation occurred. An otherwise-valid supplied snapshot remains usable; omit rebase or set it to none, then retry.",
+    );
   }
   const unchanged = bytesEqual(base.bytes, current.bytes);
   if (!unchanged && rebase === "none") {
-    fail("TARGET_CHANGED", "The file changed since hashline_read. Reread before editing.");
+    fail("TARGET_CHANGED", "The file changed since hashline_read.");
   }
   if (!unchanged && base.bom !== current.bom) {
     fail("TARGET_CHANGED", "The file byte-order mark changed since hashline_read.");
@@ -1622,4 +1637,44 @@ export function planEdits(input: {
     maxFileBytes,
     maxLines,
   });
+}
+
+const FRESH_REPLAN_RECOVERY =
+  "No mutation occurred and the snapshot remains retained, but do not retry it unchanged. Run a fresh hashline_read and replan before retrying.";
+
+export function planEdits(input: PlanEditsInput): EditPlan {
+  try {
+    return planEditsInternal(input);
+  } catch (error) {
+    if (
+      error instanceof HashlineError &&
+      (error.code === "TARGET_CHANGED" ||
+        error.code === "BOUNDARY_CHANGED" ||
+        error.code === "AMBIGUOUS_RELOCATION")
+    ) {
+      const prefix = `${error.code}: `;
+      const detail = error.message.startsWith(prefix)
+        ? error.message.slice(prefix.length)
+        : error.message;
+      if (detail.endsWith(FRESH_REPLAN_RECOVERY)) throw error;
+      throw new HashlineError(error.code, `${detail} ${FRESH_REPLAN_RECOVERY}`);
+    }
+    if (
+      error instanceof HashlineError &&
+      (error.code === "OPERATIONS_OVERLAP" || error.code === "INSERTION_BOUNDARY_CONFLICT")
+    ) {
+      const prefix = `${error.code}: `;
+      const detail = error.message.startsWith(prefix)
+        ? error.message.slice(prefix.length)
+        : error.message;
+      if (!bytesEqual(input.base.bytes, input.current.bytes)) {
+        throw new HashlineError(error.code, `${detail} ${FRESH_REPLAN_RECOVERY}`);
+      }
+      throw new HashlineError(
+        error.code,
+        `${detail} No mutation occurred and the snapshot remains retained. Correct the conflicting operation coordinates, then retry with that snapshot.`,
+      );
+    }
+    throw error;
+  }
 }

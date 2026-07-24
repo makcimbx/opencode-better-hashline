@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type EditOperation, planEdits } from "../src/edits.js";
+import { type EditOperation, planEdits, resolveTextRebaseMode } from "../src/edits.js";
 import { HashlineError } from "../src/errors.js";
 import { decodeTextDocument } from "../src/text.js";
 
@@ -35,6 +35,18 @@ function failureMessage(action: () => unknown): string {
 }
 
 describe("line edit planning", () => {
+  test("resolves operation-aware omitted rebase before planning", () => {
+    const replace: EditOperation[] = [
+      { op: "replace", startLine: 1, endLine: 1, lines: ["changed"] },
+    ];
+    const replaceFile: EditOperation[] = [{ op: "replace_file", lines: ["changed"] }];
+
+    expect(resolveTextRebaseMode(replace)).toBe("unique");
+    expect(resolveTextRebaseMode(replaceFile)).toBe("none");
+    expect(resolveTextRebaseMode(replace, "none")).toBe("none");
+    expect(resolveTextRebaseMode(replaceFile, "unique")).toBe("unique");
+  });
+
   test("composes non-overlapping replacements and insertions", () => {
     const result = plan("one\r\ntwo\r\nthree", "one\r\ntwo\r\nthree", [
       { op: "replace", startLine: 2, endLine: 2, lines: ["TWO", "2b"] },
@@ -170,7 +182,20 @@ describe("line edit planning", () => {
     expect(
       failureMessage(() => plan("A\nB\nmiddle\nB\nC\n", "A\nB\nC\n", operations, "unique")),
     ).toBe(
-      "OPERATIONS_OVERLAP: Edit operations overlap after relocation. Conflict: operations[0] (replace) and operations[1] (replace).",
+      "OPERATIONS_OVERLAP: Edit operations overlap after relocation. Conflict: operations[0] (replace) and operations[1] (replace). No mutation occurred and the snapshot remains retained, but do not retry it unchanged. Run a fresh hashline_read and replan before retrying.",
+    );
+  });
+
+  test("requires fresh planning when a unique insertion boundary changed", () => {
+    expect(() =>
+      plan(
+        "left\nright\n",
+        "left\nmiddle\nright\n",
+        [{ op: "insert", afterLine: 1, lines: ["new"] }],
+        "unique",
+      ),
+    ).toThrow(
+      "BOUNDARY_CHANGED: The insertion boundary is no longer adjacent. No mutation occurred and the snapshot remains retained, but do not retry it unchanged. Run a fresh hashline_read and replan before retrying.",
     );
   });
 
@@ -187,7 +212,7 @@ describe("line edit planning", () => {
         ]),
       ),
     ).toBe(
-      "OPERATIONS_OVERLAP: Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (replace).",
+      "OPERATIONS_OVERLAP: Replacement ranges overlap in the snapshot. Merge them into one replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (replace). No mutation occurred and the snapshot remains retained. Correct the conflicting operation coordinates, then retry with that snapshot.",
     );
     expect(
       failureMessage(() =>
@@ -197,7 +222,7 @@ describe("line edit planning", () => {
         ]),
       ),
     ).toBe(
-      "INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order. Conflict: operations[0] (insert) and operations[1] (insert).",
+      "INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order. Conflict: operations[0] (insert) and operations[1] (insert). No mutation occurred and the snapshot remains retained. Correct the conflicting operation coordinates, then retry with that snapshot.",
     );
     expect(
       failureMessage(() =>
@@ -207,7 +232,7 @@ describe("line edit planning", () => {
         ]),
       ),
     ).toBe(
-      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (insert).",
+      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (insert). No mutation occurred and the snapshot remains retained. Correct the conflicting operation coordinates, then retry with that snapshot.",
     );
     expect(
       failureMessage(() =>
@@ -217,7 +242,7 @@ describe("line edit planning", () => {
         ]),
       ),
     ).toBe(
-      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits. Conflict: operations[0] (insert) and operations[1] (replace).",
+      "OPERATIONS_OVERLAP: An insertion is inside a replacement range. Fold it into the replacement, or split the edits. Conflict: operations[0] (insert) and operations[1] (replace). No mutation occurred and the snapshot remains retained. Correct the conflicting operation coordinates, then retry with that snapshot.",
     );
     expect(() => plan("a\n", "a\n", [{ op: "insert", afterLine: 1, lines: [] }])).toThrow(
       "INVALID_ARGUMENT:",
@@ -289,7 +314,7 @@ describe("line edit planning", () => {
       ]),
     ).toThrow("INVALID_ARGUMENT: replace_file must be the only operation.");
     expect(() => plan("a\n", "a\n", [{ op: "replace_file", lines: ["x"] }], "unique")).toThrow(
-      "INVALID_ARGUMENT: replace_file does not support unique rebase.",
+      "INVALID_ARGUMENT: replace_file does not support unique rebase. No mutation occurred. An otherwise-valid supplied snapshot remains usable; omit rebase or set it to none, then retry.",
     );
     expect(plan("a\n", "a\n", [{ op: "replace_file", lines: [] }]).text).toBe("");
     expect(() =>

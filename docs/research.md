@@ -101,7 +101,9 @@ These results do not establish a universal winner. Harness quality, model snapsh
 - Random opaque snapshot ID plus exact retained bytes and SHA-256.
 - Native line numbers without production per-line hashes.
 - Entire issued range and insertion-boundary provenance.
-- Strict default; exact unique recovery is explicit.
+- Operation-aware omission: exact ambiguity-rejecting `unique` for incremental batches, strict `none` for sole `replace_file` and lifecycle operations.
+- Explicit `none` preserves full-byte freshness for callers requiring compare-before-plan CAS behavior; publication is not kernel CAS.
+- Unique relocation proves textual identity only, not semantic independence or edit-history causality.
 - No fuzzy matching, normalization, source repair, or successful partial blocks.
 - Standard OpenCode permissions with the exact planned diff.
 - Canonical-path lock, post-permission reread, same-directory temp, and post-write verification.

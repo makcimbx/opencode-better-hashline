@@ -2,12 +2,13 @@
 
 Status: design only. No model result is implied by this document.
 
-Retained evidence note: the deterministic runner emits schema v8. Its latest immutable model-free
-record retains the 29-case corpus and adds wire fixtures for inferred readback, empty-file newline,
-and parent-creation defaults:
+Frozen evidence note: when this plan was frozen, the deterministic runner emitted schema v8. That
+immutable model-free record retained the 29-case corpus and added wire fixtures for inferred
+readback, empty-file newline, and parent-creation defaults:
 [`2026-07-23-default-simplification-r2-windows-x64.json`](../benchmarks/results/2026-07-23-default-simplification-r2-windows-x64.json).
-The schema-v5, schema-v6, schema-v7, and closed pilot-v7 records remain immutable. Neither the
-retained schema-v8 result nor this frozen plan supports a paid or model-quality claim.
+The current schema-v9 deterministic record is documented separately and does not revise this frozen
+plan. The schema-v5 through schema-v9 and closed pilot-v7 records remain immutable. Neither those
+model-free results nor this plan supports a paid or model-quality claim.
 
 | Field | Value |
 | --- | --- |

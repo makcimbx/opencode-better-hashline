@@ -11,8 +11,9 @@ Retained JSON files are immutable, reviewable benchmark records. Superseded inte
 | `2026-07-22-file-lifecycle-windows-x64.json` | Schema-v6 model-free corpus with lifecycle raw-schema and compact delete/move call-wire fixtures on Bun 1.3.14 |
 | `2026-07-22-edit-protocol-ux-windows-x64.json` | Schema-v7 model-free corpus with composed-move acceptance, edit/write raw-schema sizes, and readback/parent-create call-wire fixtures on Bun 1.3.14 |
 | `2026-07-23-default-simplification-r2-windows-x64.json` | Schema-v8 model-free corpus with unchanged safety classifications and wire evidence for inferred readback, empty-file newline, and parent-creation defaults on Bun 1.3.14 |
+| `2026-07-23-operation-aware-rebase-default-windows-x64.json` | Schema-v9 model-free corpus adding the omitted incremental-rebase adapter and updated edit-schema wire evidence on Bun 1.3.14; strict-only defaults are covered by runtime tests |
 
-The schema-v8 record is mechanical protocol evidence, not paid or model-quality evidence. The
-schema-v5, schema-v6, schema-v7, and pilot-v7 records above remain immutable.
+The schema-v9 record is mechanical textual protocol evidence, not semantic, paid, or model-quality
+evidence. The schema-v5, schema-v6, schema-v7, schema-v8, and pilot-v7 records above remain immutable.
 
 See [docs/benchmarks.md](../../docs/benchmarks.md) for interpretation and claim limits.

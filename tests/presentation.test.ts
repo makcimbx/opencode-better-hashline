@@ -51,17 +51,17 @@ describe("native alias presentation contracts", () => {
       providerSchemaSha256: schemaSha256,
       protocolFingerprint: nativeAliasProtocolFingerprint(commonInput),
     }).toEqual({
-      hashlineBytes: 6_041,
-      hashlineSerializedSha256: "d88fa0b43b27662a6cd00b15e259b27fd0285b046a10f800b3b44e5ca042e0a9",
-      hashlineCanonicalSha256: "67c6c7cc2ffc8cb60fa35aa8083ea2885a258845b3df94efbdf677721a3e1298",
-      nativeAliasBytes: 6_297,
+      hashlineBytes: 6_551,
+      hashlineSerializedSha256: "dcde4192f763a53e5a2cf4306426693a3546fe8dfb7cfed1066929a4ec38946f",
+      hashlineCanonicalSha256: "67a86166c1434e27003e1e631a2046e95b68dece8eb83ddb7594e22d9e3275c3",
+      nativeAliasBytes: 7_117,
       nativeAliasSerializedSha256:
-        "96bd65e8295d462a6f44ba97ab7d0aef2a670a552ec68aca64eab918a4e000e3",
+        "ac7da33ee1c3ab3f02416a61e5ab0428a1eeacdea50cb08bf2a18a72dba6910a",
       nativeAliasCanonicalSha256:
-        "fd9e41d4424fa454073a89f330f5edc51af930b96798f89a06fcd6262af1a44e",
-      rawSchemaSha256: "4f9a2ae9f4fb4aa17efc6be7078e34101fad043db5e091c735d8426192ee0438",
-      providerSchemaSha256: "cc27fd62d927605cec08729f858bdc8fc3bb5bc0c7a637b5e8d49843b0cc8279",
-      protocolFingerprint: "705a7542e0a2ca4abc4a9d7c53d3600f19f2659e1ad0e6fa22b99a594187214e",
+        "20a3e47cbaa85361bbeddb0515531559ca9415f04fed20f167e9f44d8399951a",
+      rawSchemaSha256: "62ce47b2adb4142f5054862f55e06762c4aab5216b8dd814c22cd25376b2933a",
+      providerSchemaSha256: "811bc44209d78451d4f2ecc09422a4dcfec43cdad2f38eb607c19bfbbacb7a4a",
+      protocolFingerprint: "4e0e12443c791def69c1c69bdb35e35499c98b3e0c317a179580a0513e43dbad",
     });
   });
 

@@ -79,7 +79,7 @@ failures, retries, partial publications, and unintended changes rather than succ
 averages. Never rewrite retained evidence to cover a new schema, operation, task set, or adapter; add
 a new identity and result. Dry runs and model-free verifier evidence are not paid model evidence.
 Development runner output is not retained evidence until it is written once at a new final result
-path. Preserve the schema-v5, schema-v6, schema-v7, and schema-v8 results plus pilot-v7 scope
+path. Preserve the schema-v5, schema-v6, schema-v7, schema-v8, and schema-v9 results plus pilot-v7 scope
 unchanged; future runner or protocol revisions require a new result identity.
 
 ## Commits
