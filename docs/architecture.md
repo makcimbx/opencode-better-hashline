@@ -19,8 +19,8 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/exact-tree.ts` | Race-resistant physical tree, file-identity, reparse, and stream evaluation |
 | `src/rebase.ts` | Exact unique range/boundary relocation, bounded comparison work, and diagnostic-only EOL-change detection |
 | `src/edits.ts` | Text-operation validation, deterministic conflict-pair evidence, transfer composition, bounded projection, and final bytes |
-| `src/filesystem.ts` | Canonicalization, authorization, deterministic locks, stable reads, fixed parent plans, and text/lifecycle publication |
-| `src/plugin.ts` | Flat tool schemas, hooks, native-mutator enforcement, readback delivery, and fixed-plan filesystem orchestration |
+| `src/filesystem.ts` | Canonicalization, authorization, deterministic locks, stable observations, reserved parent plans, and text/lifecycle publication |
+| `src/plugin.ts` | Flat tool schemas, hooks, native-mutator enforcement, readback delivery, and reservation-bound filesystem orchestration |
 | `src/index.ts` | Public library exports and OpenCode `PluginModule` |
 | `src/server.ts` | Modern OpenCode `./server` package entrypoint |
 | `src/verify.ts`, `src/cli.ts` | Credential-free packed OpenCode route, schema, hook, export/import, and renderer verification |
@@ -64,10 +64,11 @@ that its expected logical texts and positional EOL slots remain representable.
 
 Whole-file deletion and movement are intentionally outside `planEdits`. They depend on direct
 directory-entry identity, destination absence, stable parents, filesystem identity, and link-count
-evidence rather than a final text document. The plugin validates the sole operation and complete
-snapshot provenance, then freezes an immutable filesystem plan with the exact operation, canonical
-source/destination paths, stable identities, patch, and renderer metadata. It never converts a
-lifecycle request into a text replacement or replans it after approval.
+evidence rather than a final text document. After admission, the plugin takes the original canonical
+lock envelope and may refresh source or destination identities before permission only when every
+requested and canonical path string is unchanged. It then freezes the exact lifecycle operation,
+stable identities, patch, and renderer metadata. It never converts a lifecycle request into a text
+replacement or replans it after approval.
 
 ### Permissions approve a fixed plan
 
@@ -77,10 +78,13 @@ complete source/destination path set. After approval, current bytes, identities,
 binding, parent identity, and destination absence are checked again. The plugin never asks approval
 for one patch, then silently rebases, substitutes a destination, or publishes another.
 
-Automatic `hashline_write` parent planning follows the same principle. The deepest existing ancestor,
-zero to 64 missing directories, target, lock set, and permission metadata are frozen before approval.
-Every planned directory and the target are authorized and locked, and revalidation never replaces the
-approved chain with a newly observed one. A zero-directory plan delegates directly to file publication.
+Automatic `hashline_write` parent planning pins the deepest existing ancestor for identity checks and
+freezes a complete authorization and lock reservation containing zero to 64 initially missing
+directories plus the target. While holding all original reservation locks and before edit permission,
+it may contract the mutation plan by adopting only an exact, reverified contiguous root-side directory
+prefix that another call created. No path is added or substituted, the original missing-name/target
+lock envelope is retained, and permission metadata names only the remaining directories plus target.
+A zero-directory final plan delegates directly to file publication.
 
 ### Publication is separate from conflict detection
 
@@ -90,9 +94,18 @@ Delete revalidates the direct source entry before unlink. Move creates a no-clob
 link, verifies exact inode/bytes/link count, then unlinks the source. If publication passes the link
 boundary but cannot safely finish, `PARTIAL_PUBLICATION` reports that both names may exist; there is
 no unsafe automatic rollback. Parent creation uses exclusive non-recursive root-to-leaf `mkdir`
-before delegating to existing staged no-clobber file publication. After its first directory exists,
-or a failed `mkdir` leaves the outcome ambiguous, every later failure is `PARTIAL_PUBLICATION` and no
-created state is rolled back.
+before delegating to existing staged no-clobber file publication. After this call creates its first
+remaining directory, or a failed `mkdir` leaves the outcome ambiguous, every later failure is
+`PARTIAL_PUBLICATION` and no created state is rolled back.
+
+Read-only filesystem observations use bounded complete retries with short abort-aware delays before
+a definitive result. Stable observations continue inside the current tool call, while persistent
+drift or pressure retains a phase-correct error. Target publication syscalls remain single-attempt;
+only exact owned-staging cleanup and handle close may retry boundedly.
+
+Every path lock carries a publication generation. `PARTIAL_PUBLICATION` advances the generations for
+its full lock set, so operations that were already queued on any overlapping path stop before running
+their frozen plan. This prevents a sibling call from extending an ambiguous tree or move result.
 These distinctions are explicit in API errors and documentation.
 
 ## OpenCode Integration
@@ -174,13 +187,16 @@ existing canonical ancestor, while move destinations still require an existing c
 Every existing terminal entry, including a symlink, is occupied.
 
 The strict `hashline_write` schema contains only `filePath` and `content`; the obsolete
-`createParents` field is rejected. Every call freezes up to 64 absent directory entries and the target.
-Every planned directory and target are canonicalized, authorized, and locked; missing directories are
-created exclusively from root to leaf and identity-checked before staged no-clobber file publication.
-A zero-missing-directory plan runs no `mkdir` and delegates to the same publication path. The first
-directory observed after an attempted `mkdir`, including an ambiguous reported failure, is the
-no-rollback boundary; a later error can leave the target file and directories present and requires
-inspection and reconciliation before retrying. `move_file` never enters this path.
+`createParents` field is rejected. Every call freezes an authorization and lock reservation for up
+to 64 initially absent directory entries plus the target. Under the original complete lock envelope
+and before edit permission, it may contract only an exact, reverified contiguous root-side prefix
+that appeared while waiting. The remaining directories and target are canonicalized and approved;
+the remaining directories are created exclusively root to leaf and identity-checked before staged
+no-clobber file publication. A zero-remaining-directory plan runs no `mkdir` and delegates to the
+same publication path. The first directory this call creates, or a failed `mkdir` whose outcome is
+ambiguous, is the no-rollback boundary; a later error can leave the target file and directories
+present and requires inspection and reconciliation before retrying. `move_file` never enters this
+path.
 
 Supported existing targets are regular, single-link files within the size and UTF-8 policy limits.
 Hardlinks are rejected because replacing, deleting, or moving one directory entry would violate the
@@ -201,7 +217,7 @@ The test suite has separate layers:
 - pure text, relocation, and edit planner tests;
 - snapshot provenance, predicted cumulative coverage, delivery-only issuance, TTL, pinning, invalidation, and byte-budget tests;
 - renderer truncation, page-local `partial=true`, cumulative `coverage`, and UTF-8 budget tests;
-- real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, fixed parent chains, exclusive directory creation, deterministic path-set locks, no-replace creation and movement, and partial publication;
+- real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, reserved and stabilized parent chains, exclusive directory creation, deterministic path-set locks, no-replace creation and movement, and partial publication;
 - plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including inferred readback windows/issuance, explicit `replace_file` readback, deterministic conflict pairs, lifecycle and strict automatic parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
 - packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/fresh-read restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;

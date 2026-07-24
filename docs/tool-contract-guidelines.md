@@ -62,6 +62,13 @@ states out of the schema when provider-compatible validation can express them.
   or absolute path syntax.
 - Present `hashline_write` as a strict `filePath`/`content` create-only call that automatically
   plans zero to 64 missing parents; never ask callers to opt into parent creation.
+- Recover bounded transient read-only uncertainty inside the tool when a complete retry can still
+  prove the same path, identity, bytes, permission plan, and publication result. Report successful
+  exact stabilization as concise result information, not as an error that forces the model to retry.
+- Never retry a target publication syscall, silently widen authorization, substitute a path, fuzzy
+  match, or continue after provenance is lost. Those cases remain phase-correct failures.
+- Keep recovery budgets small, delayed, abort-aware, and deterministic; exhaustion must retain a
+  stable error code and the next safe action.
 - For text readback, state that either window implies the request, explicit `false` conflicts with a
   window, and lifecycle operations reject `true` and all windows.
 - For `replace_file`, distinguish non-empty newline-state inheritance from empty `lines`, which infer
@@ -72,6 +79,7 @@ states out of the schema when provider-compatible validation can express them.
 | Observed phase | Required guidance |
 | --- | --- |
 | Validation or planning | State that no mutation occurred, identify one bounded field or constraint, and say whether the same snapshot remains usable. |
+| Transient read-only observation | Retry a bounded complete proof inside the same call; if exact state settles, continue and optionally report material reuse without asking the model to repair anything. |
 | Freshness failure before publication | State that this call published nothing; require a fresh read and replanning when coordinates or identity may have changed. |
 | Ambiguous failure after publication started | State what may already exist or have changed; forbid blind retry; require inspection and a fresh read. |
 | `PARTIAL_PUBLICATION` | Name every affected path class, require reconciliation to one intended state, then restart/reread when the native-alias epoch was invalidated. |
@@ -98,10 +106,11 @@ For every model-visible contract change:
    evaluation requires a new versioned task identity and explicit cost approval.
 
 High-value held-out recovery scenarios include existing-file routing, strict two-field creation with
-automatic zero/multi-parent plans and obsolete-field rejection, inferred readback windows and the
-explicit-false conflict, empty-file newline inference, immutable batch coordinates, forbidden-field
+automatic zero/multi-parent plans and verified concurrent-prefix reuse, inferred readback windows and
+the explicit-false conflict, empty-file newline inference, immutable batch coordinates, forbidden-field
 repair, complete-coverage lifecycle recovery, no-clobber move recovery, stale versus unique rebase,
-alias binding, partial move reconciliation, and partial parent creation.
+alias binding, bounded observation exhaustion, queued-operation fencing after partial publication,
+partial move reconciliation, and partial parent creation.
 
 ## Sources
 

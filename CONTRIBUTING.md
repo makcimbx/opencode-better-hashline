@@ -46,10 +46,17 @@ old snapshot IDs.
 
 Automatic parent-creating write tests must additionally cover the strict `filePath`/`content` schema,
 rejection of the obsolete `createParents` field, the zero-missing-directory path, the 64-directory
-bound, a fixed deepest-ancestor plan, authorization and deterministic locks for every directory plus
-the target, exclusive non-recursive root-to-leaf `mkdir`, the existing staged no-clobber file
-publication, no state before the first directory exists or creation becomes ambiguous, retained state
-and `PARTIAL_PUBLICATION` afterward, and no rollback. `move_file` must never create parents.
+bound, deepest-existing-ancestor identity pinning, a fixed full authorization/lock reservation of the
+initially missing directory names plus target, exact pre-approval adoption of only a contiguous
+root-side directory prefix, retention of the original missing-name/target lock envelope, permission
+metadata for only the remaining mutation suffix, exclusive non-recursive root-to-leaf `mkdir`, staged
+no-clobber file publication, no state created by the call before its first directory or an ambiguous
+creation outcome, retained state and `PARTIAL_PUBLICATION` afterward, generation fencing of already
+queued overlapping calls, and no rollback. `move_file` never creates parents.
+
+Filesystem recovery tests must prove bounded delayed and abort-aware retries of complete read-only
+observations, exhaustion behavior, exact staging ownership and descriptor cleanup, and phase-correct
+final proof. Target `rename`, `link`, `unlink`, and `mkdir` publication attempts remain single-shot.
 Read and readback tests must cover requested `limit` and `readbackLimit` values across the public
 `1..100,000` range, the 1,000-line default, and authoritative `maxOutputBytes` pagination (40 KiB
 by default and at most 45 KiB when configured). Every header must report `coverage=partial|complete`,
@@ -76,8 +83,10 @@ Use [`docs/tool-contract-guidelines.md`](docs/tool-contract-guidelines.md) for e
 tool, schema, system-guidance, receipt, or recovery-message change. Apply its rubric across all
 configured surfaces and preserve phase-correct error recovery.
 
-Do not replace fail-closed behavior with fuzzy matching, silent fallback, overwrite, unplanned or
-recursive parent creation, or destructive rollback merely to improve a success-rate benchmark.
+Do not replace fail-closed behavior with fuzzy matching, silent fallback, overwrite, authorization or
+lock expansion, unplanned or recursive parent creation, publication-syscall retries, or destructive
+rollback merely to improve a success-rate benchmark. Conversely, do not expose a model retry when a
+small bounded complete observation can still prove the exact same authorized state and safely continue.
 
 ## Benchmarks
 

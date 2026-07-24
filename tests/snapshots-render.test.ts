@@ -326,6 +326,44 @@ describe("snapshot store", () => {
     expect(() => store.peek(scope, snapshot.id)).toThrow("SNAPSHOT_UNKNOWN:");
   });
 
+  test("keeps an admitted pinned snapshot usable while an operation waits past its TTL", () => {
+    let now = 0;
+    const store = new SnapshotStore(options({ snapshotTtlMs: 1000 }), () => now);
+    const snapshot = store.remember(scope, "/worktree/file.ts", document("a"));
+    const pinned = store.pin(scope, snapshot.id);
+
+    now = 1001;
+    expect(() => store.assertPinned(pinned)).not.toThrow();
+    store.release(pinned);
+    expect(() => store.peek(scope, snapshot.id)).toThrow("SNAPSHOT_EXPIRED:");
+  });
+
+  test("rejects snapshots that are no longer actively pinned and retained", () => {
+    const store = new SnapshotStore(options());
+    const released = store.pin(
+      scope,
+      store.remember(scope, "/worktree/released.ts", document("a")).id,
+    );
+    store.release(released);
+    expect(() => store.assertPinned(released)).toThrow("SNAPSHOT_UNKNOWN:");
+
+    const invalidated = store.pin(
+      scope,
+      store.remember(scope, "/worktree/invalidated.ts", document("b")).id,
+    );
+    store.invalidatePath(scope, invalidated.canonicalPath);
+    expect(() => store.assertPinned(invalidated)).toThrow("SNAPSHOT_UNKNOWN:");
+    store.release(invalidated);
+
+    const cleared = store.pin(
+      scope,
+      store.remember(scope, "/worktree/cleared.ts", document("c")).id,
+    );
+    store.clear();
+    expect(() => store.assertPinned(cleared)).toThrow("SNAPSHOT_UNKNOWN:");
+    store.release(cleared);
+  });
+
   test("invalidates pinned revisions and admits a successor at the per-path limit", () => {
     const store = new SnapshotStore(options({ maxSnapshotsPerPath: 1 }));
     const first = store.remember(scope, "/worktree/file.ts", document("a"));

@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import type { Hooks, ToolContext } from "@opencode-ai/plugin";
 import { z } from "zod";
 import {
@@ -489,11 +498,66 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
+  test("attests edit readback from pending state instead of mutable hook arguments", async () => {
+    const file = join(root, "mutable-hook-args.txt");
+    await writeFile(file, "one\ntwo\n");
+    const value = await hooks();
+    const { hashlineRead, hashlineEdit } = registry(value);
+    const toolContext = context();
+    const readResult = structured(
+      await hashlineRead.execute({ filePath: "mutable-hook-args.txt" }, toolContext),
+    );
+    await activateRead(value, readResult);
+    const args = {
+      filePath: "mutable-hook-args.txt",
+      snapshotId: String(readResult.metadata.snapshotId),
+      readback: true,
+      operations: [{ op: "replace" as const, startLine: 2, endLine: 2, lines: ["TWO"] }],
+    };
+    const editResult = structured(await hashlineEdit.execute(args, toolContext));
+    const successorId = /@hashline snapshot=(s_[A-Za-z0-9_-]{22})/u.exec(editResult.output)?.[1];
+    expect(successorId).toBeDefined();
+
+    await value["tool.execute.after"]?.(
+      {
+        tool: "hashline_edit",
+        sessionID: "session",
+        callID: "mutable-hook-args",
+        args: { ...args, readback: false },
+      },
+      editResult,
+    );
+    expect(editResult.output).toContain("@hashline-edit previous=consumed successor=attached");
+    const noReadbackResult = structured(
+      await hashlineEdit.execute(
+        {
+          filePath: "mutable-hook-args.txt",
+          snapshotId: successorId as string,
+          operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["ONE"] }],
+        },
+        toolContext,
+      ),
+    );
+    await value["tool.execute.after"]?.(
+      {
+        tool: "hashline_edit",
+        sessionID: "session",
+        callID: "invented-readback",
+        args: { ...args, readback: true },
+      },
+      noReadbackResult,
+    );
+    expect(noReadbackResult.output).toContain(
+      "@hashline-edit previous=consumed successor=none next=hashline_read",
+    );
+    await value.dispose?.();
+  });
+
   test("fails post-edit readback closed without misreporting the applied edit", async () => {
     const value = await hooks();
     const { hashlineRead, hashlineEdit } = registry(value);
     const toolContext = context();
-    const cases = ["truncated", "mutated", "missing-marker"] as const;
+    const cases = ["truncated", "mutated", "missing-marker", "missing-marker-and-receipt"] as const;
 
     for (const mode of cases) {
       const filePath = `${mode}.txt`;
@@ -513,14 +577,25 @@ describe("OpenCode plugin protocol", () => {
       if (mode === "truncated") editResult.metadata.truncated = true;
       if (mode === "mutated") editResult.output += "\nchanged by another hook";
       if (mode === "missing-marker") delete editResult.metadata.hashlinePending;
+      if (mode === "missing-marker-and-receipt") {
+        delete editResult.metadata.hashlinePending;
+        editResult.output = `changed by another hook\n${editResult.output}`;
+      }
 
       await value["tool.execute.after"]?.(
         { tool: "hashline_edit", sessionID: "session", callID: mode, args },
         editResult,
       );
-      expect(editResult.output).toBe(
-        "Applied 1 operation.\n@hashline-edit previous=consumed successor=unavailable next=hashline_read",
-      );
+      if (mode === "missing-marker-and-receipt") {
+        expect(editResult.output).toStartWith(
+          "SESSION_PROTOCOL_MISMATCH: Better Hashline could not attest this edit result.",
+        );
+        expect(editResult.output).not.toContain("@hashline snapshot=");
+      } else {
+        expect(editResult.output).toBe(
+          "Applied 1 operation.\n@hashline-edit previous=consumed successor=unavailable next=hashline_read",
+        );
+      }
       expect(editResult.metadata.hashlinePending).toBeUndefined();
       expect(await readFile(file, "utf8")).toBe("one\nTWO\n");
       await expect(
@@ -2183,6 +2258,54 @@ describe("OpenCode plugin protocol", () => {
     await value.dispose?.();
   });
 
+  test("refreshes an exact lifecycle source replacement before approval", async () => {
+    const externalRoot = await mkdtemp(join(tmpdir(), "better-hashline-lifecycle-refresh-"));
+    const sourcePath = join(externalRoot, "source.txt");
+    const displacedPath = join(externalRoot, "displaced.txt");
+    await writeFile(sourcePath, "content\n");
+    const value = await hooks();
+
+    try {
+      const { hashlineRead, hashlineEdit } = registry(value);
+      const readResult = structured(
+        await hashlineRead.execute({ filePath: sourcePath }, context()),
+      );
+      await activateRead(value, readResult);
+      const asks: AskRecord[] = [];
+      let replaced = false;
+      const editContext = context({
+        asks,
+        async onAsk(request) {
+          if (!replaced && request.permission === "external_directory") {
+            replaced = true;
+            await rename(sourcePath, displacedPath);
+            await writeFile(sourcePath, "content\n");
+          }
+        },
+      });
+
+      const result = structured(
+        await hashlineEdit.execute(
+          {
+            filePath: sourcePath,
+            snapshotId: String(readResult.metadata.snapshotId),
+            operations: [{ op: "delete_file" }],
+          },
+          editContext,
+        ),
+      );
+
+      expect(replaced).toBe(true);
+      expect(result.output).toContain("Deleted ");
+      expect(await readFile(displacedPath, "utf8")).toBe("content\n");
+      await expect(readFile(sourcePath)).rejects.toThrow();
+      expect(asks.filter(({ permission }) => permission === "edit")).toHaveLength(1);
+    } finally {
+      await value.dispose?.();
+      await rm(externalRoot, { recursive: true, force: true });
+    }
+  });
+
   test("rejects lifecycle source line breaks before permission or mutation", async () => {
     if (process.platform === "win32") return;
     const value = await hooks();
@@ -2335,6 +2458,80 @@ describe("OpenCode plugin protocol", () => {
       },
     });
     await value.dispose?.();
+  });
+
+  test("lets sibling writes adopt a parent created by the first concurrent call", async () => {
+    const externalRoot = await mkdtemp(join(tmpdir(), "better-hashline-plugin-siblings-"));
+    const value = await hooks();
+    let announceFirstEdit!: () => void;
+    const firstAtEdit = new Promise<void>((resolve) => {
+      announceFirstEdit = resolve;
+    });
+    let releaseFirst!: () => void;
+    const holdFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let announceSecondPlan!: () => void;
+    const secondPlanAuthorized = new Promise<void>((resolve) => {
+      announceSecondPlan = resolve;
+    });
+
+    try {
+      const { hashlineWrite } = registry(value);
+      const shared = join(externalRoot, "shared");
+      const firstCall = hashlineWrite.execute(
+        { filePath: join(shared, "first.txt"), content: "first\n" },
+        context({
+          async onAsk(request) {
+            if (request.permission === "edit") {
+              announceFirstEdit();
+              await holdFirst;
+            }
+          },
+        }),
+      );
+      await firstAtEdit;
+
+      let secondExternalAsks = 0;
+      const secondAsks: AskRecord[] = [];
+      const secondCall = hashlineWrite.execute(
+        { filePath: join(shared, "second.txt"), content: "second\n" },
+        context({
+          asks: secondAsks,
+          onAsk(request) {
+            if (request.permission === "external_directory") {
+              secondExternalAsks += 1;
+              if (secondExternalAsks === 2) announceSecondPlan();
+            }
+          },
+        }),
+      );
+      await secondPlanAuthorized;
+      releaseFirst();
+
+      const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
+      expect(structured(firstResult).output).toContain("Created 1 parent directory and the file");
+      const second = structured(secondResult);
+      expect(second.output).toBe(
+        "Created the file. Reused 1 verified parent directory that appeared while this call was waiting. Use hashline_read before editing it.",
+      );
+      expect(Buffer.byteLength(second.output, "utf8")).toBe(132);
+      expect(second.metadata.reusedDirectories).toEqual([relative(root, shared)]);
+      const canonicalSecondPath = await realpath(join(shared, "second.txt"));
+      expect(secondAsks.at(-1)).toMatchObject({
+        permission: "edit",
+        metadata: {
+          createdDirectories: [],
+          filepaths: [canonicalSecondPath],
+        },
+      });
+      expect(await readFile(join(shared, "first.txt"), "utf8")).toBe("first\n");
+      expect(await readFile(join(shared, "second.txt"), "utf8")).toBe("second\n");
+    } finally {
+      releaseFirst();
+      await value.dispose?.();
+      await rm(externalRoot, { recursive: true, force: true });
+    }
   });
 
   test("invalidates snapshots for every path created by a parent plan", async () => {

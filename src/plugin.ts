@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
 import { isAbsolute, parse, resolve } from "node:path";
 import { type Plugin, type ToolContext, type ToolResult, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
@@ -13,6 +12,7 @@ import {
   authorizeEdits,
   authorizeExternal,
   authorizeRead,
+  canonicalizeRoot,
   pathsAlias,
   publishDeletedFile,
   publishMovedFile,
@@ -23,7 +23,9 @@ import {
   resolveMutableFile,
   resolveNewFile,
   resolveNewFileParentPlan,
-  revalidateNewFileParentPlan,
+  stabilizeMutableFile,
+  stabilizeNewFile,
+  stabilizeNewFileParentPlan,
   throwIfAborted,
   withPathLock,
   withPathLocks,
@@ -333,10 +335,21 @@ function hostWorktreePath(worktree: string, directory: string): string {
   return resolve(worktree);
 }
 
-async function canonicalDisplayRoot(worktree: string, directory: string): Promise<string> {
+async function canonicalDisplayRoot(
+  worktree: string,
+  directory: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const candidate = hostWorktreePath(worktree, directory);
-  if (candidate === parse(candidate).root) return candidate;
-  return realpath(candidate);
+  try {
+    return await canonicalizeRoot(candidate, signal);
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    fail(
+      "PATH_MISMATCH",
+      "OpenCode's display root could not be resolved consistently. No publication occurred; restore path access or repair the active worktree before retrying.",
+    );
+  }
 }
 
 function samePathRoot(left: string, right: string): boolean {
@@ -796,10 +809,9 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           "OpenCode worktree and directory use different filesystem roots. Repair the active worktree/directory configuration, restart the plugin or host if necessary, then rerun hashline_read in this same session.",
         );
       }
-      canonicalWorktree =
-        parse(candidate).root === candidate ? candidate : await realpath(candidate);
+      canonicalWorktree = await canonicalizeRoot(candidate);
     } catch (error) {
-      if (error instanceof HashlineError) throw error;
+      if (error instanceof HashlineError && error.code !== "RACE_BEFORE_WRITE") throw error;
       fail(
         "SESSION_PROTOCOL_MISMATCH",
         "OpenCode worktree identity could not be inspected. Restore path access or repair the active worktree configuration, restart the plugin or host if necessary, then rerun hashline_read in this same session.",
@@ -893,13 +905,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       const candidate = binding
         ? sessions.prepare(context.sessionID, binding.fingerprint, binding.canonicalWorktree)
         : undefined;
-      const resolved = await resolveExistingFile(args.filePath, context.directory);
+      const resolved = await resolveExistingFile(args.filePath, context.directory, context.abort);
       await authorizeExternal(context, resolved);
       await authorizeRead(context, resolved);
       const stable = await readStableFile(resolved, options.maxFileBytes, false, context.abort);
       const document = decodeTextDocument(stable.bytes, options.maxLines);
       const shownPath = displayPath(
-        await canonicalDisplayRoot(context.worktree, context.directory),
+        binding?.canonicalWorktree ??
+          (await canonicalDisplayRoot(context.worktree, context.directory, context.abort)),
         resolved.canonicalPath,
       );
       const snapshot = snapshots.remember(
@@ -1001,60 +1014,61 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         metadata,
       };
     }
-    const displayRoot =
-      aliasBinding?.canonicalWorktree ??
-      (await canonicalDisplayRoot(context.worktree, context.directory));
     if (batch.kind !== "text") {
-      const resolved = await resolveMutableFile(args.filePath, context.directory);
-      const shownPath = displayPath(displayRoot, resolved.canonicalPath);
-      assertRendererPaths([resolved.canonicalPath, shownPath]);
-      const aliasPath = shownPath.replaceAll("\\", "/");
-      if (
-        toolName !== "hashline_edit" &&
-        (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
-      ) {
-        fail(
-          "UNSUPPORTED_FILE",
-          'Native aliases require source files inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
-        );
-      }
-
-      const destination =
-        batch.kind === "move_file"
-          ? await resolveNewFile(
-              batch.destinationPath,
-              context.directory,
-              "move_file never creates parent directories. Create the destination parent before retrying.",
-            )
-          : undefined;
-      const destinationShown = destination
-        ? displayPath(displayRoot, destination.canonicalPath)
-        : undefined;
-      if (destination && destinationShown) {
-        assertRendererPaths([destination.canonicalPath, destinationShown]);
-      }
-      const destinationAlias = destinationShown?.replaceAll("\\", "/");
-      if (
-        destination &&
-        (pathsAlias(resolved.canonicalPath, destination.canonicalPath) ||
-          (toolName !== "hashline_edit" &&
-            (isAbsolute(destinationShown ?? "") ||
-              destinationAlias === ".." ||
-              destinationAlias?.startsWith("../"))))
-      ) {
-        fail(
-          pathsAlias(resolved.canonicalPath, destination.canonicalPath)
-            ? "INVALID_ARGUMENT"
-            : "UNSUPPORTED_FILE",
-          pathsAlias(resolved.canonicalPath, destination.canonicalPath)
-            ? "move_file source and destination must be different paths."
-            : 'Native aliases require move_file destinations inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
-        );
-      }
-
       const scope = scopeFor(context);
       const snapshot = snapshots.pin(scope, args.snapshotId);
       try {
+        const displayRoot =
+          aliasBinding?.canonicalWorktree ??
+          (await canonicalDisplayRoot(context.worktree, context.directory, context.abort));
+        const resolved = await resolveMutableFile(args.filePath, context.directory, context.abort);
+        const shownPath = displayPath(displayRoot, resolved.canonicalPath);
+        assertRendererPaths([resolved.canonicalPath, shownPath]);
+        const aliasPath = shownPath.replaceAll("\\", "/");
+        if (
+          toolName !== "hashline_edit" &&
+          (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
+        ) {
+          fail(
+            "UNSUPPORTED_FILE",
+            'Native aliases require source files inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
+          );
+        }
+
+        const destination =
+          batch.kind === "move_file"
+            ? await resolveNewFile(
+                batch.destinationPath,
+                context.directory,
+                "move_file never creates parent directories. Create the destination parent before retrying.",
+                context.abort,
+              )
+            : undefined;
+        const destinationShown = destination
+          ? displayPath(displayRoot, destination.canonicalPath)
+          : undefined;
+        if (destination && destinationShown) {
+          assertRendererPaths([destination.canonicalPath, destinationShown]);
+        }
+        const destinationAlias = destinationShown?.replaceAll("\\", "/");
+        if (
+          destination &&
+          (pathsAlias(resolved.canonicalPath, destination.canonicalPath) ||
+            (toolName !== "hashline_edit" &&
+              (isAbsolute(destinationShown ?? "") ||
+                destinationAlias === ".." ||
+                destinationAlias?.startsWith("../"))))
+        ) {
+          fail(
+            pathsAlias(resolved.canonicalPath, destination.canonicalPath)
+              ? "INVALID_ARGUMENT"
+              : "UNSUPPORTED_FILE",
+            pathsAlias(resolved.canonicalPath, destination.canonicalPath)
+              ? "move_file source and destination must be different paths."
+              : 'Native aliases require move_file destinations inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
+          );
+        }
+
         if (!sameCanonicalPath(snapshot.canonicalPath, resolved.canonicalPath)) {
           fail("PATH_MISMATCH", "The snapshot belongs to a different canonical path.");
         }
@@ -1068,9 +1082,17 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         return await withPathLocks(
           lockPaths,
           async () => {
-            snapshots.peek(scope, snapshot.id);
-            const stable = await readStableFile(
+            snapshots.assertPinned(snapshot);
+            const currentResolved = await stabilizeMutableFile(
               resolved,
+              context.directory,
+              context.abort,
+            );
+            const currentDestination = destination
+              ? await stabilizeNewFile(destination, context.directory, context.abort)
+              : undefined;
+            const stable = await readStableFile(
+              currentResolved,
               options.maxFileBytes,
               true,
               context.abort,
@@ -1081,14 +1103,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                 "The file no longer matches the exact issued snapshot bytes. This call published nothing; the stale snapshot remains retained but cannot be reused for this strict operation. Run a fresh hashline_read and replan before retrying.",
               );
             }
-            if (destination) {
-              if (stable.stats.dev !== destination.parentStats.dev) {
+            if (currentDestination) {
+              if (stable.stats.dev !== currentDestination.parentStats.dev) {
                 fail(
                   "UNSUPPORTED_FILE",
                   "move_file requires source and destination on one filesystem.",
                 );
               }
-              await assertTargetAbsent(destination);
+              await assertTargetAbsent(currentDestination, context.abort);
             }
 
             const diffPath = toolName === "hashline_edit" ? shownPath : aliasPath;
@@ -1141,10 +1163,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               }
             }
 
-            await authorizeEdits(context, destination ? [resolved, destination] : [resolved], diff);
+            await authorizeEdits(
+              context,
+              currentDestination ? [currentResolved, currentDestination] : [currentResolved],
+              diff,
+            );
             if (batch.kind === "delete_file") {
               await publishDeletedFile({
-                resolved,
+                resolved: currentResolved,
                 expected: stable,
                 maxBytes: options.maxFileBytes,
                 signal: context.abort,
@@ -1155,11 +1181,11 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                   snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
                 },
               });
-            } else if (destination) {
+            } else if (currentDestination) {
               try {
                 await publishMovedFile({
-                  source: resolved,
-                  destination,
+                  source: currentResolved,
+                  destination: currentDestination,
                   expected: stable,
                   maxBytes: options.maxFileBytes,
                   signal: context.abort,
@@ -1168,7 +1194,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                       assertAliasAuthorityCurrent(context.sessionID, aliasBinding);
                     }
                     snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
-                    snapshots.invalidateSessionPath(context.sessionID, destination.canonicalPath);
+                    snapshots.invalidateSessionPath(
+                      context.sessionID,
+                      currentDestination.canonicalPath,
+                    );
                   },
                 });
               } catch (error) {
@@ -1201,22 +1230,25 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
     }
 
-    const operations = batch.operations;
-    const resolved = await resolveExistingFile(args.filePath, context.directory);
-    const shownPath = displayPath(displayRoot, resolved.canonicalPath);
-    const aliasPath = shownPath.replaceAll("\\", "/");
-    if (
-      toolName !== "hashline_edit" &&
-      (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
-    ) {
-      fail(
-        "UNSUPPORTED_FILE",
-        'Native aliases require source files inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
-      );
-    }
     const scope = scopeFor(context);
     const snapshot = snapshots.pin(scope, args.snapshotId);
     try {
+      const displayRoot =
+        aliasBinding?.canonicalWorktree ??
+        (await canonicalDisplayRoot(context.worktree, context.directory, context.abort));
+      const operations = batch.operations;
+      const resolved = await resolveExistingFile(args.filePath, context.directory, context.abort);
+      const shownPath = displayPath(displayRoot, resolved.canonicalPath);
+      const aliasPath = shownPath.replaceAll("\\", "/");
+      if (
+        toolName !== "hashline_edit" &&
+        (isAbsolute(shownPath) || aliasPath === ".." || aliasPath.startsWith("../"))
+      ) {
+        fail(
+          "UNSUPPORTED_FILE",
+          'Native aliases require source files inside the current worktree. To mutate an authorized external path, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read; never fall back silently.',
+        );
+      }
       if (!sameCanonicalPath(snapshot.canonicalPath, resolved.canonicalPath)) {
         fail("PATH_MISMATCH", "The snapshot belongs to a different canonical path.");
       }
@@ -1227,7 +1259,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       return await withPathLock(
         resolved.canonicalPath,
         async () => {
-          snapshots.peek(scope, snapshot.id);
+          snapshots.assertPinned(snapshot);
           const stable = await readStableFile(resolved, options.maxFileBytes, true, context.abort);
           const current = decodeTextDocument(stable.bytes, options.maxLines);
           const plan = planEdits({
@@ -1364,8 +1396,8 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const hashlineWrite = tool({
     description:
       options.toolSurface === "native-aliases"
-        ? "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. A hashline_read of another path does not prohibit creation. For an existing target, use hashline_read followed by edit or apply_patch. Missing parents are created automatically, up to 64 through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying."
-        : "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. For an existing target, use hashline_read followed by hashline_edit. Missing parents are created automatically, up to 64 through one fixed, approved no-rollback plan. After publication starts, an error can leave the target file and created directories present; inspect them before retrying.",
+        ? "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. A hashline_read of another path does not prohibit creation. For an existing target, use hashline_read followed by edit or apply_patch. Missing parents are reserved automatically, up to 64. Under the original locks and before approval, an exact verified parent prefix that appeared while this call waited may be reused; only the remaining parents are created. After this call creates a directory or a mkdir outcome becomes ambiguous, an error can leave the target and created directories present; inspect them before retrying."
+        : "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. For an existing target, use hashline_read followed by hashline_edit. Missing parents are reserved automatically, up to 64. Under the original locks and before approval, an exact verified parent prefix that appeared while this call waited may be reused; only the remaining parents are created. After this call creates a directory or a mkdir outcome becomes ambiguous, an error can leave the target and created directories present; inspect them before retrying.",
     args: writeArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
@@ -1382,31 +1414,56 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
       const bytes = encodeNewText(args.content);
       decodeTextDocument(bytes, options.maxLines);
-      const plan = await resolveNewFileParentPlan(args.filePath, context.directory);
-      const plannedEntries = [
+      const reservationPlan = await resolveNewFileParentPlan(
+        args.filePath,
+        context.directory,
+        context.abort,
+      );
+      const reservedEntries = [
         {
-          requestedPath: plan.requestedPath,
-          requestedAbsolute: plan.requestedAbsolute,
-          canonicalPath: plan.canonicalPath,
+          requestedPath: reservationPlan.requestedPath,
+          requestedAbsolute: reservationPlan.requestedAbsolute,
+          canonicalPath: reservationPlan.canonicalPath,
         },
-        ...plan.missingDirectories.map((entry) => ({
+        ...reservationPlan.missingDirectories.map((entry) => ({
           requestedPath: entry.requestedPath,
           requestedAbsolute: entry.requestedPath,
           canonicalPath: entry.canonicalPath,
         })),
       ];
-      for (const entry of plannedEntries) await authorizeExternal(context, entry);
-      const displayRoot = await canonicalDisplayRoot(context.worktree, context.directory);
-      const shownPath = displayPath(displayRoot, plan.canonicalPath);
-      const shownDirectories = plan.missingDirectories.map((entry) =>
-        displayPath(displayRoot, entry.canonicalPath),
+      for (const entry of reservedEntries) await authorizeExternal(context, entry);
+      const displayRoot = await canonicalDisplayRoot(
+        context.worktree,
+        context.directory,
+        context.abort,
       );
+      const shownPath = displayPath(displayRoot, reservationPlan.canonicalPath);
       const diff = unifiedDiff(shownPath, "", args.content);
 
       return await withPathLocks(
-        plan.lockPaths,
+        reservationPlan.lockPaths,
         async () => {
-          await revalidateNewFileParentPlan(plan);
+          const plan = await stabilizeNewFileParentPlan(reservationPlan, context.abort);
+          const plannedEntries = [
+            {
+              requestedPath: plan.requestedPath,
+              requestedAbsolute: plan.requestedAbsolute,
+              canonicalPath: plan.canonicalPath,
+            },
+            ...plan.missingDirectories.map((entry) => ({
+              requestedPath: entry.requestedPath,
+              requestedAbsolute: entry.requestedPath,
+              canonicalPath: entry.canonicalPath,
+            })),
+          ];
+          const shownDirectories = plan.missingDirectories.map((entry) =>
+            displayPath(displayRoot, entry.canonicalPath),
+          );
+          const reusedDirectoryCount =
+            reservationPlan.missingDirectories.length - plan.missingDirectories.length;
+          const shownReusedDirectories = reservationPlan.missingDirectories
+            .slice(0, reusedDirectoryCount)
+            .map((entry) => displayPath(displayRoot, entry.canonicalPath));
           await authorizeEdits(
             context,
             plannedEntries,
@@ -1419,7 +1476,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               bytes,
               signal: context.abort,
               consume: () => {
-                for (const mutationPath of plan.mutationPaths) {
+                for (const mutationPath of reservationPlan.mutationPaths) {
                   snapshots.invalidateSessionPath(context.sessionID, mutationPath);
                 }
               },
@@ -1434,14 +1491,25 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             }
             throw error;
           }
-          const metadata = { diff, createdDirectories: shownDirectories };
+          const metadata = {
+            diff,
+            createdDirectories: shownDirectories,
+            ...(shownReusedDirectories.length > 0
+              ? { reusedDirectories: shownReusedDirectories }
+              : {}),
+          };
+          const creationNotice =
+            shownDirectories.length === 0
+              ? "Created the file."
+              : `Created ${shownDirectories.length} parent ${shownDirectories.length === 1 ? "directory" : "directories"} and the file.`;
+          const reuseNotice =
+            shownReusedDirectories.length === 0
+              ? ""
+              : ` Reused ${shownReusedDirectories.length} verified parent ${shownReusedDirectories.length === 1 ? "directory" : "directories"} that appeared while this call was waiting.`;
           context.metadata({ title: shownPath, metadata });
           return {
             title: shownPath,
-            output:
-              shownDirectories.length === 0
-                ? "Created the file. Use hashline_read before editing it."
-                : `Created ${shownDirectories.length} parent ${shownDirectories.length === 1 ? "directory" : "directories"} and the file. Use hashline_read before editing it.`,
+            output: `${creationNotice}${reuseNotice} Use hashline_read before editing it.`,
             metadata: { ...metadata, created: true },
           };
         },
@@ -1529,26 +1597,31 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       ) {
         return;
       }
-      const hookArgs =
-        typeof hookInput.args === "object" && hookInput.args !== null
-          ? (hookInput.args as Record<string, unknown>)
-          : undefined;
-      const reportedKind =
+      const toolKind =
         hookInput.tool === "hashline_read"
           ? "read"
-          : (hookInput.tool === "hashline_edit" ||
-                hookInput.tool === "edit" ||
-                hookInput.tool === "apply_patch") &&
-              (hookArgs?.readback === true ||
-                hookArgs?.readbackOffset !== undefined ||
-                hookArgs?.readbackLimit !== undefined)
+          : hookInput.tool === "hashline_edit" ||
+              hookInput.tool === "edit" ||
+              hookInput.tool === "apply_patch"
+            ? "edit"
+            : undefined;
+      const outputLines = output.output.split("\n", 3);
+      const hasSuccessorHeader =
+        toolKind === "edit" && /(?:^|\n)@hashline snapshot=\S+(?:\s|$)/u.test(output.output);
+      const expectedPendingKind =
+        toolKind === "read"
+          ? "read"
+          : toolKind === "edit" &&
+              ((BETTER_HASHLINE_APPLIED_RECEIPT.test(outputLines[0] ?? "") &&
+                outputLines[1] === editLifecycleReceipt("attached")) ||
+                hasSuccessorHeader)
             ? "edit"
             : undefined;
       const pendingId = output.metadata?.hashlinePending;
       if (typeof pendingId !== "string") {
-        if (reportedKind === undefined) return;
+        if (expectedPendingKind === undefined) return;
         output.metadata = withoutPendingMetadata(output.metadata);
-        if (reportedKind === "read") {
+        if (expectedPendingKind === "read") {
           output.metadata = withoutPendingSnapshotMetadata(output.metadata);
           output.output =
             "SNAPSHOT_REQUIRED: OpenCode did not preserve the snapshot marker. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
@@ -1563,18 +1636,18 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       pendingSnapshots.delete(pendingId);
       output.metadata = withoutPendingMetadata(output.metadata);
       if (!pending) {
-        if (reportedKind === "read") {
+        if (expectedPendingKind === "read") {
           output.metadata = withoutPendingSnapshotMetadata(output.metadata);
           output.output =
             "SNAPSHOT_REQUIRED: The delivered read did not match a live pending snapshot. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
-        } else if (reportedKind === "edit") {
+        } else if (toolKind === "edit") {
           unavailableEditReadback(output);
         } else {
           protocolKindMismatch(output);
         }
         return;
       }
-      if (reportedKind !== pending.kind) {
+      if (toolKind !== pending.kind) {
         protocolKindMismatch(output);
         return;
       }
@@ -1698,9 +1771,9 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             : state === "mismatch"
               ? "native-alias-session=mismatch. Run hashline_read again and wait for its returned result; use only that new snapshot ID, because old IDs cannot be revived."
               : "native-alias-session=unbound. Do not call edit or apply_patch. Run hashline_read and wait for its returned result; only successful delivery binds the session.";
-        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. These aliases accept Better Hashline filePath/snapshotId/operations JSON, never native oldString/newString or patchText syntax, and require source and destination paths inside the current worktree. hashline_write is create-only and creates up to 64 missing parents through a fixed no-rollback plan. Native write and hashline_edit are disabled. Do not mutate files via shell. Hashline line/control prefixes are annotations; allowHashlinePrefixes:true is only for intentional source text. After configuration, schema, host, or surface changes, restart and run a fresh hashline_read; alternatively, explicitly configure enforce:true with toolSurface:"hashline", restart, and reread. Never fall back silently or reuse old IDs. Better Hashline must be the last plugin defining these aliases.`;
+        guidance = `Better Hashline native aliases are active. ${concurrency} Use native read for inspection and hashline_read before edit or apply_patch. These aliases accept Better Hashline filePath/snapshotId/operations JSON, never native oldString/newString or patchText syntax, and require source and destination paths inside the current worktree. hashline_write is create-only and reserves up to 64 missing parents; while holding the original locks and before approval, it may reuse only an exact verified parent prefix that appeared while waiting. Native write and hashline_edit are disabled. Do not mutate files via shell. Hashline line/control prefixes are annotations; allowHashlinePrefixes:true is only for intentional source text. After configuration, schema, host, or surface changes, restart and run a fresh hashline_read; alternatively, explicitly configure enforce:true with toolSurface:"hashline", restart, and reread. Never fall back silently or reuse old IDs. Better Hashline must be the last plugin defining these aliases.`;
       } else if (options.enforce) {
-        guidance = `Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. ${EDIT_SEMANTICS_GUIDANCE} Use hashline_write only to create an absent file; it automatically creates up to 64 missing parents through a fixed no-rollback plan. Inspect the target and tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.`;
+        guidance = `Better Hashline is active. Use native read for inspection, directories, images, and PDFs. Before changing an existing text file, use hashline_read and then hashline_edit. ${EDIT_SEMANTICS_GUIDANCE} Use hashline_write only to create an absent file; it reserves up to 64 missing parents and may reuse only an exact verified parent prefix that appeared while waiting before approval. Inspect the target and tree after PARTIAL_PUBLICATION. Native edit, write, and apply_patch are disabled. Do not use shell commands to modify files. N| and N!| prefixes from hashline_read are annotations, not file content.`;
       } else {
         guidance = `Better Hashline migration mode exposes two separate workflows. Prefer hashline_read followed by hashline_edit for an existing UTF-8 text file, and hashline_write for a new file; hashline_write creates missing parents automatically. When a native mutator changes an existing file, first use native read. Native write or apply_patch may create an absent target without a preceding read. Never pass hashline output or snapshot IDs to native mutators. ${EDIT_SEMANTICS_GUIDANCE}`;
       }

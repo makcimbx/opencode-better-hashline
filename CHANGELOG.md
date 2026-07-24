@@ -13,6 +13,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Allowed concurrent sibling `hashline_write` calls to reuse an exact verified parent prefix under the original locks instead of returning a pre-write race; successful contention reports `reusedDirectories` and a concise notice. On the one-parent fixture, output grows from 54 to 132 UTF-8 bytes only when reuse occurs; ordinary write output, schemas, and protocol fingerprints are unchanged.
+- Added bounded delayed recovery for transient read-only filesystem observations across read, edit, write, delete, and move flows, while keeping publication syscalls single-attempt and persistent identity, provenance, or publication uncertainty fail-closed.
+- Hardened lifecycle identity refresh, active snapshot pinning, edit-readback attestation, staging ownership/descriptor cleanup, exact final publication proofs, and generation fencing so queued overlapping calls cannot continue after `PARTIAL_PUBLICATION`.
+
 ## [0.8.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.7.0...v0.8.0) (2026-07-24)
 
 ### Added

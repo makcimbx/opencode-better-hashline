@@ -382,6 +382,16 @@ export class SnapshotStore {
     return this.#get(scope, id, true);
   }
 
+  assertPinned(snapshot: Snapshot): void {
+    if (snapshot.pins > 0 && !snapshot.invalid && this.#snapshots.get(snapshot.id) === snapshot) {
+      return;
+    }
+    fail(
+      "SNAPSHOT_UNKNOWN",
+      "The active snapshot was invalidated while this operation was waiting. Rerun hashline_read in this same session and use only the snapshot ID it returns; old IDs cannot be revived.",
+    );
+  }
+
   release(snapshot: Snapshot): void {
     snapshot.pins = Math.max(0, snapshot.pins - 1);
     if (snapshot.invalid && snapshot.pins === 0) this.#remove(snapshot.id);
