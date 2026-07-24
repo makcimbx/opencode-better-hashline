@@ -26,6 +26,10 @@ Better Hashline is designed to prevent these failures during cooperative agent e
 - writing model-facing line annotations that were copied into an edit payload;
 - admitting native-alias mutation before exact delivered-read binding, or concurrency for calls whose complete path sets overlap;
 - continuing native-alias mutation after `PARTIAL_PUBLICATION` without path inspection, repair, and a fresh delivered same-session read.
+- invoking managed LSP synchronization before verified publication or after `PARTIAL_PUBLICATION`;
+- rolling back or obscuring a committed mutation because managed diagnostics failed;
+- treating advisory language-server output as snapshot provenance, mutation authority, or proof of semantic correctness;
+- accepting language-server formatting, dynamic registration, watched-file requests, arbitrary or server-directed command execution, code actions, navigation, rename, or workspace edits through the managed diagnostics channel; only the advertised `typescript.tsserverRequest` command with fixed diagnostic-sync requests is permitted as a post-change freshness barrier.
 
 ## Trusted Components
 
@@ -63,6 +67,52 @@ On the default surface, `enforce: true` hides and rejects OpenCode tool IDs `edi
 hiding and rejecting `write`. Neither mode intercepts shell redirection, scripts, language servers,
 formatters, MCP tools, or another plugin's I/O. Use OpenCode permissions and OS isolation for
 adversarial workloads.
+
+### Managed language servers
+
+`lspDiagnostics` is enabled by default; exactly `false` is the opt-out. At lazy initialization the
+plugin captures scoped effective OpenCode configuration through public APIs. It imports only
+object-valued `config.lsp` entries that expose explicit command and extension arrays, then applies any
+Better Hashline server definitions as ID-based overrides. Boolean `config.lsp: true` exposes no
+private built-in definition to clone. If no eligible server exists or no extension matches, no managed
+process starts and tool output remains unchanged.
+
+Every imported or override command is configuration-directed code execution. It spawns directly
+without a shell, but the executable runs with the OpenCode user's operating-system privileges and an
+inherited environment plus configured additions. Better Hashline is not a sandbox for a malicious or
+compromised language server. The child may read or change files, spawn descendants, consume resources,
+or inspect environment values outside the JSON-RPC policy. Use `lspDiagnostics: false`, trusted server
+binaries, and OS isolation when that behavior is not acceptable. Better Hashline never installs a
+server automatically; `bun x --no-install` examples deliberately require an existing installation.
+
+Routes, root-marker discovery, and client roots are confined to one canonical directory worktree; the
+OpenCode `/` sentinel maps to the active request directory, not the filesystem root. Symlink escapes
+and external paths cannot start or reuse a client. That admission boundary does not prevent an already
+running child from accessing paths through its own native privileges.
+
+The managed subsystem is independent of OpenCode's host LSP. It can therefore start duplicate
+processes with separate caches, document versions, diagnostics, and resource use, and it cannot update
+or invalidate host-LSP state. Persistence is keyed by canonical root, server ID, and exact normalized
+configuration digest so clients are not reused across those boundaries. The merged configuration
+freezes at the first manager request and does not follow later config-hook changes until restart.
+
+JSON-RPC body/header sizes, queues, pending and active requests, retained stderr/text/diagnostics,
+documents, clients, per-document work, one absolute operation deadline, restart rate, and shutdown are
+bounded. Those controls reduce accidental resource amplification but do not contain arbitrary native
+behavior by a child process.
+
+Server protocol output is untrusted. The client advertises static UTF-16 synchronization and
+diagnostics, disables dynamic registration, sends no watched-file notifications, refuses workspace
+edits, and never honors arbitrary or server-directed command execution. It does not expose
+formatting, navigation, code actions, or rename. For `typescript-language-server` only, an advertised
+`typescript.tsserverRequest` command permits fixed `syntacticDiagnosticsSync`,
+`semanticDiagnosticsSync`, and `suggestionDiagnosticsSync` requests solely as a post-change
+freshness barrier. Contradictory current push errors take precedence; malformed or unsupported
+command evidence never establishes a clean result. Model-visible diagnostics are severity-Error-only,
+sanitized, count/byte bounded, deterministically ordered, and advisory. Push diagnostics can be
+versionless, dependencies can be stale, and another writer can race after publication. Immutable
+committed URI/text input, revision fencing, and a stable current-filesystem check suppress known-stale
+target output but cannot prove semantic correctness or global workspace freshness.
 
 ### Native-alias ownership
 
@@ -110,6 +160,10 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | Offline alias history | Bounded v2 completed/rejected-call validation with exact operation and source/destination metadata correlation; never live admission |
 | Alias concurrency | Mutation rejected before delivered-read binding; after binding, only complete disjoint path sets may overlap and deterministic locks serialize every overlap |
 | Alias renderer metadata | Exact contract measured before publication and capped at 1 MiB |
+| Managed LSP routing | Default-on with exact `false` opt-out; bounded import of public effective `config.lsp` entries that expose explicit commands/extensions plus ID-based Better Hashline overrides; boolean/private built-ins are not cloned; zero eligible routes are process-free; canonical worktree/root confinement maps the `/` sentinel to the active directory |
+| Managed LSP mutation boundary | Immutable committed URI/text and revision-fenced synchronization only after verified publication and lock release; one absolute deadline; no call after `PARTIAL_PUBLICATION`, no watched-file notification, no rollback, and mandatory non-retry warnings on post-commit failure or drift |
+| Managed LSP output | Current-target severity `Error` entries only, advisory, deterministic, sanitized, byte/count bounded, and stable-reread gated; optional diagnostics use extra safe host output headroom and yield before legacy receipt/readback, while mandatory warnings may reduce readback; native-alias `diagnostics` metadata stays empty |
+| Managed LSP capabilities | Static UTF-16 synchronization and push/pull diagnostics; no dynamic registration, watched-file notifications, formatter, navigation, code actions, rename, workspace edits, arbitrary or server-directed command execution, or update to OpenCode host-LSP state. For `typescript-language-server` only, the advertised `typescript.tsserverRequest` command permits three fixed diagnostic-sync requests solely as a post-change freshness barrier; contradictory current push errors win, and malformed/unsupported evidence never establishes clean output |
 
 Transfer operations are source-referenced compound text edits. Copy requires complete source
 provenance plus destination-boundary provenance. Move requires complete provenance for the
@@ -178,6 +232,12 @@ validation require those fields. Delete diffs can contain the complete deleted f
 moves can be zero-hunk. A completed non-mutating `DISPLAY_PREFIX_REJECTED` result contains no file
 payload or diff, but records protocol identity, canonical input and worktree digests, payload
 coordinate, and a bounded prefix kind.
+
+When an eligible managed route runs, its language-server process receives exact UTF-8-decoded
+worktree text, canonical workspace/root information, initialization data, and an environment inherited
+from the OpenCode process plus explicit configured additions. Environment values and raw server stderr
+are not copied into model-visible warnings. Sanitized diagnostics can still quote identifiers or source
+fragments and become part of the OpenCode transcript, so review exports accordingly.
 
 Ordinary exports retain this metadata; OpenCode's sanitized export removes the tool metadata but
 retains a safe root-relative session locator. Review even sanitized exports before disclosure.

@@ -16,11 +16,16 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | `src/model-trace.ts` | Shared trace/export correlation, lifecycle mutation evidence, and native-alias benchmark oracle |
 | `src/path-identity.ts` | Exact canonical path equality, containment, and filesystem-root identity |
 | `src/process-capture.ts` | Bounded subprocess capture and process-tree termination |
+| `src/lsp-jsonrpc.ts` | Bounded LSP framing, request correlation, queue admission, cancellation, and stderr capture |
+| `src/lsp-client.ts` | Bounded persistent stdio JSON-RPC/LSP connection, synchronization, diagnostics, deadlines, and shutdown |
+| `src/lsp-manager.ts` | Frozen public-config import/override routing, canonical roots/config keys, lazy process reuse, document lifecycle, revision fencing, restart limits, and aggregation |
+| `src/lsp-diagnostics.ts` | Pure advisory Error normalization, deterministic sorting/deduplication, sanitization, warning semantics, and byte-bounded rendering |
+| `src/lsp-output.ts` | Host-output headroom, legacy/readback priority, mandatory-warning reservation, and final appendix composition |
 | `src/exact-tree.ts` | Race-resistant physical tree, file-identity, reparse, and stream evaluation |
 | `src/rebase.ts` | Exact unique range/boundary relocation, bounded comparison work, and diagnostic-only EOL-change detection |
 | `src/edits.ts` | Text-operation validation, deterministic conflict-pair evidence, transfer composition, bounded projection, and final bytes |
 | `src/filesystem.ts` | Canonicalization, authorization, deterministic locks, stable observations, reserved parent plans, and text/lifecycle publication |
-| `src/plugin.ts` | Flat tool schemas, hooks, native-mutator enforcement, readback delivery, and reservation-bound filesystem orchestration |
+| `src/plugin.ts` | Flat tool schemas, hooks, native-mutator enforcement, publication/readback orchestration, and post-commit managed LSP coordination |
 | `src/index.ts` | Public library exports and OpenCode `PluginModule` |
 | `src/server.ts` | Modern OpenCode `./server` package entrypoint |
 | `src/verify.ts`, `src/cli.ts` | Credential-free packed OpenCode route, schema, hook, export/import, and renderer verification |
@@ -108,6 +113,63 @@ its full lock set, so operations that were already queued on any overlapping pat
 their frozen plan. This prevents a sibling call from extending an ambiguous tree or move result.
 These distinctions are explicit in API errors and documentation.
 
+### Managed diagnostics are independent and post-commit
+
+`lspDiagnostics` is enabled unless the option is exactly `false`; omission, `true`, and an object all
+select the managed subsystem. At the first manager request, the plugin freezes scoped effective public
+OpenCode configuration from the `config` hook or a one-second `client.config.get` fallback. It imports
+only object-valued `config.lsp` entries with explicit commands and extensions, then applies optional
+Better Hashline definitions as ID-based overrides. Boolean `config.lsp: true` exposes no private
+built-in definition to clone. An empty merged set or a file with no matching route is a process-free,
+byte-identical no-op.
+
+Each plugin instance owns one manager and never uses process-global clients or OpenCode's private LSP
+state. Matching server processes start lazily and persist by canonical workspace root, server ID, and
+normalized server-config digest. The merged configuration and effective host output limits remain
+frozen until restart. Independent host and Better Hashline clients do not share process, document, or
+diagnostic state and can therefore duplicate CPU, memory, and child-process resources.
+
+The manager canonicalizes a directory worktree and confines routes, root-marker discovery, and process
+roots to it. OpenCode's `/` worktree sentinel maps to the active request directory rather than the
+filesystem root. Symlink escapes and external paths cannot start or reuse a client. Multiple roots and
+servers may progress independently while each document URI serializes bounded state transitions.
+Every operation uses one absolute diagnostics deadline across queueing, route discovery, startup,
+synchronization, lifecycle work, and all concurrent matching servers.
+
+A stable read can warm a matching managed client with exact retained bytes, but warmup never affects
+read output, issuance, or native-alias binding. Mutation synchronization begins only after publication
+has succeeded, exact final bytes or lifecycle state have been verified, and the filesystem path lock
+has been released. The manager receives an immutable committed URI and text instead of rereading or
+retargeting through a changed parent. Creates and changes synchronize exact bytes; deletes close owned
+documents; moves close the source and route the destination independently. No managed work begins
+after `PARTIAL_PUBLICATION`, and no watched-file notification is registered or sent.
+
+Filesystem publication remains authoritative. Startup failure, timeout, crash, resource exhaustion,
+malformed transport, or unsupported synchronization yields a bounded post-commit warning that says the
+mutation succeeded and must not be retried; no LSP result can roll back committed bytes. A stable final
+filesystem check gates both diagnostics and successor rendering. Drift suppresses diagnostics,
+quarantines affected bindings, invalidates pending readback, and produces the same mandatory non-retry
+recovery class.
+
+Severity-Error diagnostics are advisory appendices. Legacy receipt/readback rendering retains its
+`maxOutputBytes` allowance and takes priority over optional diagnostics, which use bounded additional
+safe host `tool_output` byte/line headroom and are trimmed first. Mandatory unavailable/drift warnings
+reserve that headroom before legacy rendering and may shrink or remove readback so their recovery
+instruction survives. Delivery attestation still happens only in `tool.execute.after`, and
+native-alias metadata retains the exactly empty `diagnostics: {}` object.
+
+The transport and process model is explicitly bounded: frame/header/stderr sizes, queues, requests,
+documents, retained text and diagnostics, clients, restart rate, and shutdown all have fixed ceilings.
+The client uses static UTF-16 synchronization plus push/pull diagnostics. It does not support dynamic
+registration or watched-file notifications and does not update OpenCode's built-in LSP, format files,
+provide navigation, run code actions, rename symbols, accept workspace edits, or honor arbitrary or
+server-directed command execution. For `typescript-language-server` only, the client feature-detects
+the advertised `typescript.tsserverRequest` command and issues fixed `syntacticDiagnosticsSync`,
+`semanticDiagnosticsSync`, and `suggestionDiagnosticsSync` requests solely as a post-change
+diagnostic-freshness barrier. Contradictory current push errors take precedence, while malformed or
+unsupported command evidence never establishes a clean result. OpenCode's built-in `lsp` and formatter
+continue to own interactive capabilities and host state.
+
 ## OpenCode Integration
 
 The npm package default-exports a modern `PluginModule` and exposes both root and `./server` exports. OpenCode's stable V1 loader prefers the server entrypoint.
@@ -158,6 +220,12 @@ path. Successful output explicitly reports that transition through
 `@hashline-edit previous=consumed successor=none|attached|unavailable`. Text edits, including sole
 `replace_file`, require a reread by default; `readback:true` or either readback window field explicitly
 requests that post-rename verification bytes create a new pending snapshot with one contiguous page.
+With an eligible managed route, successor retention still occurs under the publication lock, while
+diagnostic waiting and page rendering occur after lock release. A stable current-file check gates both
+the advisory appendix and successor rendering. Optional diagnostics use additional safe host
+`tool_output` headroom and yield before the legacy receipt/readback; a mandatory post-commit warning
+may instead reduce or remove readback. Insufficient space never changes the committed mutation.
+
 `readbackOffset` selects a one-based post-edit start, defaulting to the first hunk; requested
 `readbackLimit` accepts `1..100,000` and defaults to 1,000. Explicit `readback:false` conflicts with
 either window field. A successful mutation may still report `successor=unavailable`. The authoritative
@@ -219,9 +287,10 @@ The test suite has separate layers:
 - renderer truncation, page-local `partial=true`, cumulative `coverage`, and UTF-8 budget tests;
 - real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, reserved and stabilized parent chains, exclusive directory creation, deterministic path-set locks, no-replace creation and movement, and partial publication;
 - plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including inferred readback windows/issuance, explicit `replace_file` readback, deterministic conflict pairs, lifecycle and strict automatic parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
+- fake-server managed LSP tests for default enablement and explicit opt-out, public config import and override precedence, lazy freeze, slash-sentinel/worktree routing, zero-route no-op behavior, persistent process/document lifecycle, full and incremental synchronization, push/pull freshness, hostile frames, resource limits, diagnostic/warning output priority, post-publication ordering, immutable committed identity, stable-reread suppression, and shutdown;
 - packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/fresh-read restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
-- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current schema-v10 identity keeps the schema-v9 29-case classifications and adds cumulative-coverage-header and `replace_file`-readback wire fixtures; strict-only defaults remain runtime-test evidence. It is textual protocol evidence, not semantic or model-quality evidence. The historical schema-v5 through schema-v9 results and pilot-v7 evidence remain immutable.
+- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current schema-v11 identity preserves schema v10's unchanged 29-case classifications and prior wire fixtures, then adds production-composed managed LSP output/headroom fixtures through the shared production composition paths; strict-only defaults remain runtime-test evidence. It is textual protocol and output-composition evidence, not semantic or model-quality evidence. The historical schema-v5 through schema-v10 results and pilot-v7 evidence remain immutable.
 
 Timing benchmarks never gate shared CI. Safety regressions do.
 

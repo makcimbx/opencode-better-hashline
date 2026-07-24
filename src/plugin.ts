@@ -18,11 +18,13 @@ import {
   publishMovedFile,
   publishNewFileWithParents,
   publishReplacement,
+  type ResolvedFile,
   readStableFile,
   resolveExistingFile,
   resolveMutableFile,
   resolveNewFile,
   resolveNewFileParentPlan,
+  type StableFile,
   stabilizeMutableFile,
   stabilizeNewFile,
   stabilizeNewFileParentPlan,
@@ -30,8 +32,22 @@ import {
   withPathLock,
   withPathLocks,
 } from "./filesystem.js";
+import type { LspUnavailableWarning, NormalizedLspDiagnostic } from "./lsp-diagnostics.js";
+import { createLspManager, type LspManager, type ResolvedLspServerConfig } from "./lsp-manager.js";
+import {
+  buildLspOutput,
+  type HostOutputLimits,
+  type LspAppendixReport,
+  lspLegacyLimits,
+  outputLineCount,
+} from "./lsp-output.js";
 import { detectOpenCodeVersion, openCodeProviderSchema } from "./native-alias.js";
-import { ABSOLUTE_MAX_LOGICAL_LINES, type ResolvedOptions, resolveOptions } from "./options.js";
+import {
+  ABSOLUTE_MAX_LOGICAL_LINES,
+  type ResolvedOptions,
+  resolveLspDiagnosticServers,
+  resolveOptions,
+} from "./options.js";
 import { exactRelativePath, sameFilesystemRoot } from "./path-identity.js";
 import {
   buildNativeAliasMetadata,
@@ -725,6 +741,373 @@ function unavailableEditReadback(
     : "SESSION_PROTOCOL_MISMATCH: Better Hashline could not attest this edit result. No successor snapshot was issued. Whether a mutation occurred is unknown; inspect the target and run a fresh hashline_read before retrying.";
 }
 
+type CommittedFile = Readonly<{
+  bytes: Uint8Array;
+  dev: number;
+  ino: number;
+  nlink: number;
+}>;
+
+type LspLifecycleCompletion = {
+  lspCompletion: true;
+  operation: "delete_file" | "move_file";
+  title: string;
+  output: string;
+  metadata: Record<string, unknown>;
+  source: ResolvedFile;
+  destination?: ResolvedFile;
+  destinationShown?: string;
+  destinationFile?: CommittedFile;
+  text: string;
+  sourceRevision: number;
+  destinationRevision?: number;
+};
+
+type LspTextCompletion = {
+  lspCompletion: true;
+  title: string;
+  metadata: Record<string, unknown>;
+  diff: string;
+  successOutput: string;
+  publishedText: string;
+  publishedFile: CommittedFile;
+  successor: Snapshot | undefined;
+  revision: number;
+};
+
+type LspWriteCompletion = {
+  lspCompletion: true;
+  title: string;
+  output: string;
+  metadata: Record<string, unknown>;
+  resultMetadata: Record<string, unknown>;
+  resolved: ResolvedFile;
+  publishedFile: CommittedFile;
+  revision: number;
+};
+
+function lspRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function lspPosition(value: unknown): { line: number; character: number } | undefined {
+  const position = lspRecord(value);
+  if (!position) return undefined;
+  const { line, character } = position;
+  if (
+    typeof line !== "number" ||
+    !Number.isSafeInteger(line) ||
+    line < 0 ||
+    typeof character !== "number" ||
+    !Number.isSafeInteger(character) ||
+    character < 0
+  ) {
+    return undefined;
+  }
+  return { line, character };
+}
+
+function normalizeLspDiagnostics(value: unknown, relativePath: string): NormalizedLspDiagnostic[] {
+  const result = lspRecord(value);
+  if (!result || !Array.isArray(result.servers)) return [];
+  const normalized: NormalizedLspDiagnostic[] = [];
+  for (const serverValue of result.servers) {
+    const server = lspRecord(serverValue);
+    if (
+      server?.status !== "ok" ||
+      typeof server.serverId !== "string" ||
+      !Array.isArray(server.diagnostics)
+    ) {
+      continue;
+    }
+    for (const diagnosticValue of server.diagnostics) {
+      const diagnostic = lspRecord(diagnosticValue);
+      const range = lspRecord(diagnostic?.range);
+      const start = lspPosition(range?.start);
+      const end = lspPosition(range?.end);
+      if (
+        !diagnostic ||
+        typeof diagnostic.message !== "string" ||
+        !start ||
+        !end ||
+        end.line < start.line ||
+        (end.line === start.line && end.character < start.character)
+      ) {
+        continue;
+      }
+      const severity =
+        typeof diagnostic.severity === "number" && Number.isSafeInteger(diagnostic.severity)
+          ? diagnostic.severity
+          : 0;
+      const code =
+        typeof diagnostic.code === "string" ||
+        (typeof diagnostic.code === "number" && Number.isFinite(diagnostic.code))
+          ? diagnostic.code
+          : undefined;
+      normalized.push({
+        relativePath,
+        startLine: start.line,
+        startCharacter: start.character,
+        severity,
+        serverId: server.serverId,
+        ...(code === undefined ? {} : { code }),
+        message: diagnostic.message,
+      });
+    }
+  }
+  return normalized;
+}
+
+function normalizeLspWarnings(value: unknown): LspUnavailableWarning[] {
+  const result = lspRecord(value);
+  if (!result) return [];
+  const normalized: LspUnavailableWarning[] = [];
+  const append = (warnings: unknown, fallbackServerId?: string): void => {
+    if (!Array.isArray(warnings)) return;
+    for (const warningValue of warnings) {
+      const warning = lspRecord(warningValue);
+      if (!warning || typeof warning.code !== "string") continue;
+      const serverId = typeof warning.serverId === "string" ? warning.serverId : fallbackServerId;
+      normalized.push({
+        code: warning.code,
+        ...(serverId === undefined ? {} : { serverId }),
+      });
+    }
+  };
+  append(result.warnings);
+  if (Array.isArray(result.servers)) {
+    for (const serverValue of result.servers) {
+      const server = lspRecord(serverValue);
+      if (!server) continue;
+      append(server.warnings, typeof server.serverId === "string" ? server.serverId : undefined);
+    }
+  }
+  return normalized;
+}
+
+function normalizeLspReport(value: unknown, relativePath: string): LspAppendixReport {
+  return {
+    diagnostics: normalizeLspDiagnostics(value, relativePath),
+    warnings: normalizeLspWarnings(value),
+  };
+}
+
+function failedLspReport(code: string): LspAppendixReport {
+  return { diagnostics: [], warnings: [{ code }] };
+}
+
+const HOST_OUTPUT_DEFAULT_BYTES = 50 * 1024;
+const HOST_OUTPUT_DEFAULT_LINES = 2_000;
+const HOST_OUTPUT_MAX_BYTES = 1024 * 1024;
+const HOST_OUTPUT_MAX_LINES = 100_000;
+
+function committedFile(stable: StableFile): CommittedFile {
+  return Object.freeze({
+    bytes: stable.bytes,
+    dev: stable.stats.dev,
+    ino: stable.stats.ino,
+    nlink: stable.stats.nlink,
+  });
+}
+
+function hasFileIdentity(value: Pick<CommittedFile, "dev" | "ino">): boolean {
+  return value.dev !== 0 || value.ino !== 0;
+}
+
+async function publishedFileStillMatchesUnlocked(
+  resolved: ResolvedFile,
+  expected: CommittedFile,
+  maxBytes: number,
+): Promise<boolean> {
+  const stable = await readStableFile(resolved, maxBytes, false);
+  const currentIdentity = { dev: stable.stats.dev, ino: stable.stats.ino };
+  const expectedHasIdentity = hasFileIdentity(expected);
+  const currentHasIdentity = hasFileIdentity(currentIdentity);
+  return (
+    expected.nlink === 1 &&
+    stable.stats.nlink === 1 &&
+    bytesEqual(stable.bytes, expected.bytes) &&
+    ((!expectedHasIdentity && !currentHasIdentity) ||
+      (expectedHasIdentity &&
+        currentHasIdentity &&
+        stable.stats.dev === expected.dev &&
+        stable.stats.ino === expected.ino))
+  );
+}
+
+async function publishedFileStillMatches(
+  resolved: ResolvedFile,
+  expected: CommittedFile,
+  maxBytes: number,
+): Promise<boolean> {
+  try {
+    return await withPathLock(resolved.canonicalPath, () =>
+      publishedFileStillMatchesUnlocked(resolved, expected, maxBytes),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function publishedPathStillAbsentUnlocked(
+  resolved: ResolvedFile,
+  directory: string,
+): Promise<boolean> {
+  const missing = await resolveNewFile(
+    resolved.requestedAbsolute,
+    directory,
+    "The published lifecycle source must remain absent.",
+  );
+  if (!sameCanonicalPath(missing.canonicalPath, resolved.canonicalPath)) return false;
+  await assertTargetAbsent(missing);
+  return true;
+}
+
+async function publishedPathStillAbsent(
+  resolved: ResolvedFile,
+  directory: string,
+): Promise<boolean> {
+  try {
+    return await withPathLock(resolved.canonicalPath, () =>
+      publishedPathStillAbsentUnlocked(resolved, directory),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function publishedMoveStillMatches(
+  source: ResolvedFile,
+  destination: ResolvedFile,
+  expectedDestination: CommittedFile,
+  directory: string,
+  maxBytes: number,
+): Promise<boolean> {
+  try {
+    return await withPathLocks(
+      [source.canonicalPath, destination.canonicalPath],
+      async () =>
+        (await publishedPathStillAbsentUnlocked(source, directory)) &&
+        (await publishedFileStillMatchesUnlocked(destination, expectedDestination, maxBytes)),
+    );
+  } catch {
+    return false;
+  }
+}
+
+const IMPORTED_LSP_MAX_ENTRIES = 64;
+const IMPORTED_LSP_MAX_BYTES = 256 * 1024;
+const CONFIG_FALLBACK_TIMEOUT_MS = 1_000;
+
+function strictDataRecord(value: unknown): Record<string, unknown> | undefined {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const record = value as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(record)) {
+      if (typeof key !== "string") return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(record, key);
+      if (!descriptor?.enumerable || !("value" in descriptor)) return undefined;
+    }
+    return record;
+  } catch {
+    return undefined;
+  }
+}
+
+function dataValue(record: Record<string, unknown>, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    return descriptor?.enumerable && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hostOutputLimitsFromConfig(config: unknown): HostOutputLimits {
+  const root = strictDataRecord(config);
+  const output = strictDataRecord(root ? dataValue(root, "tool_output") : undefined);
+  const configuredBytes = output ? dataValue(output, "max_bytes") : undefined;
+  const configuredLines = output ? dataValue(output, "max_lines") : undefined;
+  return {
+    maxBytes:
+      typeof configuredBytes === "number" &&
+      Number.isSafeInteger(configuredBytes) &&
+      configuredBytes > 0
+        ? Math.min(configuredBytes, HOST_OUTPUT_MAX_BYTES)
+        : HOST_OUTPUT_DEFAULT_BYTES,
+    maxLines:
+      typeof configuredLines === "number" &&
+      Number.isSafeInteger(configuredLines) &&
+      configuredLines > 0
+        ? Math.min(configuredLines, HOST_OUTPUT_MAX_LINES)
+        : HOST_OUTPUT_DEFAULT_LINES,
+  };
+}
+
+function importedLspServers(config: unknown): ResolvedLspServerConfig[] {
+  try {
+    const root = strictDataRecord(config);
+    const lsp = root ? dataValue(root, "lsp") : undefined;
+    if (lsp === undefined || typeof lsp === "boolean") return [];
+    const configured = strictDataRecord(lsp);
+    if (!configured) return [];
+    const ids = Object.keys(configured).sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
+    if (ids.length > IMPORTED_LSP_MAX_ENTRIES) return [];
+
+    const imported: ResolvedLspServerConfig[] = [];
+    let importedBytes = 0;
+    for (const id of ids) {
+      if (/^[._$]/u.test(id)) continue;
+      const entry = strictDataRecord(dataValue(configured, id));
+      if (!entry || dataValue(entry, "disabled") === true) continue;
+      const command = dataValue(entry, "command");
+      const extensions = dataValue(entry, "extensions");
+      if (!Array.isArray(command) || command.length === 0) continue;
+      if (!Array.isArray(extensions) || extensions.length === 0) continue;
+      const candidate = {
+        id,
+        command,
+        extensions,
+        ...(dataValue(entry, "env") === undefined ? {} : { env: dataValue(entry, "env") }),
+        ...(dataValue(entry, "initialization") === undefined
+          ? {}
+          : { initialization: dataValue(entry, "initialization") }),
+      };
+      try {
+        const [server] = resolveLspDiagnosticServers([candidate], "effective config.lsp");
+        if (!server) continue;
+        const bytes = Buffer.byteLength(JSON.stringify(server), "utf8");
+        if (importedBytes + bytes > IMPORTED_LSP_MAX_BYTES) break;
+        importedBytes += bytes;
+        imported.push(server);
+      } catch {
+        // Effective host config is advisory input: invalid or unroutable entries are skipped.
+      }
+    }
+    return imported;
+  } catch {
+    return [];
+  }
+}
+
+function mergedLspServers(
+  imported: readonly ResolvedLspServerConfig[],
+  overrides: readonly ResolvedLspServerConfig[],
+): ResolvedLspServerConfig[] {
+  const merged = new Map<string, ResolvedLspServerConfig>();
+  for (const server of imported) merged.set(server.id, server);
+  for (const server of overrides) merged.set(server.id, server);
+  return [...merged.values()].sort((left, right) =>
+    left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+  );
+}
+
 export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const requestedToolSurface =
     rawOptions?.toolSurface === "native-aliases" ? "native-aliases" : "hashline";
@@ -757,17 +1140,131 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         error instanceof Error ? error.message : "Native alias initialization failed.";
     }
   }
+  let effectiveConfig: unknown;
+  let effectiveConfigCaptured = false;
+  let managerConfigurationFrozen = false;
+  let hostOutputLimits: HostOutputLimits = {
+    maxBytes: HOST_OUTPUT_DEFAULT_BYTES,
+    maxLines: HOST_OUTPUT_DEFAULT_LINES,
+  };
+  let lspManagerPromise: Promise<LspManager | undefined> | undefined;
+  let pluginDisposing = false;
+  let pluginDisposePromise: Promise<void> | undefined;
+  let activeCalls = 0;
+  let resolveActiveDrain: (() => void) | undefined;
+  let nextDocumentRevision = 0;
   const snapshots = new SnapshotStore(options);
   const pendingSnapshots = new Map<string, PendingSnapshot>();
   const sessions = new NativeAliasSessionRegistry();
 
   function assertConfigured(): void {
+    if (pluginDisposing) {
+      fail("CONFIG_INVALID", "Better Hashline is shutting down and no longer accepts tool calls.");
+    }
     if (initializationError) {
       fail(
         "CONFIG_INVALID",
         `${initializationError} File mutation and editable snapshot issuance are disabled. Do not bypass this state with shell commands or another mutation tool. Repair the configuration, restart, then run a fresh delivered hashline_read.`,
       );
     }
+  }
+
+  async function admitted<T>(operation: () => Promise<T>): Promise<T> {
+    assertConfigured();
+    activeCalls += 1;
+    try {
+      return await operation();
+    } finally {
+      activeCalls -= 1;
+      if (activeCalls === 0) {
+        resolveActiveDrain?.();
+        resolveActiveDrain = undefined;
+      }
+    }
+  }
+
+  async function waitForActiveCalls(): Promise<void> {
+    if (activeCalls === 0) return;
+    await new Promise<void>((resolveDrain) => {
+      resolveActiveDrain = resolveDrain;
+    });
+  }
+
+  function captureEffectiveConfig(config: unknown): void {
+    if (managerConfigurationFrozen || effectiveConfigCaptured) return;
+    effectiveConfig = config;
+    effectiveConfigCaptured = true;
+  }
+
+  async function fallbackEffectiveConfig(): Promise<unknown> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("OpenCode config fallback timed out.")),
+          CONFIG_FALLBACK_TIMEOUT_MS,
+        );
+      });
+      const response = await Promise.race([
+        input.client.config.get({ query: { directory: input.directory } }),
+        timeout,
+      ]);
+      return lspRecord(response)?.data;
+    } catch {
+      return undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function lspManagerFor(): Promise<LspManager | undefined> {
+    if (!lspManagerPromise) {
+      const lspOptions = options.lspDiagnostics;
+      lspManagerPromise =
+        lspOptions === false || aliasAvailabilityError
+          ? Promise.resolve(undefined)
+          : (async () => {
+              if (!effectiveConfigCaptured) {
+                const fallback = await fallbackEffectiveConfig();
+                captureEffectiveConfig(fallback);
+              }
+              const config = effectiveConfig;
+              managerConfigurationFrozen = true;
+              hostOutputLimits = hostOutputLimitsFromConfig(config);
+              const servers = mergedLspServers(importedLspServers(config), lspOptions.servers);
+              if (servers.length === 0) {
+                return undefined;
+              }
+              return createLspManager({
+                worktree: input.worktree === "/" ? input.directory : input.worktree,
+                config: { ...lspOptions, servers },
+              });
+            })().catch((error) => {
+              initializationError ??=
+                error instanceof Error
+                  ? `Managed LSP initialization failed: ${error.message}`
+                  : "Managed LSP initialization failed.";
+              assertConfigured();
+              return undefined;
+            });
+    }
+    return lspManagerPromise;
+  }
+
+  function allocateDocumentRevision(): number {
+    if (nextDocumentRevision >= Number.MAX_SAFE_INTEGER) {
+      fail("TOOL_SURFACE_UNAVAILABLE", "The managed-LSP document revision limit was reached.");
+    }
+    nextDocumentRevision += 1;
+    return nextDocumentRevision;
+  }
+
+  function currentDocumentRevision(_canonicalPath: string): number {
+    return allocateDocumentRevision();
+  }
+
+  function publishDocumentRevision(_canonicalPath: string): number {
+    return allocateDocumentRevision();
   }
 
   function assertAliasAvailable(): {
@@ -893,65 +1390,79 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         : "Read an existing UTF-8 text file for hashline_edit and prepare a pending exact snapshot. Wait for the returned result; only successfully delivered N| lines become editable. Output uses @hashline, N|, N!|, @more, and @eof; every header reports cumulative coverage from evidence issued when rendered plus the candidate page. coverage=complete becomes authoritative only if that exact page is delivered and attested; coverage=partial may later become complete after another page, while partial=true remains page-local. Prefixes are annotations, not file content. An N!| line is preview-only and cannot be issued by smaller pagination; raise maxOutputBytes and reread if it can fit, otherwise stop for manual restructuring or an explicit configuration change. Use native read for directories, media, PDFs, or inspection that will not be edited.",
     args: readArgumentShape,
     async execute(rawArgs, context) {
-      assertConfigured();
-      throwIfAborted(context.abort);
-      const parsed = readArguments.safeParse(rawArgs);
-      if (!parsed.success) invalidArguments("hashline_read", parsed.error);
-      const args = parsed.data;
-      const binding =
-        options.toolSurface === "native-aliases"
-          ? await resolveAliasSessionBinding(context.directory, context.worktree)
+      return admitted(async () => {
+        throwIfAborted(context.abort);
+        const parsed = readArguments.safeParse(rawArgs);
+        if (!parsed.success) invalidArguments("hashline_read", parsed.error);
+        const args = parsed.data;
+        const binding =
+          options.toolSurface === "native-aliases"
+            ? await resolveAliasSessionBinding(context.directory, context.worktree)
+            : undefined;
+        const candidate = binding
+          ? sessions.prepare(context.sessionID, binding.fingerprint, binding.canonicalWorktree)
           : undefined;
-      const candidate = binding
-        ? sessions.prepare(context.sessionID, binding.fingerprint, binding.canonicalWorktree)
-        : undefined;
-      const resolved = await resolveExistingFile(args.filePath, context.directory, context.abort);
-      await authorizeExternal(context, resolved);
-      await authorizeRead(context, resolved);
-      const stable = await readStableFile(resolved, options.maxFileBytes, false, context.abort);
-      const document = decodeTextDocument(stable.bytes, options.maxLines);
-      const shownPath = displayPath(
-        binding?.canonicalWorktree ??
-          (await canonicalDisplayRoot(context.worktree, context.directory, context.abort)),
-        resolved.canonicalPath,
-      );
-      const snapshot = snapshots.remember(
-        scopeFor(context),
-        resolved.canonicalPath,
-        document,
-        candidate?.authority,
-      );
-      const rendered = renderSnapshotPage({
-        snapshot,
-        offset: args.offset ?? 1,
-        limit: args.limit ?? 1000,
-        maxOutputBytes: options.maxOutputBytes,
-      });
-      const pendingId = randomUUID();
-      rememberPending(pendingId, {
-        kind: "read",
-        snapshotId: snapshot.id,
-        scope: snapshot.scope,
-        directory: context.directory,
-        page: rendered.page,
-        outputDigest: sha256(new TextEncoder().encode(rendered.output)),
-        createdAt: Date.now(),
-        candidate,
-      });
-      context.metadata({
-        title: shownPath,
-        metadata: { snapshotId: snapshot.id, nextOffset: rendered.nextOffset },
-      });
-      return {
-        title: shownPath,
-        output: rendered.output,
-        metadata: {
-          hashlinePending: pendingId,
+        const resolved = await resolveExistingFile(args.filePath, context.directory, context.abort);
+        await authorizeExternal(context, resolved);
+        await authorizeRead(context, resolved);
+        const stable = await readStableFile(resolved, options.maxFileBytes, false, context.abort);
+        const document = decodeTextDocument(stable.bytes, options.maxLines);
+        const revision = currentDocumentRevision(resolved.canonicalPath);
+        const manager = await lspManagerFor();
+        const shownPath = displayPath(
+          binding?.canonicalWorktree ??
+            (await canonicalDisplayRoot(context.worktree, context.directory, context.abort)),
+          resolved.canonicalPath,
+        );
+        const snapshot = snapshots.remember(
+          scopeFor(context),
+          resolved.canonicalPath,
+          document,
+          candidate?.authority,
+        );
+        const rendered = renderSnapshotPage({
+          snapshot,
+          offset: args.offset ?? 1,
+          limit: args.limit ?? 1000,
+          maxOutputBytes: options.maxOutputBytes,
+        });
+        const pendingId = randomUUID();
+        rememberPending(pendingId, {
+          kind: "read",
           snapshotId: snapshot.id,
-          nextOffset: rendered.nextOffset,
-          displayedLines: rendered.displayedLines,
-        },
-      };
+          scope: snapshot.scope,
+          directory: context.directory,
+          page: rendered.page,
+          outputDigest: sha256(new TextEncoder().encode(rendered.output)),
+          createdAt: Date.now(),
+          candidate,
+        });
+        context.metadata({
+          title: shownPath,
+          metadata: { snapshotId: snapshot.id, nextOffset: rendered.nextOffset },
+        });
+        if (manager) {
+          void manager
+            .warm({
+              path: resolved.requestedAbsolute,
+              canonicalPath: resolved.canonicalPath,
+              text: document.text,
+              revision,
+              signal: context.abort,
+            })
+            .catch(() => {});
+        }
+        return {
+          title: shownPath,
+          output: rendered.output,
+          metadata: {
+            hashlinePending: pendingId,
+            snapshotId: snapshot.id,
+            nextOffset: rendered.nextOffset,
+            displayedLines: rendered.displayedLines,
+          },
+        };
+      });
     },
   });
 
@@ -1073,13 +1584,14 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           fail("PATH_MISMATCH", "The snapshot belongs to a different canonical path.");
         }
         snapshots.assertComplete(snapshot, batch.kind);
+        const manager = await lspManagerFor();
         await authorizeExternal(context, resolved);
         if (destination) await authorizeExternal(context, destination);
 
         const lockPaths = destination
           ? [resolved.canonicalPath, destination.canonicalPath]
           : [resolved.canonicalPath];
-        return await withPathLocks(
+        const lockedResult = await withPathLocks(
           lockPaths,
           async () => {
             snapshots.assertPinned(snapshot);
@@ -1168,6 +1680,11 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               currentDestination ? [currentResolved, currentDestination] : [currentResolved],
               diff,
             );
+            let sourceRevision = currentDocumentRevision(resolved.canonicalPath);
+            let destinationRevision = currentDestination
+              ? currentDocumentRevision(currentDestination.canonicalPath)
+              : undefined;
+            let destinationFile: CommittedFile | undefined;
             if (batch.kind === "delete_file") {
               await publishDeletedFile({
                 resolved: currentResolved,
@@ -1178,12 +1695,13 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                   if (aliasBinding) {
                     assertAliasAuthorityCurrent(context.sessionID, aliasBinding);
                   }
+                  sourceRevision = publishDocumentRevision(resolved.canonicalPath);
                   snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
                 },
               });
             } else if (currentDestination) {
               try {
-                await publishMovedFile({
+                const moved = await publishMovedFile({
                   source: currentResolved,
                   destination: currentDestination,
                   expected: stable,
@@ -1193,6 +1711,8 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                     if (aliasBinding) {
                       assertAliasAuthorityCurrent(context.sessionID, aliasBinding);
                     }
+                    sourceRevision = publishDocumentRevision(resolved.canonicalPath);
+                    destinationRevision = publishDocumentRevision(currentDestination.canonicalPath);
                     snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
                     snapshots.invalidateSessionPath(
                       context.sessionID,
@@ -1200,6 +1720,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                     );
                   },
                 });
+                destinationFile = committedFile(moved);
               } catch (error) {
                 if (
                   aliasBinding &&
@@ -1217,14 +1738,121 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
                 ? `Deleted ${shownPath}.`
                 : `Moved ${shownPath} to ${destinationShown}.`;
             const output = editResultOutput(success, "none");
-            context.metadata({
+            if (!manager) {
+              context.metadata({
+                title,
+                metadata,
+              });
+              return { title, output, metadata };
+            }
+            return {
+              lspCompletion: true as const,
+              operation: batch.kind,
               title,
+              output,
               metadata,
-            });
-            return { title, output, metadata };
+              source: currentResolved,
+              destination: currentDestination,
+              sourceRevision,
+              destinationRevision,
+              destinationShown,
+              destinationFile,
+              text: snapshot.document.text,
+            };
           },
           context.abort,
         );
+        if (!manager || options.lspDiagnostics === false || !("lspCompletion" in lockedResult)) {
+          return lockedResult as ToolResult;
+        }
+        const completion = lockedResult as LspLifecycleCompletion;
+
+        let report: LspAppendixReport;
+        let drift = false;
+        if (completion.operation === "delete_file") {
+          try {
+            const lifecycle = await manager.notifyDelete({
+              canonicalPath: completion.source.canonicalPath,
+              revision: completion.sourceRevision,
+              signal: context.abort,
+            });
+            report = { diagnostics: [], warnings: normalizeLspWarnings(lifecycle) };
+          } catch {
+            report = failedLspReport("LIFECYCLE_FAILED");
+          }
+          drift = !(await publishedPathStillAbsent(completion.source, context.directory));
+        } else {
+          try {
+            const move = await manager.notifyMove({
+              sourceCanonicalPath: completion.source.canonicalPath,
+              sourceRevision: completion.sourceRevision,
+              destinationCanonicalPath: completion.destination?.canonicalPath ?? "",
+              destinationRevision: completion.destinationRevision ?? 0,
+              text: completion.text,
+              signal: context.abort,
+            });
+            report = normalizeLspReport(
+              move.destination,
+              completion.destinationShown ?? completion.title,
+            );
+            report.warnings.push(...normalizeLspWarnings(move.source));
+          } catch {
+            report = failedLspReport("LIFECYCLE_FAILED");
+          }
+          drift =
+            !completion.destination ||
+            !completion.destinationFile ||
+            !(await publishedMoveStillMatches(
+              completion.source,
+              completion.destination,
+              completion.destinationFile,
+              context.directory,
+              options.maxFileBytes,
+            ));
+        }
+        if (drift) {
+          report.diagnostics = [];
+          const quarantines = [
+            {
+              canonicalPath: completion.source.canonicalPath,
+              revision: completion.sourceRevision,
+            },
+            ...(completion.destination && completion.destinationRevision !== undefined
+              ? [
+                  {
+                    canonicalPath: completion.destination.canonicalPath,
+                    revision: completion.destinationRevision,
+                  },
+                ]
+              : []),
+          ];
+          for (const quarantine of quarantines) {
+            try {
+              const quarantined = await manager.quarantine({
+                ...quarantine,
+                signal: context.abort,
+              });
+              report.warnings.push(...normalizeLspWarnings(quarantined));
+            } catch {
+              report.warnings.push(...failedLspReport("LIFECYCLE_FAILED").warnings);
+            }
+          }
+        }
+        const output = buildLspOutput({
+          legacyOutput: completion.output,
+          report,
+          drift,
+          host: hostOutputLimits,
+          maxDiagnostics: options.lspDiagnostics.maxDiagnostics,
+          maxDiagnosticsBytes: options.lspDiagnostics.maxDiagnosticsBytes,
+          maxOutputBytes: options.maxOutputBytes,
+        });
+        context.metadata({ title: completion.title, metadata: completion.metadata });
+        return {
+          title: completion.title,
+          output,
+          metadata: completion.metadata,
+        };
       } finally {
         snapshots.release(snapshot);
       }
@@ -1254,9 +1882,9 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
       validateEditOperations(snapshot.document, operations);
       assertIssued(snapshots, snapshot, operations, rebase);
+      const manager = await lspManagerFor();
       await authorizeExternal(context, resolved);
-
-      return await withPathLock(
+      const lockedResult = await withPathLock(
         resolved.canonicalPath,
         async () => {
           snapshots.assertPinned(snapshot);
@@ -1308,6 +1936,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             }
           }
           await authorizeEdit(context, resolved, diff);
+          let revision = currentDocumentRevision(resolved.canonicalPath);
           const verified = await publishReplacement({
             resolved,
             expected: stable,
@@ -1318,6 +1947,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               if (aliasBinding) {
                 assertAliasAuthorityCurrent(context.sessionID, aliasBinding);
               }
+              revision = publishDocumentRevision(resolved.canonicalPath);
               snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
             },
           });
@@ -1325,71 +1955,240 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
           const successOutput = plan.rebased
             ? `${appliedOutput} Exact unique rebase occurred.`
             : appliedOutput;
-          let output = editResultOutput(successOutput, "none");
-          let resultMetadata = metadata;
+          if (!manager) {
+            let output = editResultOutput(successOutput, "none");
+            let resultMetadata = metadata;
+            if (requestReadback) {
+              const fallbackOutput = editResultOutput(successOutput, "unavailable");
+              try {
+                const document = decodeTextDocument(verified.bytes, options.maxLines);
+                const successor = snapshots.remember(
+                  scope,
+                  resolved.canonicalPath,
+                  document,
+                  aliasBinding?.authority,
+                );
+                const prefix = `${editResultOutput(successOutput, "attached")}\n`;
+                const rendered = renderSnapshotPage({
+                  snapshot: successor,
+                  offset: args.readbackOffset ?? firstNewFileHunkLine(diff),
+                  limit: args.readbackLimit ?? 1000,
+                  maxOutputBytes: options.maxOutputBytes - Buffer.byteLength(prefix, "utf8"),
+                });
+                output = `${prefix}${rendered.output}`;
+                const pendingId = randomUUID();
+                rememberPending(pendingId, {
+                  kind: "edit",
+                  snapshotId: successor.id,
+                  scope: successor.scope,
+                  directory: context.directory,
+                  page: rendered.page,
+                  outputDigest: sha256(new TextEncoder().encode(output)),
+                  createdAt: Date.now(),
+                  fallbackOutput,
+                  authority: aliasBinding?.authority,
+                  canonicalWorktree: aliasBinding?.canonicalWorktree,
+                  fingerprint: aliasBinding?.fingerprint,
+                });
+                resultMetadata = { ...metadata, hashlinePending: pendingId };
+              } catch {
+                output = fallbackOutput;
+              }
+            }
+            context.metadata({
+              title: shownPath,
+              metadata: toolName === "hashline_edit" ? { diff } : metadata,
+            });
+            return {
+              title: shownPath,
+              output,
+              metadata: resultMetadata,
+            };
+          }
+
+          let successor: Snapshot | undefined;
           if (requestReadback) {
-            const fallbackOutput = editResultOutput(successOutput, "unavailable");
             try {
-              const document = decodeTextDocument(verified.bytes, options.maxLines);
-              const successor = snapshots.remember(
+              successor = snapshots.remember(
                 scope,
                 resolved.canonicalPath,
-                document,
+                decodeTextDocument(verified.bytes, options.maxLines),
                 aliasBinding?.authority,
               );
-              const prefix = `${editResultOutput(successOutput, "attached")}\n`;
-              const rendered = renderSnapshotPage({
-                snapshot: successor,
-                offset: args.readbackOffset ?? firstNewFileHunkLine(diff),
-                limit: args.readbackLimit ?? 1000,
-                maxOutputBytes: options.maxOutputBytes - Buffer.byteLength(prefix, "utf8"),
-              });
-              output = `${prefix}${rendered.output}`;
-              const pendingId = randomUUID();
-              rememberPending(pendingId, {
-                kind: "edit",
-                snapshotId: successor.id,
-                scope: successor.scope,
-                directory: context.directory,
-                page: rendered.page,
-                outputDigest: sha256(new TextEncoder().encode(output)),
-                createdAt: Date.now(),
-                fallbackOutput,
-                authority: aliasBinding?.authority,
-                canonicalWorktree: aliasBinding?.canonicalWorktree,
-                fingerprint: aliasBinding?.fingerprint,
-              });
-              resultMetadata = { ...metadata, hashlinePending: pendingId };
             } catch {
-              output = fallbackOutput;
+              successor = undefined;
             }
           }
-          context.metadata({
-            title: shownPath,
-            metadata: toolName === "hashline_edit" ? { diff } : metadata,
-          });
           return {
+            lspCompletion: true as const,
             title: shownPath,
-            output,
-            metadata: resultMetadata,
+            metadata,
+            diff,
+            successOutput,
+            publishedText: plan.text,
+            publishedFile: committedFile(verified),
+            revision,
+            successor,
           };
         },
         context.abort,
       );
+      if (!manager || options.lspDiagnostics === false || !("lspCompletion" in lockedResult)) {
+        return lockedResult as ToolResult;
+      }
+      const completion = lockedResult as LspTextCompletion;
+
+      let report: LspAppendixReport;
+      try {
+        const checked = await manager.update({
+          canonicalPath: resolved.canonicalPath,
+          text: completion.publishedText,
+          revision: completion.revision,
+          kind: "change",
+          signal: context.abort,
+        });
+        report = normalizeLspReport(checked, shownPath);
+      } catch {
+        report = failedLspReport("CLIENT_UNAVAILABLE");
+      }
+      const drift = !(await publishedFileStillMatches(
+        resolved,
+        completion.publishedFile,
+        options.maxFileBytes,
+      ));
+      if (drift) {
+        if (completion.successor) snapshots.invalidate(completion.successor);
+        report.diagnostics = [];
+        try {
+          const quarantined = await manager.quarantine({
+            canonicalPath: resolved.canonicalPath,
+            revision: completion.revision,
+            signal: context.abort,
+          });
+          report.warnings.push(...normalizeLspWarnings(quarantined));
+        } catch {
+          report.warnings.push(...failedLspReport("LIFECYCLE_FAILED").warnings);
+        }
+      }
+
+      let output: string;
+      let resultMetadata = completion.metadata;
+      const outputInput = {
+        report,
+        drift,
+        host: hostOutputLimits,
+        maxDiagnostics: options.lspDiagnostics.maxDiagnostics,
+        maxDiagnosticsBytes: options.lspDiagnostics.maxDiagnosticsBytes,
+        maxOutputBytes: options.maxOutputBytes,
+      };
+      if (!requestReadback) {
+        output = buildLspOutput({
+          ...outputInput,
+          legacyOutput: editResultOutput(completion.successOutput, "none"),
+        });
+      } else {
+        const fallbackOutput = buildLspOutput({
+          ...outputInput,
+          legacyOutput: editResultOutput(completion.successOutput, "unavailable"),
+        });
+        output = fallbackOutput;
+        if (!drift && completion.successor) {
+          try {
+            const successor = snapshots.peek(scope, completion.successor.id);
+            const attachedBase = editResultOutput(completion.successOutput, "attached");
+            const legacyLimits = lspLegacyLimits({
+              ...outputInput,
+              maxOutputBytes: options.maxOutputBytes,
+            });
+            const prefix = `${attachedBase}\n`;
+            const remaining =
+              Math.min(options.maxOutputBytes, legacyLimits.maxBytes) -
+              Buffer.byteLength(prefix, "utf8");
+            if (remaining < 1) throw new Error("No output budget remains for edit readback.");
+            const requestedLimit = args.readbackLimit ?? 1000;
+            if (
+              Number.isFinite(legacyLimits.maxLines) &&
+              legacyLimits.maxLines < outputLineCount(attachedBase) + 2
+            ) {
+              throw new Error("No output line budget remains for edit readback.");
+            }
+            const availablePageLines = Number.isFinite(legacyLimits.maxLines)
+              ? Math.max(0, legacyLimits.maxLines - outputLineCount(attachedBase) - 2)
+              : requestedLimit;
+            let renderLimit = Math.min(requestedLimit, availablePageLines);
+            let rendered = renderSnapshotPage({
+              snapshot: successor,
+              offset: args.readbackOffset ?? firstNewFileHunkLine(completion.diff),
+              limit: renderLimit,
+              maxOutputBytes: remaining,
+            });
+            if (
+              Number.isFinite(legacyLimits.maxLines) &&
+              outputLineCount(attachedBase) + outputLineCount(rendered.output) >
+                legacyLimits.maxLines &&
+              renderLimit > 0
+            ) {
+              renderLimit -= 1;
+              rendered = renderSnapshotPage({
+                snapshot: successor,
+                offset: args.readbackOffset ?? firstNewFileHunkLine(completion.diff),
+                limit: renderLimit,
+                maxOutputBytes: remaining,
+              });
+            }
+            const legacyOutput = `${prefix}${rendered.output}`;
+            output = buildLspOutput({ ...outputInput, legacyOutput });
+            const pendingId = randomUUID();
+            rememberPending(pendingId, {
+              kind: "edit",
+              snapshotId: successor.id,
+              scope: successor.scope,
+              directory: context.directory,
+              page: rendered.page,
+              outputDigest: sha256(new TextEncoder().encode(output)),
+              createdAt: Date.now(),
+              fallbackOutput,
+              authority: aliasBinding?.authority,
+              canonicalWorktree: aliasBinding?.canonicalWorktree,
+              fingerprint: aliasBinding?.fingerprint,
+            });
+            resultMetadata = { ...completion.metadata, hashlinePending: pendingId };
+          } catch {
+            output = fallbackOutput;
+          }
+        }
+      }
+      context.metadata({
+        title: shownPath,
+        metadata: toolName === "hashline_edit" ? { diff: completion.diff } : completion.metadata,
+      });
+      return {
+        title: shownPath,
+        output,
+        metadata: resultMetadata,
+      };
     } finally {
       snapshots.release(snapshot);
     }
   }
 
-  const hashlineEdit = createSnapshotEditTool("hashline_edit", executeSnapshotBoundEdit);
+  async function executeAdmittedSnapshotBoundEdit(
+    toolName: SnapshotEditToolName,
+    rawArgs: unknown,
+    context: ToolContext,
+  ): Promise<ToolResult> {
+    return admitted(() => executeSnapshotBoundEdit(toolName, rawArgs, context));
+  }
+
+  const hashlineEdit = createSnapshotEditTool("hashline_edit", executeAdmittedSnapshotBoundEdit);
   const nativeEdit = createSnapshotEditTool(
     "edit",
-    executeSnapshotBoundEdit,
+    executeAdmittedSnapshotBoundEdit,
     nativeAliasEditDescription,
   );
   const nativeApplyPatch = createSnapshotEditTool(
     "apply_patch",
-    executeSnapshotBoundEdit,
+    executeAdmittedSnapshotBoundEdit,
     nativeAliasEditDescription,
   );
 
@@ -1400,121 +2199,195 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
         : "CREATE ONLY: create an absent UTF-8 file; never use it to overwrite or edit an existing target. For an existing target, use hashline_read followed by hashline_edit. Missing parents are reserved automatically, up to 64. Under the original locks and before approval, an exact verified parent prefix that appeared while this call waited may be reused; only the remaining parents are created. After this call creates a directory or a mkdir outcome becomes ambiguous, an error can leave the target and created directories present; inspect them before retrying.",
     args: writeArgumentShape,
     async execute(rawArgs, context) {
-      assertConfigured();
-      if (options.toolSurface === "native-aliases") assertAliasAvailable();
-      throwIfAborted(context.abort);
-      const parsed = writeArguments.safeParse(rawArgs);
-      if (!parsed.success) invalidArguments("hashline_write", parsed.error);
-      const args = parsed.data;
-      if (Buffer.byteLength(args.content, "utf8") > options.maxFileBytes) {
-        fail(
-          "UNSUPPORTED_FILE",
-          `The new file exceeds maxFileBytes=${options.maxFileBytes}. No publication occurred; reduce the content before retrying.`,
+      return admitted(async () => {
+        if (options.toolSurface === "native-aliases") assertAliasAvailable();
+        throwIfAborted(context.abort);
+        const parsed = writeArguments.safeParse(rawArgs);
+        if (!parsed.success) invalidArguments("hashline_write", parsed.error);
+        const args = parsed.data;
+        if (Buffer.byteLength(args.content, "utf8") > options.maxFileBytes) {
+          fail(
+            "UNSUPPORTED_FILE",
+            `The new file exceeds maxFileBytes=${options.maxFileBytes}. No publication occurred; reduce the content before retrying.`,
+          );
+        }
+        const bytes = encodeNewText(args.content);
+        decodeTextDocument(bytes, options.maxLines);
+        const reservationPlan = await resolveNewFileParentPlan(
+          args.filePath,
+          context.directory,
+          context.abort,
         );
-      }
-      const bytes = encodeNewText(args.content);
-      decodeTextDocument(bytes, options.maxLines);
-      const reservationPlan = await resolveNewFileParentPlan(
-        args.filePath,
-        context.directory,
-        context.abort,
-      );
-      const reservedEntries = [
-        {
-          requestedPath: reservationPlan.requestedPath,
-          requestedAbsolute: reservationPlan.requestedAbsolute,
-          canonicalPath: reservationPlan.canonicalPath,
-        },
-        ...reservationPlan.missingDirectories.map((entry) => ({
-          requestedPath: entry.requestedPath,
-          requestedAbsolute: entry.requestedPath,
-          canonicalPath: entry.canonicalPath,
-        })),
-      ];
-      for (const entry of reservedEntries) await authorizeExternal(context, entry);
-      const displayRoot = await canonicalDisplayRoot(
-        context.worktree,
-        context.directory,
-        context.abort,
-      );
-      const shownPath = displayPath(displayRoot, reservationPlan.canonicalPath);
-      const diff = unifiedDiff(shownPath, "", args.content);
+        const reservedEntries = [
+          {
+            requestedPath: reservationPlan.requestedPath,
+            requestedAbsolute: reservationPlan.requestedAbsolute,
+            canonicalPath: reservationPlan.canonicalPath,
+          },
+          ...reservationPlan.missingDirectories.map((entry) => ({
+            requestedPath: entry.requestedPath,
+            requestedAbsolute: entry.requestedPath,
+            canonicalPath: entry.canonicalPath,
+          })),
+        ];
+        const manager = await lspManagerFor();
+        for (const entry of reservedEntries) await authorizeExternal(context, entry);
+        const displayRoot = await canonicalDisplayRoot(
+          context.worktree,
+          context.directory,
+          context.abort,
+        );
+        const shownPath = displayPath(displayRoot, reservationPlan.canonicalPath);
+        const diff = unifiedDiff(shownPath, "", args.content);
 
-      return await withPathLocks(
-        reservationPlan.lockPaths,
-        async () => {
-          const plan = await stabilizeNewFileParentPlan(reservationPlan, context.abort);
-          const plannedEntries = [
-            {
-              requestedPath: plan.requestedPath,
-              requestedAbsolute: plan.requestedAbsolute,
-              canonicalPath: plan.canonicalPath,
-            },
-            ...plan.missingDirectories.map((entry) => ({
-              requestedPath: entry.requestedPath,
-              requestedAbsolute: entry.requestedPath,
-              canonicalPath: entry.canonicalPath,
-            })),
-          ];
-          const shownDirectories = plan.missingDirectories.map((entry) =>
-            displayPath(displayRoot, entry.canonicalPath),
-          );
-          const reusedDirectoryCount =
-            reservationPlan.missingDirectories.length - plan.missingDirectories.length;
-          const shownReusedDirectories = reservationPlan.missingDirectories
-            .slice(0, reusedDirectoryCount)
-            .map((entry) => displayPath(displayRoot, entry.canonicalPath));
-          await authorizeEdits(
-            context,
-            plannedEntries,
-            diff,
-            plan.missingDirectories.map((entry) => entry.canonicalPath),
-          );
-          try {
-            await publishNewFileWithParents({
-              plan,
-              bytes,
-              signal: context.abort,
-              consume: () => {
-                for (const mutationPath of reservationPlan.mutationPaths) {
-                  snapshots.invalidateSessionPath(context.sessionID, mutationPath);
-                }
+        const lockedResult = await withPathLocks(
+          reservationPlan.lockPaths,
+          async () => {
+            const plan = await stabilizeNewFileParentPlan(reservationPlan, context.abort);
+            const plannedEntries = [
+              {
+                requestedPath: plan.requestedPath,
+                requestedAbsolute: plan.requestedAbsolute,
+                canonicalPath: plan.canonicalPath,
               },
-            });
-          } catch (error) {
-            if (
-              options.toolSurface === "native-aliases" &&
-              error instanceof HashlineError &&
-              error.code === "PARTIAL_PUBLICATION"
-            ) {
-              sessions.unbind(context.sessionID);
+              ...plan.missingDirectories.map((entry) => ({
+                requestedPath: entry.requestedPath,
+                requestedAbsolute: entry.requestedPath,
+                canonicalPath: entry.canonicalPath,
+              })),
+            ];
+            const shownDirectories = plan.missingDirectories.map((entry) =>
+              displayPath(displayRoot, entry.canonicalPath),
+            );
+            const reusedDirectoryCount =
+              reservationPlan.missingDirectories.length - plan.missingDirectories.length;
+            const shownReusedDirectories = reservationPlan.missingDirectories
+              .slice(0, reusedDirectoryCount)
+              .map((entry) => displayPath(displayRoot, entry.canonicalPath));
+            await authorizeEdits(
+              context,
+              plannedEntries,
+              diff,
+              plan.missingDirectories.map((entry) => entry.canonicalPath),
+            );
+            let revision = currentDocumentRevision(plan.canonicalPath);
+            let verified: StableFile;
+            try {
+              verified = await publishNewFileWithParents({
+                plan,
+                bytes,
+                signal: context.abort,
+                consume: () => {
+                  revision = publishDocumentRevision(plan.canonicalPath);
+                  for (const mutationPath of reservationPlan.mutationPaths) {
+                    snapshots.invalidateSessionPath(context.sessionID, mutationPath);
+                  }
+                },
+              });
+            } catch (error) {
+              if (
+                options.toolSurface === "native-aliases" &&
+                error instanceof HashlineError &&
+                error.code === "PARTIAL_PUBLICATION"
+              ) {
+                sessions.unbind(context.sessionID);
+              }
+              throw error;
             }
-            throw error;
+            const metadata = {
+              diff,
+              createdDirectories: shownDirectories,
+              ...(shownReusedDirectories.length > 0
+                ? { reusedDirectories: shownReusedDirectories }
+                : {}),
+            };
+            const creationNotice =
+              shownDirectories.length === 0
+                ? "Created the file."
+                : `Created ${shownDirectories.length} parent ${shownDirectories.length === 1 ? "directory" : "directories"} and the file.`;
+            const reuseNotice =
+              shownReusedDirectories.length === 0
+                ? ""
+                : ` Reused ${shownReusedDirectories.length} verified parent ${shownReusedDirectories.length === 1 ? "directory" : "directories"} that appeared while this call was waiting.`;
+            const output = `${creationNotice}${reuseNotice} Use hashline_read before editing it.`;
+            const resultMetadata = { ...metadata, created: true };
+            if (!manager) {
+              context.metadata({ title: shownPath, metadata });
+              return {
+                title: shownPath,
+                output,
+                metadata: resultMetadata,
+              };
+            }
+            return {
+              lspCompletion: true as const,
+              title: shownPath,
+              output,
+              metadata,
+              resultMetadata,
+              resolved: {
+                requestedPath: plan.requestedPath,
+                requestedAbsolute: plan.requestedAbsolute,
+                canonicalPath: plan.canonicalPath,
+              },
+              publishedFile: committedFile(verified),
+              revision,
+            };
+          },
+          context.abort,
+        );
+        if (!manager || options.lspDiagnostics === false || !("lspCompletion" in lockedResult)) {
+          return lockedResult as ToolResult;
+        }
+        const completion = lockedResult as LspWriteCompletion;
+
+        let report: LspAppendixReport;
+        try {
+          const checked = await manager.check({
+            canonicalPath: completion.resolved.canonicalPath,
+            text: args.content,
+            revision: completion.revision,
+            kind: "create",
+            signal: context.abort,
+          });
+          report = normalizeLspReport(checked, shownPath);
+        } catch {
+          report = failedLspReport("CLIENT_UNAVAILABLE");
+        }
+        const drift = !(await publishedFileStillMatches(
+          completion.resolved,
+          completion.publishedFile,
+          options.maxFileBytes,
+        ));
+        if (drift) {
+          report.diagnostics = [];
+          try {
+            const quarantined = await manager.quarantine({
+              canonicalPath: completion.resolved.canonicalPath,
+              revision: completion.revision,
+              signal: context.abort,
+            });
+            report.warnings.push(...normalizeLspWarnings(quarantined));
+          } catch {
+            report.warnings.push(...failedLspReport("LIFECYCLE_FAILED").warnings);
           }
-          const metadata = {
-            diff,
-            createdDirectories: shownDirectories,
-            ...(shownReusedDirectories.length > 0
-              ? { reusedDirectories: shownReusedDirectories }
-              : {}),
-          };
-          const creationNotice =
-            shownDirectories.length === 0
-              ? "Created the file."
-              : `Created ${shownDirectories.length} parent ${shownDirectories.length === 1 ? "directory" : "directories"} and the file.`;
-          const reuseNotice =
-            shownReusedDirectories.length === 0
-              ? ""
-              : ` Reused ${shownReusedDirectories.length} verified parent ${shownReusedDirectories.length === 1 ? "directory" : "directories"} that appeared while this call was waiting.`;
-          context.metadata({ title: shownPath, metadata });
-          return {
-            title: shownPath,
-            output: `${creationNotice}${reuseNotice} Use hashline_read before editing it.`,
-            metadata: { ...metadata, created: true },
-          };
-        },
-        context.abort,
-      );
+        }
+        const output = buildLspOutput({
+          legacyOutput: completion.output,
+          report,
+          drift,
+          host: hostOutputLimits,
+          maxDiagnostics: options.lspDiagnostics.maxDiagnostics,
+          maxDiagnosticsBytes: options.lspDiagnostics.maxDiagnosticsBytes,
+          maxOutputBytes: options.maxOutputBytes,
+        });
+        context.metadata({ title: shownPath, metadata: completion.metadata });
+        return {
+          title: shownPath,
+          output,
+          metadata: completion.resultMetadata,
+        };
+      });
     },
   });
 
@@ -1553,6 +2426,13 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
 
   return {
     tool: toolRegistry,
+    async config(config) {
+      if (pluginDisposing) return;
+      if (!managerConfigurationFrozen && !effectiveConfigCaptured) {
+        captureEffectiveConfig(config);
+        hostOutputLimits = hostOutputLimitsFromConfig(config);
+      }
+    },
     async "chat.message"(_input, output) {
       if (!options.enforce) return;
       output.message.tools ??= {};
@@ -1618,144 +2498,158 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             ? "edit"
             : undefined;
       const pendingId = output.metadata?.hashlinePending;
-      if (typeof pendingId !== "string") {
-        if (expectedPendingKind === undefined) return;
+      if (typeof pendingId !== "string" && expectedPendingKind === undefined) return;
+      if (pluginDisposing) {
         output.metadata = withoutPendingMetadata(output.metadata);
-        if (expectedPendingKind === "read") {
+        if (toolKind === "read") {
           output.metadata = withoutPendingSnapshotMetadata(output.metadata);
           output.output =
-            "SNAPSHOT_REQUIRED: OpenCode did not preserve the snapshot marker. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
-        } else {
-          unavailableEditReadback(output);
-        }
-        return;
-      }
-
-      const deliveredSnapshotId = output.metadata?.snapshotId;
-      const pending = pendingSnapshots.get(pendingId);
-      pendingSnapshots.delete(pendingId);
-      output.metadata = withoutPendingMetadata(output.metadata);
-      if (!pending) {
-        if (expectedPendingKind === "read") {
-          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
-          output.output =
-            "SNAPSHOT_REQUIRED: The delivered read did not match a live pending snapshot. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+            "SNAPSHOT_REQUIRED: Better Hashline was disposed before delivery could be attested. Restart and rerun hashline_read; old snapshot IDs cannot be revived.";
         } else if (toolKind === "edit") {
           unavailableEditReadback(output);
-        } else {
-          protocolKindMismatch(output);
         }
         return;
       }
-      if (toolKind !== pending.kind) {
-        protocolKindMismatch(output);
-        return;
-      }
-      if (
-        pending.scope.sessionId !== hookInput.sessionID ||
-        (pending.kind === "read" && deliveredSnapshotId !== pending.snapshotId)
-      ) {
-        if (pending.kind === "read") {
-          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
-          output.output =
-            "SNAPSHOT_REQUIRED: The delivered read did not match its exact pending session and snapshot. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
-        } else {
-          unavailableEditReadback(output, pending.fallbackOutput);
-        }
-        return;
-      }
-      if (output.metadata.truncated === true) {
-        if (pending.kind === "read") {
-          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
-          output.output =
-            "SNAPSHOT_REQUIRED: OpenCode truncated this result, so no editable lines were issued. Use a smaller limit and rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
-        } else {
-          unavailableEditReadback(output, pending.fallbackOutput);
-        }
-        return;
-      }
-      if (sha256(new TextEncoder().encode(output.output)) !== pending.outputDigest) {
-        if (pending.kind === "read") {
-          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
-          output.output =
-            "SNAPSHOT_REQUIRED: Another hook changed this result, so no editable lines were issued. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
-        } else {
-          unavailableEditReadback(output, pending.fallbackOutput);
-        }
-        return;
-      }
-
-      try {
-        if (pending.kind === "read" && pending.candidate) {
-          const binding = await resolveAliasSessionBinding(
-            pending.directory,
-            pending.scope.worktree,
-          );
-          if (
-            binding.fingerprint !== pending.candidate.fingerprint ||
-            binding.canonicalWorktree !== pending.candidate.canonicalWorktree ||
-            !sessions.isCandidateCurrent(pending.candidate)
-          ) {
-            requireFreshAliasRead(
-              "The delivered read no longer matches its exact prepared native-alias epoch and canonical worktree.",
-            );
-          }
-          const snapshot = snapshots.peek(pending.scope, pending.snapshotId);
-          snapshots.assertAuthority(snapshot, pending.candidate.authority);
-          if (!sessions.isCandidateCurrent(pending.candidate)) {
-            requireFreshAliasRead(
-              "The prepared native-alias read epoch retired before delivery could be committed.",
-            );
-          }
-          snapshots.issue(snapshot, pending.page);
-          if (!sessions.commit(pending.candidate)) {
-            throw new Error("Native alias candidate changed during synchronous delivery commit.");
+      return admitted(async () => {
+        if (typeof pendingId !== "string") {
+          if (expectedPendingKind === undefined) return;
+          output.metadata = withoutPendingMetadata(output.metadata);
+          if (expectedPendingKind === "read") {
+            output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+            output.output =
+              "SNAPSHOT_REQUIRED: OpenCode did not preserve the snapshot marker. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+          } else {
+            unavailableEditReadback(output);
           }
           return;
         }
 
-        const snapshot = snapshots.peek(pending.scope, pending.snapshotId);
-        if (pending.kind === "edit" && pending.authority) {
-          if (
-            !pending.fingerprint ||
-            !pending.canonicalWorktree ||
-            !sessions.isActive(
-              hookInput.sessionID,
-              pending.fingerprint,
-              pending.canonicalWorktree,
-              pending.authority,
-            )
-          ) {
-            requireFreshAliasRead(
-              "The native-alias epoch that produced this edit readback is no longer active.",
-            );
+        const deliveredSnapshotId = output.metadata?.snapshotId;
+        const pending = pendingSnapshots.get(pendingId);
+        pendingSnapshots.delete(pendingId);
+        output.metadata = withoutPendingMetadata(output.metadata);
+        if (!pending) {
+          if (expectedPendingKind === "read") {
+            output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+            output.output =
+              "SNAPSHOT_REQUIRED: The delivered read did not match a live pending snapshot. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+          } else if (toolKind === "edit") {
+            unavailableEditReadback(output);
+          } else {
+            protocolKindMismatch(output);
           }
-          snapshots.assertAuthority(snapshot, pending.authority);
-          if (
-            !sessions.isActive(
-              hookInput.sessionID,
-              pending.fingerprint,
-              pending.canonicalWorktree,
-              pending.authority,
-            )
-          ) {
-            requireFreshAliasRead(
-              "The native-alias epoch that produced this edit readback retired before delivery.",
+          return;
+        }
+        if (toolKind !== pending.kind) {
+          protocolKindMismatch(output);
+          return;
+        }
+        if (
+          pending.scope.sessionId !== hookInput.sessionID ||
+          (pending.kind === "read" && deliveredSnapshotId !== pending.snapshotId)
+        ) {
+          if (pending.kind === "read") {
+            output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+            output.output =
+              "SNAPSHOT_REQUIRED: The delivered read did not match its exact pending session and snapshot. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+          } else {
+            unavailableEditReadback(output, pending.fallbackOutput);
+          }
+          return;
+        }
+        if (output.metadata.truncated === true) {
+          if (pending.kind === "read") {
+            output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+            output.output =
+              "SNAPSHOT_REQUIRED: OpenCode truncated this result, so no editable lines were issued. Use a smaller limit and rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+          } else {
+            unavailableEditReadback(output, pending.fallbackOutput);
+          }
+          return;
+        }
+        if (sha256(new TextEncoder().encode(output.output)) !== pending.outputDigest) {
+          if (pending.kind === "read") {
+            output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+            output.output =
+              "SNAPSHOT_REQUIRED: Another hook changed this result, so no editable lines were issued. Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+          } else {
+            unavailableEditReadback(output, pending.fallbackOutput);
+          }
+          return;
+        }
+
+        try {
+          if (pending.kind === "read" && pending.candidate) {
+            const binding = await resolveAliasSessionBinding(
+              pending.directory,
+              pending.scope.worktree,
             );
+            if (
+              binding.fingerprint !== pending.candidate.fingerprint ||
+              binding.canonicalWorktree !== pending.candidate.canonicalWorktree ||
+              !sessions.isCandidateCurrent(pending.candidate)
+            ) {
+              requireFreshAliasRead(
+                "The delivered read no longer matches its exact prepared native-alias epoch and canonical worktree.",
+              );
+            }
+            const snapshot = snapshots.peek(pending.scope, pending.snapshotId);
+            snapshots.assertAuthority(snapshot, pending.candidate.authority);
+            if (!sessions.isCandidateCurrent(pending.candidate)) {
+              requireFreshAliasRead(
+                "The prepared native-alias read epoch retired before delivery could be committed.",
+              );
+            }
+            snapshots.issue(snapshot, pending.page);
+            if (!sessions.commit(pending.candidate)) {
+              throw new Error("Native alias candidate changed during synchronous delivery commit.");
+            }
+            return;
+          }
+
+          const snapshot = snapshots.peek(pending.scope, pending.snapshotId);
+          if (pending.kind === "edit" && pending.authority) {
+            if (
+              !pending.fingerprint ||
+              !pending.canonicalWorktree ||
+              !sessions.isActive(
+                hookInput.sessionID,
+                pending.fingerprint,
+                pending.canonicalWorktree,
+                pending.authority,
+              )
+            ) {
+              requireFreshAliasRead(
+                "The native-alias epoch that produced this edit readback is no longer active.",
+              );
+            }
+            snapshots.assertAuthority(snapshot, pending.authority);
+            if (
+              !sessions.isActive(
+                hookInput.sessionID,
+                pending.fingerprint,
+                pending.canonicalWorktree,
+                pending.authority,
+              )
+            ) {
+              requireFreshAliasRead(
+                "The native-alias epoch that produced this edit readback retired before delivery.",
+              );
+            }
+          }
+          snapshots.issue(snapshot, pending.page);
+        } catch (error) {
+          if (pending.kind === "read") {
+            output.metadata = withoutPendingSnapshotMetadata(output.metadata);
+            output.output =
+              error instanceof HashlineError
+                ? error.message
+                : "SNAPSHOT_REQUIRED: Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
+          } else {
+            unavailableEditReadback(output, pending.fallbackOutput);
           }
         }
-        snapshots.issue(snapshot, pending.page);
-      } catch (error) {
-        if (pending.kind === "read") {
-          output.metadata = withoutPendingSnapshotMetadata(output.metadata);
-          output.output =
-            error instanceof HashlineError
-              ? error.message
-              : "SNAPSHOT_REQUIRED: Rerun hashline_read in this same session; old snapshot IDs cannot be revived.";
-        } else {
-          unavailableEditReadback(output, pending.fallbackOutput);
-        }
-      }
+      });
     },
     async "experimental.chat.system.transform"(hookInput, output) {
       let guidance: string;
@@ -1793,9 +2687,24 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
       }
     },
     async dispose() {
-      pendingSnapshots.clear();
-      snapshots.clear();
-      sessions.clear();
+      if (!pluginDisposePromise) {
+        pluginDisposing = true;
+        pluginDisposePromise = (async () => {
+          try {
+            await waitForActiveCalls();
+            const manager = await lspManagerPromise?.catch(() => undefined);
+            await manager?.dispose();
+          } catch {
+            // Disposal is advisory, but retained provenance must always be cleared.
+          } finally {
+            pendingSnapshots.clear();
+            snapshots.clear();
+            sessions.clear();
+            nextDocumentRevision = 0;
+          }
+        })();
+      }
+      await pluginDisposePromise;
     },
   };
 };

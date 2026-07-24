@@ -14,9 +14,9 @@ Better Hashline separates mechanical protocol evidence from model-quality eviden
 
 ## Retained Deterministic Run
 
-Preceding retained raw result: [`benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json`](../benchmarks/results/2026-07-23-operation-aware-rebase-default-windows-x64.json)
+Preceding retained schema-v10 result: [`benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json)
 
-Current write-once retained schema-v10 result: [`benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json)
+Current write-once retained schema-v11 result: [`benchmarks/results/2026-07-25-managed-lsp-diagnostics-windows-x64.json`](../benchmarks/results/2026-07-25-managed-lsp-diagnostics-windows-x64.json)
 
 The 15-scenario and 21-scenario results remain available as immutable historical evidence in
 [`2026-07-18-windows-x64.json`](../benchmarks/results/2026-07-18-windows-x64.json) and
@@ -32,11 +32,12 @@ schema-v6 record adds model-free lifecycle operation-schema and call-wire fixtur
 schema-v7 record adds the composed-move case and edit/write/readback/parent-create wire fixtures.
 The schema-v8 record keeps those safety cases and measures the simpler inferred defaults. The
 schema-v9 record adds an omitted/default adapter using the incremental branch of the shared runtime
-policy resolver. The current schema-v10 runner keeps those classifications and adds wire fixtures
-for cumulative coverage headers and explicit `replace_file` readback. Strict-only defaults are
-covered by runtime tests rather than this corpus. Schema-v5 through schema-v9 and pilot-v7 remain
-immutable. All are mechanical textual fixture evidence, not semantic, paid, or model-quality
-evidence.
+policy resolver. The historical schema-v10 record keeps those classifications and adds wire fixtures
+for cumulative coverage headers and explicit `replace_file` readback. The current schema-v11 runner
+preserves those classifications and prior fixtures, then adds production-composed managed LSP
+output/headroom evidence. Strict-only defaults are covered by runtime tests rather than this corpus.
+Schema-v5 through schema-v10 and pilot-v7 remain immutable. All are mechanical textual or
+output-composition fixture evidence, not semantic, paid, or model-quality evidence.
 
 Environment: Windows x64, Bun 1.3.14, AMD64 Family 25 Model 97. Five microbenchmark warmups; 100 measured runs below 10,000 lines and 30 runs at or above it.
 
@@ -108,12 +109,22 @@ publication safety. Historical records and the closed pilot-v7 scope remain immu
 
 ## Schema-v10 Retained Result
 
-The current schema-v10 result preserves the schema-v9 29-case classifications and adds deterministic
-wire fixtures for mandatory cumulative `coverage` headers and explicitly requested `replace_file`
-readback. Its write-once path is
+The historical schema-v10 result preserves the schema-v9 29-case classifications and adds
+deterministic wire fixtures for mandatory cumulative `coverage` headers and explicitly requested
+`replace_file` readback. Its write-once path is
 [`2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json).
-This is mechanical textual fixture evidence. Strict-only defaults remain runtime-test evidence, not
+This remains mechanical textual fixture evidence. Strict-only defaults are runtime-test evidence, not
 corpus evidence; no semantic, paid, or model-quality claim is made.
+
+## Schema-v11 Retained Result
+
+The current schema-v11 result preserves schema v10's unchanged 29-case classifications and prior
+wire fixtures, then adds seven deterministic production-composed managed LSP output/headroom
+scenarios through the shared `lspLegacyLimits` and `buildLspOutput` paths: clean byte-identical
+output, Error diagnostics, byte and line headroom, mandatory manager and drift warnings, and an
+insufficient host envelope. No language server or model is invoked. Its write-once path is
+[`2026-07-25-managed-lsp-diagnostics-windows-x64.json`](../benchmarks/results/2026-07-25-managed-lsp-diagnostics-windows-x64.json).
+This is mechanical output-composition fixture evidence, not a semantic, paid, or model-quality claim.
 
 ## Static Size
 
@@ -244,9 +255,17 @@ estimate. Exact normalized provider-contract sizes and hashes are recorded in th
 ## Schema-v10 Retained Wire Evidence
 
 Schema v10 adds exact fixtures for the mandatory cumulative-coverage header and explicit
-`replace_file` readback. Their final byte counts, hashes, and deltas are retained in the write-once
-JSON and are not inferred from schema v9. All retained schema-v5 through schema-v9 wire values above
-remain immutable.
+`replace_file` readback. Their final byte counts, hashes, and deltas are retained in its historical
+write-once JSON and are not inferred from schema v9. All retained schema-v5 through schema-v9 wire
+values above remain immutable.
+
+## Schema-v11 Retained Managed LSP Output Evidence
+
+Schema v11 retains all prior wire fixtures and adds exact UTF-8 bytes, line counts, and output
+digests from production `lspLegacyLimits` and `buildLspOutput` composition. The seven fixtures cover
+clean output, Error diagnostics, byte/line host headroom, mandatory manager/drift warning priority,
+and an insufficient host envelope. They invoke neither a language server nor a model; schema-v10 and
+all earlier retained evidence remain immutable.
 
 ## Core Timings
 
@@ -261,16 +280,17 @@ bun run bench
 bun run bench --output=benchmarks/results/local/my-run.json
 ```
 
-The schema-v10 runner prints summary tables and optionally writes the complete corpus,
+The schema-v11 runner prints summary tables and optionally writes the complete corpus,
 classifications, environment, static/rendering sizes, edit/write raw-schema fixtures, cumulative
 coverage and explicit `replace_file` readback fixtures, lifecycle and simplified-default call
-fixtures, transfer-call evidence, corridor-read evidence, and microbenchmark distributions.
+fixtures, transfer-call evidence, corridor-read evidence, production-composed managed LSP
+output/headroom fixtures, and microbenchmark distributions.
 
 Result paths are write-once by default. Use `--force` only when deliberately regenerating an
 unpublished checked result from its final source revision. Never overwrite retained evidence.
-Schema v10 uses the dated
-`benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json` path; schema-v5 through
-schema-v9 evidence remains immutable.
+Schema v11 uses the dated
+`benchmarks/results/2026-07-25-managed-lsp-diagnostics-windows-x64.json` path; schema-v5 through
+schema-v10 evidence remains immutable.
 
 ## Model Harness
 

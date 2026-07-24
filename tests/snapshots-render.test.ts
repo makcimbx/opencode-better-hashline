@@ -314,6 +314,21 @@ describe("snapshot store", () => {
     ).not.toThrow();
   });
 
+  test("invalidates only the targeted snapshot object", () => {
+    const store = new SnapshotStore(options());
+    const canonicalPath = "/canonical/worktree/file.ts";
+    const older = store.remember(scope, canonicalPath, document("older"));
+    const pinned = store.pin(scope, older.id);
+    store.invalidatePath(scope, canonicalPath);
+    const newer = store.remember(scope, canonicalPath, document("newer"));
+
+    store.invalidate(pinned);
+
+    expect(() => store.peek(scope, older.id)).toThrow("SNAPSHOT_UNKNOWN:");
+    expect(() => store.peek(scope, newer.id)).not.toThrow();
+    store.release(pinned);
+  });
+
   test("keeps scopes isolated and expires idle snapshots", () => {
     let now = 0;
     const store = new SnapshotStore(options({ snapshotTtlMs: 1000 }), () => now);

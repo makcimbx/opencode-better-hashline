@@ -5,6 +5,12 @@ import {
   type RebaseMode,
   resolveTextRebaseMode,
 } from "../src/edits.js";
+import {
+  buildLspOutput,
+  type LspAppendixReport,
+  lspLegacyLimits,
+  outputLineCount,
+} from "../src/lsp-output.js";
 import { renderSnapshotPage } from "../src/render.js";
 import { SnapshotStore, sha256 } from "../src/snapshots.js";
 import { decodeTextDocument, type TextDocument } from "../src/text.js";
@@ -913,6 +919,144 @@ export function runMoveCorridorWireSuite() {
   };
 
   return [measure("near move corridor", 100, 119), measure("far move corridor", 1, lineCount)];
+}
+
+export function runManagedLspOutputWireSuite() {
+  const error = (relativePath: string, message: string) => ({
+    relativePath,
+    startLine: 1,
+    startCharacter: 2,
+    severity: 1,
+    serverId: "fixture-lsp",
+    code: "E_FIXTURE",
+    message,
+  });
+  const readback = [
+    "Applied 1 operation.",
+    "@hashline-edit previous=consumed successor=attached",
+    "@hashline snapshot=s_AAAAAAAAAAAAAAAAAAAAAA sha256=0123456789ab lines=3 coverage=complete",
+    "1|const alpha = 1;",
+    "2|const beta = 2;",
+    "3|const gamma = 3;",
+    "@eof",
+  ].join("\n");
+  const paddedReadback = (targetBytes: number): string => {
+    const prefix = [
+      "Applied 1 operation.",
+      "@hashline-edit previous=consumed successor=attached",
+      "@hashline snapshot=s_AAAAAAAAAAAAAAAAAAAAAA sha256=0123456789ab lines=1 coverage=complete",
+      "1|",
+    ].join("\n");
+    const suffix = "\n@eof";
+    const padding = targetBytes - encoder.encode(`${prefix}${suffix}`).byteLength;
+    if (padding < 0) throw new Error("Managed LSP fixture target is too small.");
+    const output = `${prefix}${"x".repeat(padding)}${suffix}`;
+    if (encoder.encode(output).byteLength !== targetBytes) {
+      throw new Error("Managed LSP fixture did not reach its exact UTF-8 target.");
+    }
+    return output;
+  };
+  const emptyReport = (): LspAppendixReport => ({ diagnostics: [], warnings: [] });
+  const row = (input: {
+    scenario: string;
+    legacyOutput: string;
+    report: LspAppendixReport;
+    drift?: boolean;
+    host?: { maxBytes: number; maxLines: number };
+  }) => {
+    const drift = input.drift ?? false;
+    const host = input.host ?? { maxBytes: 4096, maxLines: 100 };
+    const composition = {
+      report: input.report,
+      drift,
+      host,
+      maxDiagnostics: 20,
+      maxDiagnosticsBytes: 1024,
+      maxOutputBytes: 1024,
+    };
+    const legacyLimits = lspLegacyLimits(composition);
+    const output = buildLspOutput({ ...composition, legacyOutput: input.legacyOutput });
+    const bytes = encoder.encode(output);
+    return {
+      scenario: input.scenario,
+      hostMaxBytes: host.maxBytes,
+      hostMaxLines: host.maxLines,
+      legacyLimitBytes: legacyLimits.maxBytes,
+      legacyLimitLines: Number.isFinite(legacyLimits.maxLines) ? legacyLimits.maxLines : null,
+      legacyUtf8Bytes: encoder.encode(input.legacyOutput).byteLength,
+      outputUtf8Bytes: bytes.byteLength,
+      outputLines: outputLineCount(output),
+      outputSha256: sha256(bytes),
+      legacyPreserved:
+        output === input.legacyOutput || output.startsWith(`${input.legacyOutput}\n`),
+      diagnosticsPresent: output.includes("@better-hashline-lsp advisory=true"),
+      diagnosticsTruncated: output.includes("truncated=true"),
+      warningPresent: output.includes("LSP_DIAGNOSTICS_UNAVAILABLE:"),
+    };
+  };
+  const byteBoundedDiagnostics = [
+    error("src/a.ts", `First ${"a".repeat(120)}`),
+    error("src/b.ts", `Second ${"b".repeat(120)}`),
+    error("src/c.ts", `Third ${"c".repeat(120)}`),
+  ];
+
+  return [
+    row({
+      scenario: "clean byte-identical output",
+      legacyOutput: readback,
+      report: emptyReport(),
+    }),
+    row({
+      scenario: "error with unchanged legacy readback",
+      legacyOutput: readback,
+      report: {
+        diagnostics: [error("src/example.ts", "Deterministic type error.")],
+        warnings: [],
+      },
+    }),
+    row({
+      scenario: "byte-headroom truncation",
+      legacyOutput: paddedReadback(1024),
+      report: { diagnostics: byteBoundedDiagnostics, warnings: [] },
+      host: { maxBytes: 1400, maxLines: 100 },
+    }),
+    row({
+      scenario: "line-headroom truncation",
+      legacyOutput: readback,
+      report: {
+        diagnostics: [error("src/example.ts", "This diagnostic loses to legacy readback.")],
+        warnings: [],
+      },
+      host: { maxBytes: 4096, maxLines: 8 },
+    }),
+    row({
+      scenario: "mandatory warning",
+      legacyOutput: paddedReadback(1024),
+      report: {
+        diagnostics: [],
+        warnings: [{ code: "DIAGNOSTICS_TIMEOUT", serverId: "fixture-lsp" }],
+      },
+      host: { maxBytes: 900, maxLines: 100 },
+    }),
+    row({
+      scenario: "drift warning",
+      legacyOutput: readback,
+      report: {
+        diagnostics: [error("src/example.ts", "Discarded after post-publication drift.")],
+        warnings: [],
+      },
+      drift: true,
+    }),
+    row({
+      scenario: "insufficient host budget",
+      legacyOutput: readback,
+      report: {
+        diagnostics: [],
+        warnings: [{ code: "CLIENT_UNAVAILABLE", serverId: "fixture-lsp" }],
+      },
+      host: { maxBytes: 128, maxLines: 1 },
+    }),
+  ];
 }
 
 export function runMicroSuite() {
