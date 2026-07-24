@@ -4,6 +4,8 @@ import { HashlineError } from "../src/errors.js";
 import { decodeTextDocument, type TextDocument } from "../src/text.js";
 
 const encoder = new TextEncoder();
+const CONFLICT_RECOVERY =
+  "No mutation occurred and the snapshot remains retained. Correct the conflicting operation coordinates, then retry with that snapshot.";
 
 function document(text: string, bom = false): TextDocument {
   const body = encoder.encode(text);
@@ -476,16 +478,14 @@ describe("range transfers", () => {
           { op: "move_range", startLine: 2, endLine: 2, afterLine: 1 },
           { op: "replace", startLine: 2, endLine: 2, lines: ["B"] },
         ],
-        expected:
-          "OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (move_range) and operations[1] (replace).",
+        expected: `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (move_range) and operations[1] (replace). ${CONFLICT_RECOVERY}`,
       },
       {
         operations: [
           { op: "replace", startLine: 2, endLine: 2, lines: ["B"] },
           { op: "move_range", startLine: 2, endLine: 2, afterLine: 1 },
         ],
-        expected:
-          "OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (move_range).",
+        expected: `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (replace) and operations[1] (move_range). ${CONFLICT_RECOVERY}`,
       },
     ];
     for (const { operations, expected } of conflicts) {
@@ -533,7 +533,7 @@ describe("range transfers", () => {
         const right = operations[1];
         if (!left || !right) throw new Error("Expected two conflicting operations.");
         expect(failureMessage(() => plan(text, text, operations))).toBe(
-          `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (${left.op}) and operations[1] (${right.op}).`,
+          `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[0] (${left.op}) and operations[1] (${right.op}). ${CONFLICT_RECOVERY}`,
         );
       }
     }
@@ -553,7 +553,7 @@ describe("range transfers", () => {
         throw new Error("Expected two conflicting replacements.");
       }
       expect(failureMessage(() => plan(text, text, operations))).toBe(
-        `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[${leftIndex}] (replace) and operations[${rightIndex}] (replace).`,
+        `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[${leftIndex}] (replace) and operations[${rightIndex}] (replace). ${CONFLICT_RECOVERY}`,
       );
     }
   });
@@ -580,7 +580,7 @@ describe("range transfers", () => {
       const right = conflict ? ordered[conflict[1]] : undefined;
       if (!conflict || !left || !right) throw new Error("Expected a move/replace conflict.");
       expect(failureMessage(() => plan(text, text, ordered))).toBe(
-        `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[${conflict[0]}] (${left.op}) and operations[${conflict[1]}] (${right.op}).`,
+        `OPERATIONS_OVERLAP: Destructive write ranges overlap. Merge them into one replacement, or split the edits. Conflict: operations[${conflict[0]}] (${left.op}) and operations[${conflict[1]}] (${right.op}). ${CONFLICT_RECOVERY}`,
       );
     }
   });
@@ -692,7 +692,7 @@ describe("range transfers", () => {
     ];
     for (const operations of permutations(sharedDestination)) {
       expect(failureMessage(() => plan(text, text, operations))).toBe(
-        `INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order. Conflict: operations[0] (${operations[0]?.op}) and operations[1] (${operations[1]?.op}).`,
+        `INSERTION_BOUNDARY_CONFLICT: Multiple insertions use the same snapshot boundary. Combine them into one insertion in the desired order. Conflict: operations[0] (${operations[0]?.op}) and operations[1] (${operations[1]?.op}). ${CONFLICT_RECOVERY}`,
       );
     }
   });

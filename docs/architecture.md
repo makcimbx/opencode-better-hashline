@@ -8,7 +8,7 @@ Better Hashline is intentionally split into pure protocol logic, bounded state, 
 | --- | --- |
 | `src/text.ts` | Fatal UTF-8 decoding, BOM/EOL model, byte-preserving encode, payload validation |
 | `src/snapshots.ts` | Opaque IDs, exact bytes/SHA-256, scope, issued provenance, TTL/LRU limits |
-| `src/render.ts` | Byte-bounded `N|content` pages and preview-only oversized lines |
+| `src/render.ts` | Byte-bounded `N|content` pages, preview-only oversized lines, and predicted cumulative coverage headers |
 | `src/presentation.ts` | `native-aliases/v2` renderer metadata, operation/path fingerprints, and serialized-size measurement |
 | `src/native-alias.ts` | Bounded exact-host detection through OpenCode's configured SDK transport |
 | `src/session-protocol.ts` | Offline bounded v2 history validation, lifecycle path correlation, attested rejection markers, and instance-local live-epoch binding |
@@ -33,7 +33,7 @@ The model addresses logical lines by ordinary one-based numbers. Authority comes
 
 ### Read provenance is explicit
 
-The snapshot store distinguishes bytes retained by the process from line references actually issued to a model. A range cannot be edited when an interior line was omitted or rendered preview-only. Issuance occurs after the host's generic truncation layer, not when the tool initially constructs output. Requested `hashline_read.limit` accepts `1..100,000` and defaults to 1,000, but `maxOutputBytes` remains authoritative (40 KiB by default, configurable to at most 45 KiB). `@more` means rendering stopped before EOF; `@eof` means EOF was reached, and `partial=true` may accompany either when complete editable evidence is absent. A preview-only `N!|` line cannot be issued by pagination. Complete-coverage diagnostics aggregate bounded missing ranges and boundary requirements, while recovery suggestions deliberately cap each read at a conservative 1,000 lines.
+The snapshot store distinguishes bytes retained by the process from line references actually issued to a model. A range cannot be edited when an interior line was omitted or rendered preview-only. Issuance occurs after the host's generic truncation layer, not when the tool initially constructs output. Every `@hashline` header reports `coverage=partial|complete`, computed from evidence already issued when the header is rendered plus the candidate page. `coverage=complete` means those inputs are sufficient for cumulative editable BOF-to-EOF coverage; if the candidate remains valid and the exact page is delivered and attested, completeness is monotonic as other pages issue. `coverage=partial` means those inputs were insufficient at render time, but another page delivered and attested later or out of order may complete the snapshot and make the prediction conservative. Rendering and pending output do not mutate issued provenance, and an invalidated candidate issues nothing. `partial=true` is page-local, so `partial=true coverage=complete` is valid when the render-time inputs are cumulatively sufficient. Requested `hashline_read.limit` accepts `1..100,000` and defaults to 1,000, but `maxOutputBytes` remains authoritative (40 KiB by default, configurable to at most 45 KiB). `@more` means rendering stopped before EOF; `@eof` means EOF was reached. A preview-only `N!|` line cannot be issued by pagination. Complete-coverage diagnostics aggregate bounded missing ranges and boundary requirements, while recovery suggestions deliberately cap each read at a conservative 1,000 lines.
 
 ### Planning is pure where the operation is textual
 
@@ -41,7 +41,13 @@ The snapshot store distinguishes bytes retained by the process from line referen
 stable rejection. It performs no I/O and asks no permission. This makes exhaustive and property
 testing possible without weakening the filesystem path.
 
-`replace` removes the exact one-based inclusive `startLine..endLine` range, and its `lines` payload is the complete replacement; outside neighbors remain. Every operation in a batch uses coordinates from the immutable original snapshot, not an intermediate result or a line created by another operation. For sole `replace_file`, omitted `finalNewline` preserves snapshot state for non-empty `lines`, while empty `lines` infer `false`; explicit `true` with an empty payload rejects.
+Before planning, omitted `rebase` resolves from the validated operation set. Batches limited to
+`replace`, `insert`, `copy_range`, and `move_range` select exact, ambiguity-rejecting `unique`;
+sole `replace_file`, `delete_file`, and `move_file` select strict `none`. Explicit `none` requires
+full-byte freshness, while explicit `unique` retains the same incremental-only constraints as
+omission. This is selection, not fallback: a failed strict check never activates relocation.
+
+`replace` removes the exact one-based inclusive `startLine..endLine` range, and its `lines` payload is the complete replacement; outside neighbors remain. Every operation in a batch uses coordinates from the immutable original snapshot, not an intermediate result or a line created by another operation. Sole strict `replace_file` remains a text operation: it requires complete issued coverage and supports explicitly requested readback, but readback is never automatic. Omitted `finalNewline` preserves snapshot state for non-empty `lines`, while empty `lines` infer `false`; explicit `true` with an empty payload rejects.
 
 Transfer-containing batches are one simultaneous transformation over the pre-batch document. Copy
 reads retained pre-edit logical texts and inserts them with destination-local EOL rules, even when
@@ -113,8 +119,9 @@ so this surface does not replace the unique-ID recommendation.
 
 Persisted v1 and v2 history remains subject to bounded exact validation in offline verifier,
 model-trace, and evidence paths. The live executor does not fetch that history to admit edits. The
-marker string remains v2 across the current schema expansion, but canonical schema SHA-256 and the
-protocol fingerprint are exact identity. An identity change invalidates the process-local epoch;
+marker string remains v2 across provider-contract changes, but package version, canonical schema
+SHA-256, and protocol fingerprint are exact identity. An identity change invalidates the process-local
+epoch;
 restart the plugin as required and use a fresh delivered `hashline_read` to rebind in the same
 session. Old snapshot IDs remain unusable.
 
@@ -135,22 +142,27 @@ Snapshots are process-memory objects. Retained weight accounts for raw bytes plu
 
 A successful or attempted publication transition invalidates prior snapshots for every affected
 path. Successful output explicitly reports that transition through
-`@hashline-edit previous=consumed successor=none|attached|unavailable`. Text edits require a reread
-by default; `readback:true` or either readback window field requests that post-rename verification
-bytes create a new pending snapshot with one contiguous page. `readbackOffset` selects a one-based
-post-edit start, defaulting to the first hunk; requested `readbackLimit` accepts `1..100,000` and
-defaults to 1,000. Explicit `readback:false` conflicts with either window field. A successful
-mutation may still report `successor=unavailable`. The authoritative `maxOutputBytes` budget can stop
-rendering early: `@more` means before EOF, `@eof` means EOF was reached, and either may accompany
-`partial=true`. Only refs on the page attested by the after-hook are issued; there is no ID-only
-successor. Failed delivery does not turn the completed write into a mutation failure. Lifecycle
-operations never return a successor and reject `readback:true`, `readbackOffset`, and `readbackLimit`.
+`@hashline-edit previous=consumed successor=none|attached|unavailable`. Text edits, including sole
+`replace_file`, require a reread by default; `readback:true` or either readback window field explicitly
+requests that post-rename verification bytes create a new pending snapshot with one contiguous page.
+`readbackOffset` selects a one-based post-edit start, defaulting to the first hunk; requested
+`readbackLimit` accepts `1..100,000` and defaults to 1,000. Explicit `readback:false` conflicts with
+either window field. A successful mutation may still report `successor=unavailable`. The authoritative
+`maxOutputBytes` budget can stop rendering early: `@more` means before EOF, `@eof` means EOF was
+reached, and either may accompany `partial=true`. The attached header preserves the cumulative coverage
+prediction computed from evidence issued when it was rendered plus that candidate page. A complete
+prediction remains complete if the candidate stays valid and is attested; another page issued after
+rendering can make a partial prediction conservative. Only after-hook attestation issues the
+still-valid candidate's refs; there is no ID-only successor. Failed delivery or candidate
+invalidation does not turn the completed write into a mutation failure or issue pending evidence.
+Only `delete_file` and `move_file` are lifecycle operations; they never return a successor and reject
+`readback:true`, `readbackOffset`, and `readbackLimit`.
 Delete invalidates the source; move invalidates source and destination immediately before link
-publication, including when the result becomes `PARTIAL_PUBLICATION`. Parent-creating publication
-invalidates snapshots for every planned directory and target path. On the native-alias surface,
-either partial outcome also unbinds the live epoch.
+publication, including when the result becomes `PARTIAL_PUBLICATION`. Parent-creating
+publication invalidates snapshots for every planned directory and target path. On the native-alias
+surface, either partial outcome also unbinds the live epoch.
 Multiple exact reads can reuse one retained snapshot only when digest and bytes both match, and
-their issued pages can accumulate complete coverage.
+their delivered, attested pages can accumulate complete coverage.
 
 ## Filesystem Model
 
@@ -187,13 +199,13 @@ formatter, daemon, or network client.
 The test suite has separate layers:
 
 - pure text, relocation, and edit planner tests;
-- snapshot provenance, complete-coverage, TTL, pinning, invalidation, and byte-budget tests;
-- renderer truncation and UTF-8 budget tests;
+- snapshot provenance, predicted cumulative coverage, delivery-only issuance, TTL, pinning, invalidation, and byte-budget tests;
+- renderer truncation, page-local `partial=true`, cumulative `coverage`, and UTF-8 budget tests;
 - real temporary-filesystem tests for direct terminal binding, symlinks, hardlinks, destination absence, parent/source races, fixed parent chains, exclusive directory creation, deterministic path-set locks, no-replace creation and movement, and partial publication;
-- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including inferred readback windows/issuance, deterministic conflict pairs, lifecycle and strict automatic parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
+- plugin contract tests with fake OpenCode contexts and real tool/hook definitions, including inferred readback windows/issuance, explicit `replace_file` readback, deterministic conflict pairs, lifecycle and strict automatic parent-creation shapes, complete path permissions, immutable approval metadata, receipts, attested terminal rejections, live-epoch unbinding/rebinding, and bound/unbound alias admission and concurrency;
 - packed-tarball installation, root/server/CLI entrypoint checks, and deterministic stock OpenCode sessions, including lifecycle routes and two-process native-alias rejection/fresh-read restart recovery;
 - collision fixtures for registration order, same-schema replacement, namespaced MCP controls, and later output mutation;
-- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current deterministic runner is retained as immutable schema-v8 model-free evidence; schema-v5, schema-v6, schema-v7, and pilot-v7 evidence remain immutable.
+- deterministic non-gating benchmarks and an opt-in model harness with separately versioned task and adapter identities. The current schema-v10 identity keeps the schema-v9 29-case classifications and adds cumulative-coverage-header and `replace_file`-readback wire fixtures; strict-only defaults remain runtime-test evidence. It is textual protocol evidence, not semantic or model-quality evidence. The historical schema-v5 through schema-v9 results and pilot-v7 evidence remain immutable.
 
 Timing benchmarks never gate shared CI. Safety regressions do.
 

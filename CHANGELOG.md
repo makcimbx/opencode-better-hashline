@@ -9,9 +9,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added immutable schema-v9 model-free evidence for the incremental omitted-rebase adapter and updated edit-schema wire fixture; strict-only defaults remain covered by runtime tests rather than that corpus.
+- Added `coverage=partial|complete` to every `@hashline` header, computed from evidence issued at render time plus the candidate page: `complete` means those inputs are sufficient and remains monotonic for a valid attested candidate, while `partial` can become conservative after another page is delivered and attested; pending output and invalidated candidates issue nothing, and `partial=true` remains page-local.
+- Added the write-once retained schema-v10 deterministic result for cumulative coverage headers and explicit `replace_file` readback.
+
 ### Changed
 
+- Made omitted `rebase` operation-aware: incremental `replace`/`insert`/`copy_range`/`move_range` batches select exact ambiguity-rejecting `unique`, while `replace_file` and lifecycle operations remain strict `none`; explicit `none` retains full-byte freshness, and a successful changed-byte unique rebase is reported in the result.
+- Reclassified sole strict `replace_file` as a text edit with explicitly requested readback support; readback remains off when omitted, and only `delete_file` and `move_file` reject readback controls and never attach successors.
+
 ### Fixed
+
+- Added phase-correct recovery guidance to stale/ambiguous planning, strict-only rebase misuse, stable-read races, and oversized native-alias metadata failures.
 
 ## [0.7.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.6.1...v0.7.0) (2026-07-23)
 

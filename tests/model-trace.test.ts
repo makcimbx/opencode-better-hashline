@@ -7,6 +7,7 @@ import {
   inspectJsonlTrace,
   inspectNativeAliasTrace,
   inspectSessionExport,
+  type RebaseOmissionPolicy,
 } from "../benchmarks/model/trace.js";
 import { buildNativeAliasMetadata } from "../src/presentation.js";
 
@@ -194,7 +195,6 @@ describe("model benchmark trace inspection", () => {
           argumentShape: "other",
           errorCode: null,
           protocolMarker: "absent",
-          rebase: "none",
         },
       ],
       finishReasons: { stop: 1 },
@@ -287,7 +287,6 @@ describe("model benchmark trace inspection", () => {
         errorCode: "INVALID_ARGUMENT",
         protocolMarker: "absent",
         targetPath: "a.ts",
-        rebase: "none",
       },
       {
         sequence: 1,
@@ -302,7 +301,7 @@ describe("model benchmark trace inspection", () => {
         protocolReason: "valid",
         targetPath: "package.json",
         snapshotId: "s_1234567890123456789012",
-        rebase: "none",
+        requestedRebase: "omitted",
       },
       {
         sequence: 2,
@@ -317,9 +316,183 @@ describe("model benchmark trace inspection", () => {
         protocolReason: "canonical-path-unreadable",
         targetPath: "a.ts",
         snapshotId: "s_123",
-        rebase: "none",
+        requestedRebase: "omitted",
       },
     ]);
+  });
+
+  test("requires an explicit versioned policy to resolve omitted rebases", () => {
+    const allowedPathRoot = resolve(".");
+    const identity = {
+      packageVersion: "0.3.0",
+      schemaSha256: "a".repeat(64),
+      hostVersion: "1.18.3",
+    };
+    const metadata = buildNativeAliasMetadata({
+      surface: "edit",
+      canonicalPath: resolve(allowedPathRoot, "package.json"),
+      relativePath: "package.json",
+      unifiedDiff: "--- package.json\tbefore\n+++ package.json\tafter\n@@ -1 +1 @@\n-a\n+b\n",
+      additions: 1,
+      deletions: 1,
+      ...identity,
+    });
+    const inspect = (
+      operations: Array<Record<string, unknown>>,
+      rebase: unknown = undefined,
+      exactIdentity = true,
+      omissionPolicy?: RebaseOmissionPolicy,
+    ) => {
+      const input = {
+        filePath: "package.json",
+        snapshotId: "s_1234567890123456789012",
+        operations,
+        ...(rebase === undefined ? {} : { rebase }),
+      };
+      const output = boundToolTrace(
+        JSON.stringify({
+          type: "tool_use",
+          sessionID: "session",
+          part: {
+            sessionID: "session",
+            tool: "edit",
+            callID: "call",
+            state: { status: "completed", input, metadata },
+          },
+        }),
+      );
+      return inspectJsonlTrace(
+        output,
+        exactIdentity
+          ? {
+              nativeAlias: { ...identity, allowedPathRoot, worktree: allowedPathRoot },
+              ...(omissionPolicy === undefined ? {} : { rebaseOmissionPolicy: omissionPolicy }),
+            }
+          : {
+              allowedPathRoot,
+              ...(omissionPolicy === undefined ? {} : { rebaseOmissionPolicy: omissionPolicy }),
+            },
+      ).toolEvents[0];
+    };
+
+    const incremental = [
+      { op: "replace", startLine: 1, endLine: 1, lines: ["b"] },
+      { op: "insert", afterLine: 0, lines: ["b"] },
+      { op: "copy_range", startLine: 1, endLine: 1, afterLine: 1 },
+      { op: "move_range", startLine: 1, endLine: 1, afterLine: 2 },
+    ];
+    for (const operation of incremental) {
+      const unversioned = inspect([operation]);
+      expect(unversioned).toMatchObject({
+        protocolMarker: "valid",
+        requestedRebase: "omitted",
+      });
+      expect(unversioned?.effectiveRebase).toBeUndefined();
+      expect(inspect([operation], undefined, true, "omitted-is-none-v1")).toMatchObject({
+        requestedRebase: "omitted",
+        effectiveRebase: "none",
+      });
+      expect(inspect([operation], undefined, true, "operation-aware-v1")).toMatchObject({
+        requestedRebase: "omitted",
+        effectiveRebase: "unique",
+      });
+    }
+
+    const strictOnly = [{ op: "replace_file", lines: ["b"] }];
+    const unversionedStrictOnly = inspect(strictOnly);
+    expect(unversionedStrictOnly).toMatchObject({
+      protocolMarker: "valid",
+      requestedRebase: "omitted",
+    });
+    expect(unversionedStrictOnly?.effectiveRebase).toBeUndefined();
+    expect(inspect(strictOnly, undefined, true, "omitted-is-none-v1")).toMatchObject({
+      requestedRebase: "omitted",
+      effectiveRebase: "none",
+    });
+    expect(inspect(strictOnly, undefined, true, "operation-aware-v1")).toMatchObject({
+      requestedRebase: "omitted",
+      effectiveRebase: "none",
+    });
+    expect(inspect([incremental[0] as Record<string, unknown>], "none")).toMatchObject({
+      requestedRebase: "none",
+      effectiveRebase: "none",
+      rebase: "none",
+    });
+    expect(inspect([incremental[0] as Record<string, unknown>], "unique")).toMatchObject({
+      requestedRebase: "unique",
+      effectiveRebase: "unique",
+      rebase: "unique",
+    });
+
+    const malformedRebase = inspect([incremental[0] as Record<string, unknown>], "nearest");
+    expect(malformedRebase).toMatchObject({
+      protocolMarker: "invalid",
+      requestedRebase: "invalid",
+    });
+    expect(malformedRebase?.rebase).toBeUndefined();
+    expect(malformedRebase?.effectiveRebase).toBeUndefined();
+
+    const malformedOperations = inspect([], undefined, true, "operation-aware-v1");
+    expect(malformedOperations).toMatchObject({
+      protocolMarker: "invalid",
+      requestedRebase: "omitted",
+    });
+    expect(malformedOperations?.effectiveRebase).toBeUndefined();
+
+    const malformedExplicit = inspect([], "none");
+    expect(malformedExplicit).toMatchObject({
+      protocolMarker: "invalid",
+      requestedRebase: "none",
+      rebase: "none",
+    });
+    expect(malformedExplicit?.effectiveRebase).toBeUndefined();
+
+    const rawHistorical = inspect([incremental[0] as Record<string, unknown>], undefined, false);
+    expect(rawHistorical).toMatchObject({
+      protocolMarker: "invalid",
+      requestedRebase: "omitted",
+    });
+    expect(rawHistorical?.rebase).toBeUndefined();
+    expect(rawHistorical?.effectiveRebase).toBeUndefined();
+
+    const rawHistoricalWithPolicy = inspect(
+      [incremental[0] as Record<string, unknown>],
+      undefined,
+      false,
+      "operation-aware-v1",
+    );
+    expect(rawHistoricalWithPolicy?.effectiveRebase).toBeUndefined();
+
+    const hashlineOutput = boundToolTrace(
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "session",
+        part: {
+          sessionID: "session",
+          tool: "hashline_edit",
+          callID: "hashline-call",
+          state: {
+            status: "completed",
+            input: {
+              filePath: "package.json",
+              snapshotId: "s_1234567890123456789012",
+              operations: [incremental[0]],
+            },
+            output: "Applied 1 operation.",
+          },
+        },
+      }),
+    );
+    expect(
+      inspectJsonlTrace(hashlineOutput, {
+        rebaseOmissionPolicy: "operation-aware-v1",
+      }).toolEvents[0],
+    ).toMatchObject({
+      argumentShape: "better-hashline",
+      protocolMarker: "absent",
+      requestedRebase: "omitted",
+      effectiveRebase: "unique",
+    });
   });
 
   test("records exact source and destination evidence for a completed move", async () => {
@@ -386,6 +559,7 @@ describe("model benchmark trace inspection", () => {
         targetPath: "old.ts",
         operation: "move_file",
         destinationPath: "new.ts",
+        requestedRebase: "omitted",
       });
     } finally {
       await rm(allowedPathRoot, { recursive: true, force: true });
@@ -503,6 +677,7 @@ describe("model benchmark trace inspection", () => {
       allowedPathRoot,
       expectedDirectory: allowedPathRoot,
       expectedWorktree: worktree,
+      rebaseOmissionPolicy: "omitted-is-none-v1",
     });
     expect(trace.oracleDecision).toBe("valid");
     expect(trace.oracleReason).toBe("valid");
@@ -510,6 +685,8 @@ describe("model benchmark trace inspection", () => {
       protocolMarker: "valid",
       targetPath: "package.json",
       issuedSnapshotId: "s_abcdefghijklmnopqrstuv",
+      requestedRebase: "omitted",
+      effectiveRebase: "none",
     });
 
     const mismatchedExport = JSON.parse(sessionExport) as {

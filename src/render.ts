@@ -1,5 +1,10 @@
 import { Buffer } from "node:buffer";
-import type { IssuedPage, IssuedRange, Snapshot } from "./snapshots.js";
+import {
+  type IssuedPage,
+  type IssuedRange,
+  predictsCompleteIssuedCoverage,
+  type Snapshot,
+} from "./snapshots.js";
 
 export interface RenderedSnapshotPage {
   output: string;
@@ -56,7 +61,7 @@ function renderSnapshotPagePass(
   const { snapshot, offset, limit, maxOutputBytes } = input;
   const total = snapshot.document.lines.length;
   const header = `@hashline snapshot=${snapshot.id} sha256=${snapshot.digest.slice(0, 12)} lines=${total}`;
-  const firstLine = reservePartialMarker ? `${header} partial=true` : header;
+  const firstLine = `${header}${reservePartialMarker ? " partial=true" : ""} coverage=complete`;
   const rendered = [firstLine];
   let renderedBytes = byteLength(firstLine);
   const ranges: IssuedRange[] = [];
@@ -99,7 +104,9 @@ function renderSnapshotPagePass(
   const partial = offset !== 1 || !eof || hasPreviewOnlyLine;
   // A byte-limited result discovered to be partial is rerendered with marker bytes reserved.
   if (partial && !reservePartialMarker) return renderSnapshotPagePass(input, true);
-  if (!partial && reservePartialMarker) rendered[0] = header;
+  const page = { ranges, bof: offset === 1, eof };
+  const coverage = predictsCompleteIssuedCoverage(snapshot, page) ? "complete" : "partial";
+  rendered[0] = `${header}${partial ? " partial=true" : ""} coverage=${coverage}`;
   rendered.push(eof ? "@eof" : `@more offset=${cursor + 1}`);
   if (hasPreviewOnlyLine) {
     rendered.push("@note lines marked ! cannot be edited by line reference");
@@ -107,7 +114,7 @@ function renderSnapshotPagePass(
 
   const result: RenderedSnapshotPage = {
     output: rendered.join("\n"),
-    page: { ranges, bof: offset === 1, eof },
+    page,
     displayedLines,
   };
   if (!eof) result.nextOffset = cursor + 1;

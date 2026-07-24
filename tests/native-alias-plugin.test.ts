@@ -314,12 +314,24 @@ describe("native alias activation and visibility", () => {
     expect(nativeAliasEditDescription).toContain(
       "source and destination paths must be inside the current worktree",
     );
+    expect(nativeAliasEditDescription).toContain(
+      "Persisted alias metadata is capped at 1048576 UTF-8 bytes",
+    );
+    expect(nativeAliasEditDescription).toContain(
+      "split incremental changes into sequential calls, using an adequate attached successor or fresh read between calls",
+    );
+    expect(nativeAliasEditDescription).toContain(
+      'Oversized sole lifecycle calls require explicit enforce:true with toolSurface:"hashline", restart, and fresh delivered hashline_read',
+    );
     expect(hashlineEditDescription).not.toContain("native-alias-session");
     expect(nativeAliasEditDescription).toContain(
       "neighboring lines outside the range remain, so do not repeat retained context such as a closing delimiter unless intentional.",
     );
     expect(nativeAliasEditDescription).toContain(
       "Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.",
+    );
+    expect(nativeAliasEditDescription).toContain(
+      "Only delete_file and move_file are lifecycle operations; they never return successor readback and reject readback:true or either window field",
     );
     const guidance = await systemGuidance(value);
     expect(guidance).toContain("native-alias-session=unbound");
@@ -683,6 +695,35 @@ describe("native alias argument and mutation contract", () => {
     });
   }
 
+  for (const surface of ["edit", "apply_patch"] as const) {
+    test(`${surface} defaults stale incremental replacement to unique relocation`, async () => {
+      const { value } = await aliasHarness();
+      const tools = aliasRegistry(value);
+      const toolContext = context({ sessionID: `omitted-unique-${surface}` });
+      const filePath = `omitted-unique-${surface}.txt`;
+      const file = join(root, filePath);
+      await writeFile(file, "one\ntwo\nthree\n");
+      const snapshot = await issueSnapshot(value, toolContext, filePath);
+      const args = replaceArgs(filePath, String(snapshot.metadata.snapshotId));
+      await writeFile(file, "prefix\none\ntwo\nthree\n");
+
+      if (surface === "edit") {
+        await expect(tools.edit.execute({ ...args, rebase: "none" }, toolContext)).rejects.toThrow(
+          "TARGET_CHANGED:",
+        );
+        expect(await readFile(file, "utf8")).toBe("prefix\none\ntwo\nthree\n");
+      }
+
+      const result = structured(
+        await tools[surface === "edit" ? "edit" : "applyPatch"].execute(args, toolContext),
+      );
+      expect(result.output).toBe(
+        "Applied 1 operation. Exact unique rebase occurred.\n@hashline-edit previous=consumed successor=none next=hashline_read",
+      );
+      expect(await readFile(file, "utf8")).toBe("prefix\none\nTWO\nthree\n");
+    });
+  }
+
   test("resolves a root worktree sentinel on the fixture drive", async () => {
     await writeFile(join(root, "file.txt"), "one\ntwo\n");
     const toolContext = context({ worktree: "/" });
@@ -922,9 +963,47 @@ describe("native alias argument and mutation contract", () => {
         replaceArgs("large.txt", String(snapshot.metadata.snapshotId), "x".repeat(600 * 1024)),
         toolContext,
       ),
-    ).rejects.toThrow("UNSUPPORTED_FILE: Native alias metadata exceeds");
+    ).rejects.toThrow(
+      'UNSUPPORTED_FILE: Native alias metadata exceeds 1048576 UTF-8 bytes. No publication occurred and the snapshot remains retained. Split the edit into smaller sequential calls. After each success, use its attached successor only if it issued the next call\'s evidence; otherwise run a fresh hashline_read. Alternatively, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read. Never fall back silently.',
+    );
     expect(asks.map(({ permission }) => permission)).toEqual(["read"]);
     expect(await readFile(join(root, "large.txt"), "utf8")).toBe("one\ntwo\n");
+  });
+
+  test("routes oversized sole lifecycle metadata to an explicit hashline restart", async () => {
+    const filePath = "large-delete.txt";
+    const content = `${"x".repeat(36 * 1024)}\n`.repeat(30);
+    await writeFile(join(root, filePath), content);
+    const asks: AskRecord[] = [];
+    const toolContext = context({ asks });
+    const { value } = await aliasHarness();
+    const { edit, hashlineRead } = aliasRegistry(value);
+    let snapshot: StructuredResult | undefined;
+
+    for (let offset = 1; offset <= 30; offset += 1) {
+      snapshot = structured(
+        await hashlineRead.execute({ filePath, offset, limit: 1 }, toolContext),
+      );
+      await deliverReadResult(value, toolContext, filePath, snapshot, `large-read-${offset}`);
+    }
+    if (!snapshot) throw new Error("Missing paginated snapshot");
+    expect(snapshot.output).toContain("@eof");
+    const permissionsBeforeEdit = asks.length;
+
+    await expect(
+      edit.execute(
+        {
+          filePath,
+          snapshotId: String(snapshot.metadata.snapshotId),
+          operations: [{ op: "delete_file" }],
+        },
+        toolContext,
+      ),
+    ).rejects.toThrow(
+      'UNSUPPORTED_FILE: Native alias metadata exceeds 1048576 UTF-8 bytes. No publication occurred and the snapshot remains retained. Lifecycle operations cannot be split; explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read. Never fall back silently.',
+    );
+    expect(asks).toHaveLength(permissionsBeforeEdit);
+    expect(await readFile(join(root, filePath), "utf8")).toBe(content);
   });
 
   test("rejects same-volume paths outside the worktree before edit permission", async () => {

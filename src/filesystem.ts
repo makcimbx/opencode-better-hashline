@@ -735,13 +735,19 @@ export async function readStableFile(
     const extra = Buffer.allocUnsafe(1);
     const { bytesRead: extraBytes } = await handle.read(extra, 0, 1, offset);
     if (offset !== before.size || extraBytes !== 0) {
-      fail("RACE_BEFORE_WRITE", "The file changed size while it was being read.");
+      fail(
+        "RACE_BEFORE_WRITE",
+        "The file changed size while it was being read. This read published nothing; run a fresh hashline_read and, before mutating, replan against the newly delivered snapshot.",
+      );
     }
     if (signal) throwIfAborted(signal);
     const after = await handle.stat();
     const pathStats = await stat(resolved.canonicalPath);
     if (!sameMetadata(before, after) || !sameMetadata(after, pathStats)) {
-      fail("RACE_BEFORE_WRITE", "The file changed while it was being read.");
+      fail(
+        "RACE_BEFORE_WRITE",
+        "The file changed while it was being read. This read published nothing; run a fresh hashline_read and, before mutating, replan against the newly delivered snapshot.",
+      );
     }
     await assertAliasStable(resolved);
     return { bytes, stats: after };

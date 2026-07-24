@@ -14,6 +14,9 @@ export interface TokenUsage {
   cacheWrite: number;
 }
 
+export type RequestedRebase = "omitted" | "none" | "unique" | "invalid";
+export type RebaseOmissionPolicy = "omitted-is-none-v1" | "operation-aware-v1";
+
 export interface ToolTerminalEvent {
   sequence: number;
   partID: string;
@@ -30,6 +33,9 @@ export interface ToolTerminalEvent {
   destinationPath?: string;
   snapshotId?: string;
   issuedSnapshotId?: string;
+  requestedRebase?: RequestedRebase;
+  effectiveRebase?: "none" | "unique";
+  /** @deprecated Exact explicit request retained for compatibility. */
   rebase?: "none" | "unique";
 }
 
@@ -66,6 +72,8 @@ export interface TraceInspection {
 export interface TraceInspectionOptions {
   allowedPathRoot?: string;
   nativeAlias?: NativeAliasProtocolIdentity & { allowedPathRoot: string };
+  /** Caller-supplied semantics; protocol identity never selects an omission policy. */
+  rebaseOmissionPolicy?: RebaseOmissionPolicy;
 }
 
 export interface SessionExportInspection {
@@ -154,6 +162,66 @@ function argumentShape(tool: string, input: unknown): ToolTerminalEvent["argumen
   if (native) return "native";
   if (betterHashline) return "better-hashline";
   return "other";
+}
+
+function omittedRebaseMode(
+  input: Record<string, unknown>,
+  policy: RebaseOmissionPolicy,
+): "none" | "unique" | undefined {
+  if (policy === "omitted-is-none-v1") return "none";
+  if (!Array.isArray(input.operations) || input.operations.length === 0) return undefined;
+  const operationNames = input.operations.map((operation) => object(operation)?.op);
+  if (
+    operationNames.every(
+      (operation) =>
+        operation === "replace" ||
+        operation === "insert" ||
+        operation === "copy_range" ||
+        operation === "move_range",
+    )
+  ) {
+    return "unique";
+  }
+  return operationNames.length === 1 &&
+    (operationNames[0] === "replace_file" ||
+      operationNames[0] === "delete_file" ||
+      operationNames[0] === "move_file")
+    ? "none"
+    : undefined;
+}
+
+function rebaseEvidence(
+  tool: string,
+  inputValue: unknown,
+  shape: ToolTerminalEvent["argumentShape"],
+  status: ToolTerminalEvent["status"],
+  protocolMarker: ToolTerminalEvent["protocolMarker"],
+  omissionPolicy: RebaseOmissionPolicy | undefined,
+): Pick<ToolTerminalEvent, "requestedRebase" | "effectiveRebase" | "rebase"> {
+  if (shape !== "better-hashline") return {};
+  const input = object(inputValue);
+  if (!input) return { requestedRebase: "invalid" };
+  const effectiveKnown =
+    protocolMarker === "valid" || (tool === "hashline_edit" && status === "completed");
+  const requested: RequestedRebase = !Object.hasOwn(input, "rebase")
+    ? "omitted"
+    : input.rebase === "none" || input.rebase === "unique"
+      ? input.rebase
+      : "invalid";
+  if (requested === "invalid") return { requestedRebase: requested };
+  if (requested !== "omitted") {
+    return {
+      requestedRebase: requested,
+      ...(effectiveKnown ? { effectiveRebase: requested } : {}),
+      rebase: requested,
+    };
+  }
+  const effective =
+    effectiveKnown && omissionPolicy ? omittedRebaseMode(input, omissionPolicy) : undefined;
+  return {
+    requestedRebase: requested,
+    ...(effective === undefined ? {} : { effectiveRebase: effective }),
+  };
 }
 
 function argumentPath(pathValue: unknown, allowedPathRoot: string | undefined): string | undefined {
@@ -399,6 +467,7 @@ export async function inspectNativeAliasTrace(
     expectedDirectory: string;
     expectedWorktree: string;
     requireNativeAliasMarker?: boolean;
+    rebaseOmissionPolicy?: RebaseOmissionPolicy;
   },
 ): Promise<TraceInspection> {
   const accounting = inspectJsonlTrace(output);
@@ -406,6 +475,7 @@ export async function inspectNativeAliasTrace(
     expectedDirectory,
     expectedWorktree,
     requireNativeAliasMarker = true,
+    rebaseOmissionPolicy,
     ...identity
   } = expected;
   if (accounting.sessionIds.length !== 1) {
@@ -427,6 +497,7 @@ export async function inspectNativeAliasTrace(
       identity,
       attested,
       requireNativeAliasMarker,
+      rebaseOmissionPolicy,
     );
   } catch {
     return { ...accounting, oracleDecision: "invalid", oracleReason: "session-export-invalid" };
@@ -439,6 +510,7 @@ async function inspectAttestedNativeAliasTrace(
   identity: Omit<NonNullable<TraceInspectionOptions["nativeAlias"]>, "worktree">,
   attested: Awaited<ReturnType<typeof attestSessionExport>>,
   requireNativeAliasMarker: boolean,
+  rebaseOmissionPolicy: RebaseOmissionPolicy | undefined,
 ): Promise<TraceInspection> {
   try {
     assertTerminalCorrelation(traceTerminalParts(output), exportTerminalParts(attested.messages));
@@ -456,6 +528,7 @@ async function inspectAttestedNativeAliasTrace(
   }
   const inspection = inspectJsonlTrace(output, {
     nativeAlias: { ...identity, worktree: attested.worktree },
+    ...(rebaseOmissionPolicy === undefined ? {} : { rebaseOmissionPolicy }),
   });
   if (traceEvidenceInvalid(inspection)) {
     return { ...inspection, oracleDecision: "invalid", oracleReason: "trace-evidence-invalid" };
@@ -574,6 +647,7 @@ export function inspectJsonlTrace(
         protocol.destinationPath ?? argumentPath(lifecycle.destinationPathValue, pathRoot);
       const input = object(state.input);
       const metadata = object(state.metadata);
+      const shape = argumentShape(partRecord.tool, state.input);
       const snapshotId =
         partRecord.tool === "hashline_read" ? metadata?.snapshotId : input?.snapshotId;
       const issuedSnapshotId =
@@ -582,7 +656,6 @@ export function inspectJsonlTrace(
         typeof state.output === "string"
           ? /(?:^|\n)@hashline snapshot=(s_[A-Za-z0-9_-]{22})(?:\s|$)/u.exec(state.output)?.[1]
           : undefined;
-      const rebase = input?.rebase === "unique" ? "unique" : "none";
       inspection.toolEvents.push({
         sequence: inspection.toolEvents.length,
         partID: partRecord.id,
@@ -590,7 +663,7 @@ export function inspectJsonlTrace(
         tool: partRecord.tool,
         callID: partRecord.callID,
         status,
-        argumentShape: argumentShape(partRecord.tool, state.input),
+        argumentShape: shape,
         errorCode: errorCode(state.error),
         protocolMarker: protocol.marker,
         ...(protocol.marker === "absent" ? {} : { protocolReason: protocol.reason }),
@@ -599,7 +672,14 @@ export function inspectJsonlTrace(
         ...(destinationPath === undefined || destinationPath === null ? {} : { destinationPath }),
         ...(typeof snapshotId === "string" ? { snapshotId } : {}),
         ...(issuedSnapshotId === undefined ? {} : { issuedSnapshotId }),
-        ...(["edit", "apply_patch", "hashline_edit"].includes(partRecord.tool) ? { rebase } : {}),
+        ...rebaseEvidence(
+          partRecord.tool,
+          state.input,
+          shape,
+          status,
+          protocol.marker,
+          options.rebaseOmissionPolicy,
+        ),
       });
       if (status === "completed") increment(inspection.tools, partRecord.tool);
       else increment(inspection.toolErrors, partRecord.tool);

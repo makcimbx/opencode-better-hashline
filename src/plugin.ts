@@ -5,7 +5,7 @@ import { isAbsolute, parse, resolve } from "node:path";
 import { type Plugin, type ToolContext, type ToolResult, tool } from "@opencode-ai/plugin";
 import { createTwoFilesPatch } from "diff";
 import type { EditOperation, RebaseMode } from "./edits.js";
-import { moveCorridor, planEdits, validateEditOperations } from "./edits.js";
+import { moveCorridor, planEdits, resolveTextRebaseMode, validateEditOperations } from "./edits.js";
 import { fail, HashlineError } from "./errors.js";
 import {
   assertTargetAbsent,
@@ -86,7 +86,7 @@ const readArgumentShape = {
     .max(ABSOLUTE_MAX_LOGICAL_LINES)
     .optional()
     .describe(
-      "Maximum rendered lines; defaults to 1000. Output remains bounded by maxOutputBytes. @more means rendering stopped before EOF; @eof means the cursor reached EOF; partial=true may accompany either.",
+      "Maximum rendered lines; defaults to 1000. Output remains bounded by maxOutputBytes. Every @hashline header reports coverage=partial|complete from evidence issued when rendered plus the candidate page. complete becomes authoritative only if that exact page is delivered and attested; partial may later become complete after another page. partial=true remains page-local and may accompany @more or @eof, including with coverage=complete.",
     ),
 };
 const readArguments = tool.schema.object(readArgumentShape).strict();
@@ -154,7 +154,7 @@ function createEditSchema() {
     })
     .strict()
     .describe(
-      "Fields not listed for the selected op are invalid; replace_file and file lifecycle operations must be sole. One move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor must be issued and unchanged.",
+      "Fields not listed for the selected op are invalid; replace_file is a text edit that supports readback and must be sole; file lifecycle operations must be sole. One move_range may compose with pairwise-disjoint replace operations wholly inside its intervening corridor and outside its source; the complete corridor must be issued and unchanged.",
     );
   const argumentShape = {
     filePath: tool.schema
@@ -173,7 +173,7 @@ function createEditSchema() {
       .enum(["none", "unique"])
       .optional()
       .describe(
-        "none is default; unique only relocates a still-retained snapshot after external changes. replace_file, delete_file, and move_file forbid unique.",
+        "When omitted, valid incremental batches (replace, insert, copy_range, move_range) use unique, while replace_file, delete_file, and move_file use none. Explicit none requires full-byte freshness; explicit unique relocates a still-retained snapshot after external changes and is forbidden for strict-only operations. Exact unique proves textual identity only, not semantic independence or edit-history causality.",
       ),
     allowHashlinePrefixes: tool.schema
       .boolean()
@@ -185,7 +185,7 @@ function createEditSchema() {
       .boolean()
       .optional()
       .describe(
-        "Optional; defaults to false unless readbackOffset or readbackLimit is supplied. For a text edit, true requests one bounded successor page for verification or follow-up, but the attachment can be unavailable after a successful mutation. Lifecycle operations reject true and all readback window fields.",
+        "Optional; defaults to false unless readbackOffset or readbackLimit is supplied. For a text edit, including replace_file, true requests one bounded successor page for verification or follow-up, but the attachment can be unavailable after a successful mutation. Only delete_file and move_file reject true and all readback window fields.",
       ),
     readbackOffset: tool.schema
       .number()
@@ -193,7 +193,7 @@ function createEditSchema() {
       .min(1)
       .optional()
       .describe(
-        "For text edits. Supplying this one-based post-edit start implies readback unless readback:false is explicit; omit to start near the first hunk.",
+        "For text edits, including replace_file. Supplying this one-based post-edit start implies readback unless readback:false is explicit; omit to start near the first hunk.",
       ),
     readbackLimit: tool.schema
       .number()
@@ -202,7 +202,7 @@ function createEditSchema() {
       .max(ABSOLUTE_MAX_LOGICAL_LINES)
       .optional()
       .describe(
-        "For text edits. Supplying this maximum rendered-line count implies readback unless readback:false is explicit; defaults to 1000. Output remains bounded by maxOutputBytes. @more means rendering stopped before EOF; @eof means the cursor reached EOF; partial=true may accompany either.",
+        "For text edits, including replace_file. Supplying this maximum rendered-line count implies readback unless readback:false is explicit; defaults to 1000. Output remains bounded by maxOutputBytes. Every attached @hashline header reports coverage=partial|complete from evidence issued when rendered plus the candidate page. complete becomes authoritative only if that exact page is delivered and attested; partial may later become complete after another page. partial=true remains page-local and may accompany @more or @eof, including with coverage=complete.",
       ),
     operations: tool.schema
       .array(editOperation)
@@ -222,9 +222,9 @@ const editSchema = createEditSchema();
 const editArgumentShape = editSchema.argumentShape;
 export const hashlineEditArgumentsSchema = editSchema.argumentsSchema;
 
-export const hashlineEditDescription = `Mutate one exact hashline_read snapshot. Text batches publish one atomic replacement. File lifecycle operations are sole calls; move_file is nontransactional, and PARTIAL_PUBLICATION may leave both source and destination names present. Pass required top-level filePath, snapshotId, and operations JSON plus only the documented optional controls; do not encode arguments as text. ${EDIT_SEMANTICS_GUIDANCE} copy reads pre-edit source. replace_file, delete_file, and move_file use strict freshness and require complete issued coverage; unique rebase is forbidden. Lifecycle operations never return successor readback and reject true or window fields. Destructive writes may be adjacent but not overlap; insert/copy destinations may touch a destructive endpoint but may not lie inside a destructive span or share a destination. Successful publication invalidates every retained snapshot for the affected session paths and returns a diff plus receipt. For text edits, readback:true or either window field requests one successor page, but the attachment can be unavailable; without an attached successor, run hashline_read before another mutation. After PARTIAL_PUBLICATION, inspect and reconcile every affected path before retrying.`;
+export const hashlineEditDescription = `Mutate one exact hashline_read snapshot. Text batches, including sole strict replace_file, publish one atomic replacement. File lifecycle operations are sole calls; move_file is nontransactional, and PARTIAL_PUBLICATION may leave both source and destination names present. Pass required top-level filePath, snapshotId, and operations JSON plus only the documented optional controls; do not encode arguments as text. ${EDIT_SEMANTICS_GUIDANCE} copy reads pre-edit source. When rebase is omitted, valid incremental batches use exact unique relocation after byte drift; fresh bytes require no relocation. A changed-byte unique success reports "Exact unique rebase occurred." This does not imply coordinate movement. replace_file, delete_file, and move_file use strict freshness and require complete issued coverage; unique rebase is forbidden. Only delete_file and move_file are lifecycle operations; they never return successor readback and reject readback:true or either window field. Destructive writes may be adjacent but not overlap; insert/copy destinations may touch a destructive endpoint but may not lie inside a destructive span or share a destination. Successful publication invalidates every retained snapshot for the affected session paths and returns a diff plus receipt. For text edits, including replace_file, readback:true or either window field requests one successor page, but the attachment can be unavailable; without an attached successor, run hashline_read before another mutation. After PARTIAL_PUBLICATION, inspect and reconcile every affected path before retrying.`;
 
-export const nativeAliasEditDescription = `Better Hashline alias; it does not accept native oldString/newString or patchText syntax. Wait for hashline_read's returned result before calling it; native-alias-session must be bound, and source and destination paths must be inside the current worktree. ${hashlineEditDescription}`;
+export const nativeAliasEditDescription = `Better Hashline alias; it does not accept native oldString/newString or patchText syntax. Wait for hashline_read's returned result before calling it; native-alias-session must be bound, and source and destination paths must be inside the current worktree. Persisted alias metadata is capped at ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes; split incremental changes into sequential calls, using an adequate attached successor or fresh read between calls. Oversized sole lifecycle calls require explicit enforce:true with toolSurface:"hashline", restart, and fresh delivered hashline_read. ${hashlineEditDescription}`;
 
 type SnapshotEditToolName = "hashline_edit" | "edit" | "apply_patch";
 
@@ -613,6 +613,11 @@ function parseOperations(
   return { kind: "move_file", destinationPath: operation.destinationPath };
 }
 
+function resolveEditRebase(batch: ParsedEditBatch, requested: RebaseMode | undefined): RebaseMode {
+  if (batch.kind !== "text") return requested ?? "none";
+  return resolveTextRebaseMode(batch.operations, requested);
+}
+
 function assertIssued(
   store: SnapshotStore,
   snapshot: Snapshot,
@@ -641,7 +646,10 @@ function assertIssued(
       addBoundary(operation.afterLine);
     } else if (operation.op === "replace_file") {
       if (rebase !== "none") {
-        fail("INVALID_ARGUMENT", "replace_file does not support unique rebase.");
+        fail(
+          "INVALID_ARGUMENT",
+          "replace_file does not support unique rebase. No mutation occurred. An otherwise-valid supplied snapshot remains usable; omit rebase or set it to none, then retry.",
+        );
       }
       bof = true;
       eof = true;
@@ -691,7 +699,7 @@ function editResultOutput(success: string, state: EditSuccessorState): string {
 }
 
 const BETTER_HASHLINE_APPLIED_RECEIPT =
-  /^Applied (?:1 operation|(?:[2-9]|[1-9]\d+) operations)\.$/u;
+  /^Applied (?:1 operation|(?:[2-9]|[1-9]\d+) operations)\.(?: Exact unique rebase occurred\.)?$/u;
 
 function unavailableEditReadback(
   result: { output: string; metadata: Record<string, unknown> },
@@ -869,8 +877,8 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
   const hashlineRead = tool({
     description:
       options.toolSurface === "native-aliases"
-        ? "Read an existing UTF-8 text file for Better Hashline's edit or apply_patch alias and prepare a pending exact snapshot. Wait for the returned result; only successful delivery binds the session and makes N| lines editable. Output uses @hashline, N|, N!|, @more, and @eof; prefixes are annotations, not file content. An N!| line is preview-only and cannot be issued by smaller pagination; raise maxOutputBytes and reread if it can fit, otherwise stop for manual restructuring or an explicit configuration change. Native-alias mutation requires the target inside the current worktree; external snapshots are inspection-only for aliases. Use native read for directories, media, PDFs, or inspection that will not be edited."
-        : "Read an existing UTF-8 text file for hashline_edit and prepare a pending exact snapshot. Wait for the returned result; only successfully delivered N| lines become editable. Output uses @hashline, N|, N!|, @more, and @eof; prefixes are annotations, not file content. An N!| line is preview-only and cannot be issued by smaller pagination; raise maxOutputBytes and reread if it can fit, otherwise stop for manual restructuring or an explicit configuration change. Use native read for directories, media, PDFs, or inspection that will not be edited.",
+        ? "Read an existing UTF-8 text file for Better Hashline's edit or apply_patch alias and prepare a pending exact snapshot. Wait for the returned result; only successful delivery binds the session and makes N| lines editable. Output uses @hashline, N|, N!|, @more, and @eof; every header reports cumulative coverage from evidence issued when rendered plus the candidate page. coverage=complete becomes authoritative only if that exact page is delivered and attested; coverage=partial may later become complete after another page, while partial=true remains page-local. Prefixes are annotations, not file content. An N!| line is preview-only and cannot be issued by smaller pagination; raise maxOutputBytes and reread if it can fit, otherwise stop for manual restructuring or an explicit configuration change. Native-alias mutation requires the target inside the current worktree; external snapshots are inspection-only for aliases. Use native read for directories, media, PDFs, or inspection that will not be edited."
+        : "Read an existing UTF-8 text file for hashline_edit and prepare a pending exact snapshot. Wait for the returned result; only successfully delivered N| lines become editable. Output uses @hashline, N|, N!|, @more, and @eof; every header reports cumulative coverage from evidence issued when rendered plus the candidate page. coverage=complete becomes authoritative only if that exact page is delivered and attested; coverage=partial may later become complete after another page, while partial=true remains page-local. Prefixes are annotations, not file content. An N!| line is preview-only and cannot be issued by smaller pagination; raise maxOutputBytes and reread if it can fit, otherwise stop for manual restructuring or an explicit configuration change. Use native read for directories, media, PDFs, or inspection that will not be edited.",
     args: readArgumentShape,
     async execute(rawArgs, context) {
       assertConfigured();
@@ -945,14 +953,17 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
     if (!parsed.success) invalidArguments(toolName, parsed.error);
     const args = parsed.data;
     const batch = parseOperations(args.operations, options.maxFileBytes, options.maxLines);
-    const rebase = args.rebase ?? "none";
+    const rebase = resolveEditRebase(batch, args.rebase);
     const hasReadbackWindow = args.readbackOffset !== undefined || args.readbackLimit !== undefined;
     const requestReadback = args.readback === true || hasReadbackWindow;
     if (rebase !== "none" && rebase !== "unique") {
       fail("INVALID_ARGUMENT", "rebase must be none or unique.");
     }
     if (batch.kind !== "text" && rebase !== "none") {
-      fail("INVALID_ARGUMENT", `${batch.kind} does not support unique rebase.`);
+      fail(
+        "INVALID_ARGUMENT",
+        `${batch.kind} does not support unique rebase. No mutation occurred. An otherwise-valid supplied snapshot remains usable; omit rebase or set it to none, then retry.`,
+      );
     }
     if (batch.kind !== "text" && requestReadback) {
       fail(
@@ -1065,7 +1076,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               context.abort,
             );
             if (!bytesEqual(stable.bytes, snapshot.document.bytes)) {
-              fail("TARGET_CHANGED", "The file no longer matches the exact issued snapshot bytes.");
+              fail(
+                "TARGET_CHANGED",
+                "The file no longer matches the exact issued snapshot bytes. This call published nothing; the stale snapshot remains retained but cannot be reused for this strict operation. Run a fresh hashline_read and replan before retrying.",
+              );
             }
             if (destination) {
               if (stable.stats.dev !== destination.parentStats.dev) {
@@ -1122,7 +1136,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               if (persistedBytes > NATIVE_ALIAS_METADATA_MAX_BYTES) {
                 fail(
                   "UNSUPPORTED_FILE",
-                  `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes.`,
+                  `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes. No publication occurred and the snapshot remains retained. Lifecycle operations cannot be split; explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read. Never fall back silently.`,
                 );
               }
             }
@@ -1257,7 +1271,7 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
             if (persistedBytes > NATIVE_ALIAS_METADATA_MAX_BYTES) {
               fail(
                 "UNSUPPORTED_FILE",
-                `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes. Split the edit into smaller operations.`,
+                `Native alias metadata exceeds ${NATIVE_ALIAS_METADATA_MAX_BYTES} UTF-8 bytes. No publication occurred and the snapshot remains retained. Split the edit into smaller sequential calls. After each success, use its attached successor only if it issued the next call's evidence; otherwise run a fresh hashline_read. Alternatively, explicitly configure enforce:true with toolSurface:"hashline", restart, then run a fresh hashline_read. Never fall back silently.`,
               );
             }
           }
@@ -1275,7 +1289,10 @@ export const betterHashlinePlugin: Plugin = async (input, rawOptions) => {
               snapshots.invalidateSessionPath(context.sessionID, resolved.canonicalPath);
             },
           });
-          const successOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
+          const appliedOutput = `Applied ${plan.operationCount} operation${plan.operationCount === 1 ? "" : "s"}.`;
+          const successOutput = plan.rebased
+            ? `${appliedOutput} Exact unique rebase occurred.`
+            : appliedOutput;
           let output = editResultOutput(successOutput, "none");
           let resultMetadata = metadata;
           if (requestReadback) {

@@ -131,6 +131,61 @@ describe("filesystem resolution and permissions", () => {
     await expect(readStableFile(resolved, 2, true)).rejects.toThrow("UNSUPPORTED_FILE:");
   });
 
+  test("requires a fresh delivered read after a stable-read race", async () => {
+    const path = join(root, "raced-read");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const realStat = fsPromises.stat;
+    const statMock = spyOn(fsPromises, "stat").mockImplementation((async (target: PathLike) => {
+      if (String(target) === resolved.canonicalPath) await writeFile(path, "changed");
+      return realStat(target);
+    }) as typeof fsPromises.stat);
+    try {
+      await expect(readStableFile(resolved, 1024, true)).rejects.toThrow(
+        "RACE_BEFORE_WRITE: The file changed while it was being read. This read published nothing; run a fresh hashline_read and, before mutating, replan against the newly delivered snapshot.",
+      );
+    } finally {
+      statMock.mockRestore();
+    }
+  });
+
+  test("requires a fresh delivered read when file size changes during the read", async () => {
+    const path = join(root, "resized-read");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const realOpen = fsPromises.open;
+    const openMock = spyOn(fsPromises, "open").mockImplementation((async (
+      target: PathLike,
+      flags: string | number,
+    ) => {
+      const handle = await realOpen(target, flags);
+      let resized = false;
+      return new Proxy(handle, {
+        get(current, property) {
+          if (property === "read") {
+            return async (...args: unknown[]) => {
+              const result = await Reflect.apply(current.read, current, args);
+              if (!resized) {
+                resized = true;
+                await fsPromises.appendFile(path, "!");
+              }
+              return result;
+            };
+          }
+          const value: unknown = Reflect.get(current, property, current);
+          return typeof value === "function" ? value.bind(current) : value;
+        },
+      });
+    }) as typeof fsPromises.open);
+    try {
+      await expect(readStableFile(resolved, 1024, true)).rejects.toThrow(
+        "RACE_BEFORE_WRITE: The file changed size while it was being read. This read published nothing; run a fresh hashline_read and, before mutating, replan against the newly delivered snapshot.",
+      );
+    } finally {
+      openMock.mockRestore();
+    }
+  });
+
   test("inherits native external, read, and edit permission names", async () => {
     const asks: unknown[] = [];
     const context = fakeContext(asks);

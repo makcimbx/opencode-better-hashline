@@ -236,7 +236,7 @@ function expectedReadbackEvidence(editTool: VerificationCaseReport["editTool"]) 
   const readbackOutput = [
     "Applied 1 operation.",
     "@hashline-edit previous=consumed successor=attached",
-    `@hashline snapshot=<snapshot> sha256=${sha256(readbackBytes).slice(0, 12)} lines=20 partial=true`,
+    `@hashline snapshot=<snapshot> sha256=${sha256(readbackBytes).slice(0, 12)} lines=20 partial=true coverage=partial`,
     ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
     "@more offset=13",
   ].join("\n");
@@ -407,7 +407,7 @@ function isExpectedPatch(value: unknown, expected: OperationEvidence): value is 
 function expectedReadOutput(bytes: string): string {
   const lines = bytes.length === 0 ? [] : bytes.replace(/\n$/u, "").split("\n");
   return [
-    `@hashline snapshot=<snapshot> sha256=${sha256(bytes).slice(0, 12)} lines=${lines.length}`,
+    `@hashline snapshot=<snapshot> sha256=${sha256(bytes).slice(0, 12)} lines=${lines.length} coverage=complete`,
     ...lines.map((line, index) => `${index + 1}|${line}`),
     "@eof",
   ].join("\n");

@@ -21,12 +21,13 @@ provider credentials. Live-model benchmarks are opt-in and never gate a pull req
 
 ## Protocol Changes
 
-Tool names, flat schemas, operation-specific field combinations, line rendering, hash inputs,
-normalization, validation, mismatch behavior, permission metadata, and publication results are
-public protocol surface. File lifecycle changes also include direct path identity, complete issued
-coverage, source/destination authorization, lock sets, native renderer metadata, and partial-state
-semantics. Readback windows, operation-pair conflict diagnostics, and parent-chain creation plans are
-also public protocol surface. A pull request changing any of them must include:
+Tool names, flat schemas, operation-specific field combinations, line rendering, cumulative coverage
+headers, hash inputs, normalization, validation, mismatch behavior, permission metadata, and
+publication results are public protocol surface. File lifecycle changes also include direct path
+identity, complete issued coverage, source/destination authorization, lock sets, native renderer
+metadata, and partial-state semantics. Readback windows, operation-pair conflict diagnostics, and
+parent-chain creation plans are also public protocol surface. A pull request changing any of them
+must include:
 
 - a concrete failure or measured opportunity;
 - deterministic safety and compatibility tests;
@@ -51,12 +52,19 @@ publication, no state before the first directory exists or creation becomes ambi
 and `PARTIAL_PUBLICATION` afterward, and no rollback. `move_file` must never create parents.
 Read and readback tests must cover requested `limit` and `readbackLimit` values across the public
 `1..100,000` range, the 1,000-line default, and authoritative `maxOutputBytes` pagination (40 KiB
-by default and at most 45 KiB when configured). Byte-limited pages use `@more` only before EOF;
-`@eof` can coexist with `partial=true` when preview-only lines leave incomplete editable evidence.
-Readback remains one contiguous, one-based, text-only delivered page; undelivered or ID-only
-successor authority must be rejected. Text-edit tests must prove that `readback:true` works without a
-window, either window field implies readback, and explicit `readback:false` plus a window is rejected.
-Lifecycle tests must prove that `readback:true` and every window are rejected without a successor.
+by default and at most 45 KiB when configured). Every header must report `coverage=partial|complete`,
+computed from evidence already issued at render time plus the candidate page, without mutating
+issuance during rendering. Tests must prove that `complete` inputs are sufficient and remain so when
+the candidate stays valid and is attested, and that a `partial` render can become conservative when
+another page is delivered and attested later or out of order. They must also cover a complete page, a cumulatively
+completing `partial=true coverage=complete` page, preview-only and out-of-range partial coverage, exact
+byte budgets after reserving the longest header marker, and candidate invalidation issuing nothing.
+Byte-limited pages use `@more` only before EOF; `@eof` can coexist with `partial=true`. Readback remains
+one contiguous, one-based, text-only delivered page; undelivered, pending, invalidated, or ID-only
+successor authority must be rejected. Text-edit tests, including sole strict `replace_file`, must prove
+that `readback:true` works without a window, either window field implies readback, omission requests
+none, and explicit `readback:false` plus a window is rejected. Lifecycle tests for `delete_file` and
+`move_file` must prove that `readback:true` and every window are rejected without a successor.
 Coverage diagnostics must aggregate missing ranges and boundary requirements while recommending
 conservative reads of at most 1,000 lines. Replacement tests must prove that `startLine..endLine` is
 inclusive, `lines` is the complete replacement, outside neighbors remain, and every operation uses
@@ -79,8 +87,10 @@ failures, retries, partial publications, and unintended changes rather than succ
 averages. Never rewrite retained evidence to cover a new schema, operation, task set, or adapter; add
 a new identity and result. Dry runs and model-free verifier evidence are not paid model evidence.
 Development runner output is not retained evidence until it is written once at a new final result
-path. Preserve the schema-v5, schema-v6, schema-v7, and schema-v8 results plus pilot-v7 scope
-unchanged; future runner or protocol revisions require a new result identity.
+path. Preserve schema-v5 through schema-v9 results and pilot-v7 scope unchanged. The current
+schema-v10 write-once retained result is
+`benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json`; future runner or protocol
+revisions require another new result identity.
 
 ## Commits
 

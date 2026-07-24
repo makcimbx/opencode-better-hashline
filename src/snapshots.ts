@@ -119,6 +119,17 @@ function subtractRanges(
   return missing;
 }
 
+export function predictsCompleteIssuedCoverage(snapshot: Snapshot, page: IssuedPage): boolean {
+  const issued = mergeRanges([...snapshot.issued, ...page.ranges]);
+  const lineCount = snapshot.document.lines.length;
+  return (
+    (snapshot.issuedBof || page.bof) &&
+    (snapshot.issuedEof || page.eof) &&
+    (lineCount === 0 ||
+      (issued.length === 1 && issued[0]?.start === 1 && issued[0]?.end === lineCount))
+  );
+}
+
 export function collectMissingIssuedCoverage(
   snapshot: Snapshot,
   requirements: IssuedCoverageRequirements,
@@ -338,17 +349,11 @@ export class SnapshotStore {
         "The snapshot is no longer usable. Rerun hashline_read in this same session and use only the snapshot ID it returns; old IDs cannot be revived.",
       );
     }
+    const complete = predictsCompleteIssuedCoverage(snapshot, page);
     snapshot.issued = mergeRanges([...snapshot.issued, ...page.ranges]);
     snapshot.issuedBof ||= page.bof;
     snapshot.issuedEof ||= page.eof;
-    const lineCount = snapshot.document.lines.length;
-    snapshot.complete =
-      snapshot.issuedBof &&
-      snapshot.issuedEof &&
-      (lineCount === 0 ||
-        (snapshot.issued.length === 1 &&
-          snapshot.issued[0]?.start === 1 &&
-          snapshot.issued[0]?.end === lineCount));
+    snapshot.complete = complete;
     snapshot.delivered = true;
     this.#touch(snapshot);
   }

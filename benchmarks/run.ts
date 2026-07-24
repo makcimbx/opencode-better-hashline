@@ -8,12 +8,14 @@ import {
   hashlineWriteArgumentsSchema,
 } from "../src/plugin.js";
 import {
+  runCoverageHeaderWireSuite,
   runDeterministicSuite,
   runEditProtocolUxCallWireSuite,
   runFileLifecycleCallWireSuite,
   runMicroSuite,
   runMoveCorridorWireSuite,
   runRenderingWireSuite,
+  runReplaceFileReadbackCallWireSuite,
   runStaticSizeSuite,
   runTransferCallWireSuite,
 } from "./suite.js";
@@ -49,7 +51,7 @@ function rawEditSchemaFixtureWireSize(): {
   deltaPercent: number;
 } {
   const syntheticBaselineDescription =
-    'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. rebase defaults to none; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.';
+    'Apply a validation-atomic line edit to an exact hashline_read snapshot. Deletion is lines: []; a blank line is lines: [""]. Omitted rebase uses unique for relocation-capable text batches and none for strict-only operations; unique only relocates unchanged, unambiguous text and never uses fuzzy matching.';
   const currentParameters = z.toJSONSchema(hashlineEditArgumentsSchema);
   const baselineParameters = structuredClone(currentParameters) as JsonSchemaNode;
   const operation = baselineParameters.properties?.operations?.items;
@@ -134,28 +136,72 @@ const implementationSources = await Promise.all(
 const deterministic = runDeterministicSuite();
 const staticSize = runStaticSizeSuite();
 const renderingWireSize = runRenderingWireSuite();
+const coverageHeaderWireSize = runCoverageHeaderWireSuite();
 const operationSchemaWireSize = rawEditSchemaFixtureWireSize();
 const writeOperationSchemaWireSize = rawWriteSchemaFixtureWireSize();
 const fileLifecycleCallWireSize = runFileLifecycleCallWireSuite();
 const editProtocolUxCallWireSize = runEditProtocolUxCallWireSuite();
+const replaceFileReadbackCallWireSize = runReplaceFileReadbackCallWireSuite();
 const transferCallWireSize = runTransferCallWireSuite();
 const moveCorridorWireSize = runMoveCorridorWireSuite();
 const micro = runMicroSuite();
 if (renderingWireSize.legacyIssued || !renderingWireSize.currentIssued) {
   throw new Error("Long-line rendering wire-size assertions failed.");
 }
+const coverageRows = new Map(coverageHeaderWireSize.map((row) => [row.scenario, row]));
+const completeCoverage = coverageRows.get("complete single page");
+const partialCoverage = coverageRows.get("initial partial page");
+const cumulativeCoverage = coverageRows.get("cumulative completion page");
+if (
+  completeCoverage?.coverage !== "complete" ||
+  completeCoverage.pagePartial ||
+  completeCoverage.legacyHeaderBytes !== 71 ||
+  completeCoverage.currentHeaderBytes !== 89 ||
+  completeCoverage.overheadBytes !== 18 ||
+  partialCoverage?.coverage !== "partial" ||
+  !partialCoverage.pagePartial ||
+  partialCoverage.legacyHeaderBytes !== 84 ||
+  partialCoverage.currentHeaderBytes !== 101 ||
+  partialCoverage.overheadBytes !== 17 ||
+  cumulativeCoverage?.coverage !== "complete" ||
+  !cumulativeCoverage.pagePartial ||
+  cumulativeCoverage.priorIssuedLines !== 2 ||
+  cumulativeCoverage.pageIssuedLines !== 1 ||
+  cumulativeCoverage.legacyHeaderBytes !== 84 ||
+  cumulativeCoverage.currentHeaderBytes !== 102 ||
+  cumulativeCoverage.overheadBytes !== 18
+) {
+  throw new Error("Coverage-header wire-size assertions failed.");
+}
+if (
+  replaceFileReadbackCallWireSize.omittedRequestsReadback ||
+  !replaceFileReadbackCallWireSize.explicitRequestsReadback ||
+  replaceFileReadbackCallWireSize.omittedEditBytes !== 149 ||
+  replaceFileReadbackCallWireSize.explicitReadbackEditBytes !== 165 ||
+  replaceFileReadbackCallWireSize.explicitOptInCostBytes !== 16 ||
+  replaceFileReadbackCallWireSize.standaloneReadCallBytes !== 29 ||
+  replaceFileReadbackCallWireSize.separateCallInputBytes !== 178 ||
+  replaceFileReadbackCallWireSize.attachedSuccessorCallInputBytes !== 165 ||
+  replaceFileReadbackCallWireSize.attachedSuccessorSavingsBytes !== 13
+) {
+  throw new Error("replace_file readback call wire-size assertions failed.");
+}
 const summary = new Map(deterministic.summary.map((row) => [row.adapter, row]));
 if (
   summary.get("better-hashline-strict")?.unsafe_accept !== 0 ||
   summary.get("better-hashline-unique")?.unsafe_accept !== 0 ||
   summary.get("better-hashline-unique")?.false_reject !== 0 ||
+  summary.get("better-hashline-default")?.exact_apply !== 11 ||
+  summary.get("better-hashline-default")?.safe_reject !== 18 ||
+  summary.get("better-hashline-default")?.false_reject !== 0 ||
+  summary.get("better-hashline-default")?.unsafe_accept !== 0 ||
   (summary.get("endpoint-hash-8")?.unsafe_accept ?? 0) < 1 ||
   (summary.get("endpoint-hash-16")?.unsafe_accept ?? 0) < 1
 ) {
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 8,
+  schemaVersion: 10,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -175,10 +221,12 @@ const result = {
   },
   methodology: {
     deterministic:
-      "In-memory protocol mechanics only; no model, OpenCode baseline, or semantic-code claim.",
+      "In-memory protocol mechanics only; the omitted adapter passes no rebase property and exercises the incremental branch of the shared runtime policy resolver. Strict-only defaults are covered by runtime tests, not this corpus. No model, OpenCode baseline, or semantic-code claim.",
     staticSize: "Exact UTF-8 bytes for one generated 1,000-line fixture; not token estimates.",
     renderingWireSize:
-      "Exact UTF-8 bytes before and after byte-budget issuance for one generated long-line fixture.",
+      "Exact UTF-8 bytes for one synthetic preview-era long-line output without a coverage marker versus the current issued output under a 4,096-byte budget.",
+    coverageHeaderWireSize:
+      "Exact UTF-8 header bytes for the former header without coverage and the current coverage=partial|complete header across complete, partial, and cumulatively completing pages.",
     operationSchemaWireSize:
       "Exact compact UTF-8 JSON bytes for the hashline_edit description plus raw z.toJSONSchema fixture, compared with a synthetic baseline derived from that current schema; not a provider projection or token estimate.",
     writeOperationSchemaWireSize:
@@ -187,6 +235,8 @@ const result = {
       "Exact compact UTF-8 JSON bytes for valid Better Hashline lifecycle calls and equivalent native apply_patch calls; no semantic or safety advantage is inferred from size.",
     editProtocolUxCallWireSize:
       "Exact compact UTF-8 JSON bytes for legacy explicit controls versus inferred readback, empty-file, and parent-creation calls.",
+    replaceFileReadbackCallWireSize:
+      "Exact compact UTF-8 request bytes for replace_file with omitted readback versus explicit readback:true, plus a standalone hashline_read request. Omission requests no readback; the reported call-input savings apply only when explicit readback attaches a usable successor page. Response bytes and attachment availability are not measured.",
     transferCallWireSize:
       "Exact compact UTF-8 JSON bytes for copy/move calls versus equivalent model-supplied insert/replace payloads.",
     moveCorridorWireSize:
@@ -197,10 +247,12 @@ const result = {
   deterministic,
   staticSize,
   renderingWireSize,
+  coverageHeaderWireSize,
   operationSchemaWireSize,
   writeOperationSchemaWireSize,
   fileLifecycleCallWireSize,
   editProtocolUxCallWireSize,
+  replaceFileReadbackCallWireSize,
   transferCallWireSize,
   moveCorridorWireSize,
   micro,
@@ -212,6 +264,8 @@ console.log("\nStatic model-visible size\n");
 console.table(staticSize);
 console.log("\nLong-line rendering wire-size change\n");
 console.table([renderingWireSize]);
+console.log("\nCoverage-header wire-size change\n");
+console.table(coverageHeaderWireSize);
 console.log("\nRaw edit-schema fixture wire-size change\n");
 console.table([operationSchemaWireSize]);
 console.log("\nRaw write-schema fixture wire-size change\n");
@@ -220,6 +274,8 @@ console.log("\nFile-lifecycle call wire size\n");
 console.table(fileLifecycleCallWireSize);
 console.log("\nEdit-protocol UX call wire size\n");
 console.table(editProtocolUxCallWireSize);
+console.log("\nreplace_file readback call wire size\n");
+console.table([replaceFileReadbackCallWireSize]);
 console.log("\nTransfer call wire-size change\n");
 console.table(transferCallWireSize);
 console.log("\nMove-corridor read wire size\n");

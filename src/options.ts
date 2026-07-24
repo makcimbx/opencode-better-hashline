@@ -23,7 +23,7 @@ export interface BetterHashlineOptions {
   snapshotTtlMs?: number;
   /** Model-visible output budget for one hashline_read result. */
   maxOutputBytes?: number;
-  /** Maximum exact context on each side during an explicit unique rebase. */
+  /** Maximum exact context on each side during unique rebase. */
   maxContextLines?: number;
 }
 

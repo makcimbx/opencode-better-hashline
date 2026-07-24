@@ -142,7 +142,7 @@ const readbackEvidence = (editTool: "hashline_edit" | "edit" | "apply_patch") =>
       output: [
         "Applied 1 operation.",
         "@hashline-edit previous=consumed successor=attached",
-        `@hashline snapshot=<snapshot> sha256=${digest(readbackBytes).slice(0, 12)} lines=20 partial=true`,
+        `@hashline snapshot=<snapshot> sha256=${digest(readbackBytes).slice(0, 12)} lines=20 partial=true coverage=partial`,
         ...deliveredLines.map((line, index) => `${index + 8}|${line}`),
         "@more offset=13",
       ].join("\n"),
@@ -168,7 +168,7 @@ const compositionEvidence = (editTool: "hashline_edit" | "edit" | "apply_patch")
 const readOutput = (bytes: string) => {
   const lines = bytes.replace(/\n$/u, "").split("\n");
   return [
-    `@hashline snapshot=<snapshot> sha256=${digest(bytes).slice(0, 12)} lines=${lines.length}`,
+    `@hashline snapshot=<snapshot> sha256=${digest(bytes).slice(0, 12)} lines=${lines.length} coverage=complete`,
     ...lines.map((line, index) => `${index + 1}|${line}`),
     "@eof",
   ].join("\n");
@@ -521,7 +521,26 @@ const receipt: NativeAliasPreflightReceipt = {
 };
 
 describe("native alias preflight receipt", () => {
-  test("accepts one coherent synthetic receipt for the current package identity", () => {
+  test("accepts one coherent synthetic receipt with mandatory coverage headers", () => {
+    const headers = receipt.verifierReport.cases.flatMap((verificationCase) => {
+      const events = JSON.parse(verificationCase.metadataSnapshot) as Array<{
+        state: { output?: unknown };
+      }>;
+      const readback = JSON.parse(verificationCase.readbackEvidence) as {
+        readback: { output?: unknown };
+      };
+      return [...events.map(({ state }) => state.output), readback.readback.output].flatMap(
+        (output) =>
+          typeof output === "string"
+            ? output.split("\n").filter((line) => line.startsWith("@hashline snapshot="))
+            : [],
+      );
+    });
+    expect(headers).toHaveLength(15);
+    expect(headers.filter((header) => header.endsWith(" coverage=complete"))).toHaveLength(12);
+    expect(
+      headers.filter((header) => header.endsWith(" partial=true coverage=partial")),
+    ).toHaveLength(3);
     expect(() =>
       assertNativeAliasPreflightReceipt(structuredClone(receipt), expected),
     ).not.toThrow();
