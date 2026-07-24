@@ -709,7 +709,7 @@ describe("new-file parent planning", () => {
     }) as typeof fsPromises.lstat);
     try {
       await expect(stabilizeNewFileParentPlan(plan)).rejects.toThrow(
-        "RACE_BEFORE_WRITE: A planned parent directory appeared inconsistently.",
+        "RACE_BEFORE_WRITE: A planned parent appeared with an inconsistent path identity. No publication occurred.",
       );
     } finally {
       lstatMock.mockRestore();

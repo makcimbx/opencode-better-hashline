@@ -2517,11 +2517,12 @@ describe("OpenCode plugin protocol", () => {
       );
       expect(Buffer.byteLength(second.output, "utf8")).toBe(132);
       expect(second.metadata.reusedDirectories).toEqual([relative(root, shared)]);
+      const canonicalSecondPath = await realpath(join(shared, "second.txt"));
       expect(secondAsks.at(-1)).toMatchObject({
         permission: "edit",
         metadata: {
           createdDirectories: [],
-          filepaths: [join(shared, "second.txt")],
+          filepaths: [canonicalSecondPath],
         },
       });
       expect(await readFile(join(shared, "first.txt"), "utf8")).toBe("first\n");
