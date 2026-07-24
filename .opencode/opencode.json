@@ -1,4 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [["../src/index.ts", { "enforce": true, "toolSurface": "native-aliases" }]]
+  "plugin": [["../src/index.ts", { "enforce": true, "toolSurface": "native-aliases" }]],
+  "lsp": {
+    "typescript": {
+      "command": ["bun", "x", "--no-install", "typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"],
+      "initialization": {
+        "tsserver": { "path": "./node_modules/@typescript/old/lib/tsserver.js" }
+      }
+    }
+  }
 }

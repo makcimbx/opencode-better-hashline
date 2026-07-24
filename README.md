@@ -223,7 +223,8 @@ OpenCode accepts plugin options as the second tuple element:
         "maxSnapshotsPerSession": 32,
         "snapshotTtlMs": 1800000,
         "maxOutputBytes": 40960,
-        "maxContextLines": 4
+        "maxContextLines": 4,
+        "lspDiagnostics": true
       }
     ]
   ]
@@ -243,10 +244,71 @@ OpenCode accepts plugin options as the second tuple element:
 | `snapshotTtlMs` | 30 minutes | Snapshot lifetime |
 | `maxOutputBytes` | 40 KiB | Authoritative model-visible read/readback budget; configurable up to 45 KiB |
 | `maxContextLines` | 4 | Exact context on each side for `unique` rebase |
+| `lspDiagnostics` | enabled | Managed Error diagnostics from eligible public OpenCode LSP entries and optional server overrides; `false` opts out |
 
 Unknown or inconsistent options put the plugin into a diagnostic fail-closed mode: native mutators remain hidden and every Better Hashline tool returns `CONFIG_INVALID`. Fix the configuration and restart OpenCode. `maxCacheBytes` must be at least three times `maxFileBytes`.
 
 Set `enforce: false` only for migration or A/B evaluation. It leaves native mutators enabled and exposes two separate workflows: use `hashline_read` only with `hashline_edit`; for native mutation of an existing file, use native `read` followed by native `edit`, `write`, or `apply_patch`. Native `write` or `apply_patch` may create an absent target without a preceding read. Never pass hashline annotations or snapshot IDs to native mutators.
+
+### Managed LSP diagnostics
+
+`lspDiagnostics` is enabled by default. Omission, `true`, and an object keep it enabled; `false` is the only opt-out. On its first managed-LSP request, Better Hashline obtains the scoped effective OpenCode configuration through the public `config` hook (or one bounded public `client.config.get` fallback), then imports only `config.lsp` object entries that expose non-empty `command` and `extensions` fields. Disabled, malformed, unroutable, and private-looking entries are skipped. A Boolean `config.lsp: true` can enable OpenCode's built-in private definitions, but those definitions are not public configuration and cannot be cloned by this plugin.
+
+A `lspDiagnostics` object can add server definitions or override an imported definition with the same `id`. `servers` may be empty; if no eligible imported or override server remains, managed LSP is an exact no-op: no manager, process, warning, or output-budget change. The default and allowed limits are:
+
+- `startupTimeoutMs`: 15,000 ms (`1,000..60,000`);
+- `diagnosticsTimeoutMs`: 5,000 ms (`250..30,000`);
+- `maxDiagnostics`: 20 (`1..100`) Error entries;
+- `maxDiagnosticsBytes`: 8 KiB (`1..16` KiB) for the advisory appendix or mandatory warning.
+
+For example, an effective public OpenCode LSP entry can be shared as configuration input:
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "command": ["bun", "x", "--no-install", "typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".tsx", ".js", ".jsx"],
+      "initialization": {
+        "tsserver": {
+          "path": "./node_modules/@typescript/old/lib/tsserver.js"
+        }
+      }
+    }
+  },
+  "plugin": [
+    [
+      "opencode-better-hashline",
+      { "lspDiagnostics": true }
+    ]
+  ]
+}
+```
+
+`bun x --no-install` refuses an implicit install, so make the language server and its TypeScript dependency available in the project. The `@typescript/old` path is useful only for projects that deliberately install a compatible TypeScript alias there; otherwise point `tsserver.path` at the project's actual package or omit that override. To add `rootMarkers`, environment additions, or a definition independent of public `config.lsp`, place the same bounded fields in `lspDiagnostics.servers`; a matching `id` wins over the imported entry.
+
+The effective server set and host output limits freeze when the manager is first requested, not when the plugin module loads. Later `config` hook updates are intentionally ignored until the plugin or host restarts. Processes still start lazily only when a matching read warmup or committed mutation needs them, and persist independently by canonical root, server ID, and immutable normalized configuration digest. Separate Better Hashline clients do not share OpenCode's LSP clients and may duplicate server processes, caches, and resource use.
+
+Routing first requires a matching extension and an absolute canonical path inside the active canonical worktree. Traversal-free `rootMarkers` select the nearest stable marked ancestor; the worktree is the fallback root. If OpenCode supplies `/` as its worktree sentinel, Better Hashline uses the active request `directory` rather than treating the filesystem root as scope. External paths and symlink escapes never start or reuse a managed client.
+
+A stable `hashline_read` may warm matching clients without delaying or changing read output. Every managed operation has one absolute `diagnosticsTimeoutMs` deadline covering queue wait, routing, startup, synchronization, lifecycle work, and diagnostics across all matching servers. Mutation work begins only after verified publication and path-lock release, never after `PARTIAL_PUBLICATION`, and never rolls back committed bytes. Creates and text edits synchronize the immutable committed URI and exact committed text; deletion closes an owned document; movement closes the source and independently routes and opens the destination. The client sends no watched-file notifications.
+
+After the LSP wait, Better Hashline stable-rereads the target only to prove that its current bytes and identity still match the committed result. Drift suppresses diagnostics, invalidates pending readback, quarantines the binding, and emits a mandatory warning. Revision fences suppress stale queued work. A clean result appends nothing; otherwise only severity `Error` entries are sanitized, deduplicated, deterministically sorted, and rendered as explicitly advisory:
+
+```text
+@better-hashline-lsp advisory=true errors=1 truncated=false
+LSP| src/example.ts:4:9 [typescript/2322] Type 'string' is not assignable to type 'number'.
+```
+
+Startup failure, timeout, crash, cancellation, malformed or oversized protocol data, unsupported synchronization, and lifecycle failure produce a bounded mandatory `LSP_DIAGNOSTICS_UNAVAILABLE` warning. It states that the mutation succeeded, must not be retried, and requires inspection plus a fresh `hashline_read`. Diagnostics and warnings are post-commit observations, not freshness authority or proof of semantic correctness.
+
+The managed appendix receives extra OpenCode `tool_output` byte and line headroom beyond the legacy `maxOutputBytes` budget, subject to `maxDiagnosticsBytes` and host limits. Optional diagnostics are trimmed or dropped before the existing receipt or attached readback. A mandatory unavailable or drift warning takes priority and may shrink readback or trim a long legacy receipt so the non-retry warning survives. The complete final output is delivery-attested. Native-alias renderer metadata deliberately remains byte-compatible with exactly `diagnostics: {}`.
+
+Commands spawn directly without a shell in the canonical root and inherit the host environment plus bounded additions. The client caps protocol bodies at 8 MiB, headers at 16 KiB, retained stderr at 64 KiB, pending work and diagnostic retention, and process-tree shutdown. A manager admits at most 64 persistent clients and 4,096 document bindings/queues; each client retains at most 64 open documents and 16 MiB of text, each document queue holds at most 64 tasks, and a failed client may restart at most twice per rolling 60 seconds.
+
+The client uses static UTF-16 synchronization plus push or pull diagnostics. It does not support dynamic registration or watched-file notifications, format files, provide hover/definition/reference/symbol/rename navigation, run code actions, accept `workspace/applyEdit`, honor arbitrary or server-directed command execution, or update OpenCode's host LSP state. The sole command-protocol exception is for `typescript-language-server`: when initialization advertises the exact `typescript.tsserverRequest` command, the client issues fixed `syntacticDiagnosticsSync`, `semanticDiagnosticsSync`, and `suggestionDiagnosticsSync` requests solely as a post-change diagnostic-freshness barrier. Contradictory current push errors take precedence; malformed or unsupported command evidence never establishes a clean result. Continue using OpenCode's built-in `lsp` tool and formatter for interactive capabilities.
+
+Because configuration is frozen lazily, enable/disable, imported `config.lsp`, override-server, limit, and host-output changes require a plugin or host restart once the manager has been requested. Obtain a fresh delivered and attested `hashline_read` before further mutation. Native aliases must bind the new live epoch, and old snapshot IDs remain unusable.
 
 ### Experimental native aliases
 
@@ -330,9 +392,9 @@ Better Hashline therefore separates model-facing addressing from server-side aut
 
 ## Evidence
 
-The current deterministic runner uses schema v10. Its write-once retained result is
-[the schema-v10 coverage/readback UX record](benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json). Schema v10 keeps the unchanged 29-case corpus and operation-aware omitted/default adapter, then adds wire evidence for cumulative header coverage and explicit `replace_file` readback. Strict-only defaults remain covered by runtime tests rather than this corpus.
-The immutable schema-v9 operation-aware record, schema-v5 through schema-v8 records, and pilot-v7
+The current deterministic runner uses schema v11. Its write-once retained result is
+[the schema-v11 managed LSP diagnostics record](benchmarks/results/2026-07-25-managed-lsp-diagnostics-windows-x64.json). Schema v11 preserves the schema-v10 runner's unchanged 29-case classifications and prior cumulative-coverage-header and explicit `replace_file`-readback fixtures, then adds production-composed managed LSP output/headroom fixtures through the shared `lspLegacyLimits` and `buildLspOutput` paths. The fixtures cover clean byte-identical output, Error diagnostics, byte and line headroom, mandatory manager and drift warnings, and an insufficient host envelope; they invoke no language server or model. Strict-only defaults remain covered by runtime tests rather than this corpus.
+The immutable [schema-v10 coverage/readback record](benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json), schema-v5 through schema-v9 records, and pilot-v7
 evidence retain their original scope and bytes. Comparison arms are deliberately small protocol
 simulations, not complete implementations of third-party tools. The unchanged corpus classifications are:
 
@@ -346,7 +408,7 @@ simulations, not complete implementations of third-party tools. The unchanged co
 | 8-bit endpoint hashes | 6 | 4 |
 | 16-bit endpoint hashes | 5 | 4 |
 
-The full four-outcome counts are strict `6/18/5/0`, explicit unique `11/18/0/0`, omitted/default `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, 8-bit endpoints `7/12/4/6`, and 16-bit endpoints `7/13/4/5` (`exact_apply/safe_reject/false_reject/unsafe_accept`). This corpus tests in-memory textual protocol mechanics only; it does not exercise semantic intent, OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; schema-v10 deterministic output is not a paid/model-quality claim. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
+The full four-outcome counts are strict `6/18/5/0`, explicit unique `11/18/0/0`, omitted/default `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`, 8-bit endpoints `7/12/4/6`, and 16-bit endpoints `7/13/4/5` (`exact_apply/safe_reject/false_reject/unsafe_accept`). This corpus tests in-memory textual protocol mechanics only; it does not exercise semantic intent, OpenCode hooks, permissions, or filesystem publication. The target-only exact search arm's single false reject is the duplicate-target case that equivalent exact context can resolve; its unsafe accepts are stale selected-target and boundary cases that a stronger revision/context protocol could reject. The table does not establish an addressing-format advantage. It is intentionally not evidence that one format makes a language model better at software engineering. The opt-in paired model harness defaults to a dry run and requires explicit cost acknowledgement; schema-v11 deterministic output is not a paid/model-quality claim. The full chart is kept with the [benchmark methodology](docs/benchmarks.md), not as a headline product claim.
 
 ```sh
 bun run bench
@@ -361,13 +423,14 @@ See [benchmark methodology and raw results](docs/benchmarks.md), [prior-art audi
 | --- | --- |
 | OpenCode `>=1.18.3 <2` stable V1 plugin API | Supported; verifier pinned to 1.18.4 |
 | Experimental native aliases | Capability-checked at startup; explicit opt-in |
+| Managed LSP diagnostics | Default-on import of eligible explicit public `config.lsp` entries plus optional overrides; canonical-worktree files only |
 | Windows, Linux, macOS | CI and filesystem tests |
 | UTF-8, optional BOM, LF, CRLF, mixed EOL, lone CR | Supported |
 | Directories, images, PDFs, binary files | Use native `read`; not editable here |
 | Hardlinks, special files, read-only targets | Rejected |
 | OpenCode V2 plugin API | Not supported |
 
-The custom read tool intentionally does not imitate OpenCode's native media attachments, directory listing, instruction tracking, LSP warmup, or specialized UI rendering. Native `read` remains available for those jobs.
+The custom read tool intentionally does not imitate OpenCode's native media attachments, directory listing, instruction tracking, host-LSP warmup, or specialized UI rendering. Native `read` remains available for those jobs. Unless explicitly opted out, Better Hashline may independently warm only matching imported or override managed servers.
 
 ## Limitations
 
@@ -379,6 +442,7 @@ The custom read tool intentionally does not imitate OpenCode's native media atta
 - Executable mode and ownership are preserved where supported; all metadata preservation is not promised.
 - `enforce` blocks OpenCode's native mutator tool IDs, but it does not sandbox shell commands or other plugins.
 - Native aliases cannot attest final registry ownership or prevent later hooks from mutating renderer metadata.
+- Managed LSP diagnostics use separate persistent processes and state, can duplicate OpenCode host-LSP resource use, and remain advisory rather than proof of semantic correctness.
 - Snapshot caches are in memory and disappear on restart, expiry, or eviction. An approved publication invalidates every affected path when it reaches the consume boundary, including partial outcomes; invalidation is not limited to successful publication.
 
 Full boundaries and trust assumptions are in [docs/threat-model.md](docs/threat-model.md).

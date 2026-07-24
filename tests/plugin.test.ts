@@ -2730,15 +2730,19 @@ describe("OpenCode hooks", () => {
     ).resolves.toBeUndefined();
   });
 
-  test("adds guidance and native-read annotation", async () => {
+  test("merges guidance into the leading system block and annotates native read", async () => {
     const value = await hooks();
-    const system = { system: [] as string[] };
+    const systemBlocks = ["OpenCode guidance"];
+    const system = { system: systemBlocks };
     await value["experimental.chat.system.transform"]?.({} as never, system);
-    expect(system.system.join("\n")).toContain("Native edit, write, and apply_patch are disabled");
-    expect(system.system.join("\n")).toContain(
+    expect(system.system).toBe(systemBlocks);
+    expect(system.system).toHaveLength(1);
+    expect(system.system[0]).toStartWith("OpenCode guidance\n\nBetter Hashline is active.");
+    expect(system.system[0]).toContain("Native edit, write, and apply_patch are disabled");
+    expect(system.system[0]).toContain(
       "neighboring lines outside the range remain, so do not repeat retained context such as a closing delimiter unless intentional.",
     );
-    expect(system.system.join("\n")).toContain(
+    expect(system.system[0]).toContain(
       "Every operation uses original immutable pre-batch coordinates; never shift later startLine/endLine/afterLine because of earlier operations and never target lines created by another operation.",
     );
 

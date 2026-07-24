@@ -1492,7 +1492,7 @@ export async function publishNewFile(input: {
   bytes: Uint8Array;
   signal: AbortSignal;
   consume?: () => void;
-}): Promise<void> {
+}): Promise<StableFile> {
   const { resolved, bytes, signal, consume } = input;
   throwIfAborted(signal);
   await assertNewParentStable(resolved, "PATH_MISMATCH", signal);
@@ -1503,6 +1503,7 @@ export async function publishNewFile(input: {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   let primaryError: unknown;
   let published = false;
+  let result: StableFile | undefined;
   try {
     const temporary = await openTemporaryFile(resolved.canonicalPath, 0o666, signal);
     temporaryPath = temporary.path;
@@ -1625,6 +1626,7 @@ export async function publishNewFile(input: {
       failAfterNewFilePublication("The created file changed after publication.");
     }
     await assertNewParentStable(resolved, "RACE_AFTER_WRITE");
+    result = verified;
   } catch (error) {
     const normalized = normalizePublicationError(error, signal, published, "File creation");
     primaryError =
@@ -1664,6 +1666,8 @@ export async function publishNewFile(input: {
     }
   }
   if (primaryError !== undefined) throw primaryError;
+  if (!result) failAfterNewFilePublication("The created file ended without verified identity.");
+  return result;
 }
 
 async function verifyPlannedNewFileDirectory(
@@ -1759,7 +1763,7 @@ export async function publishNewFileWithParents(input: {
   bytes: Uint8Array;
   signal: AbortSignal;
   consume?: () => void;
-}): Promise<void> {
+}): Promise<StableFile> {
   const { plan, signal } = input;
   const bytes = input.bytes.slice();
   const createdStats: Stats[] = [];
@@ -1810,12 +1814,13 @@ export async function publishNewFileWithParents(input: {
       parentStats,
       canonicalPath: plan.canonicalPath,
     };
-    await publishNewFile({ resolved, bytes, signal, consume });
+    const verified = await publishNewFile({ resolved, bytes, signal, consume });
 
     if (createdStats.length > 0) {
       throwIfAborted(signal);
       await verifyCreatedNewFileDirectories(plan, createdStats);
     }
+    return verified;
   } catch (error) {
     if (!createdAnyDirectory) throw error;
     failPartialParentCreation();

@@ -2322,13 +2322,13 @@ describe("filesystem publication", () => {
       return realUnlink(path);
     });
     try {
-      await expect(
-        publishNewFile({
-          resolved: cleanupFailure,
-          bytes: encoder.encode("committed"),
-          signal: new AbortController().signal,
-        }),
-      ).resolves.toBeUndefined();
+      const verified = await publishNewFile({
+        resolved: cleanupFailure,
+        bytes: encoder.encode("committed"),
+        signal: new AbortController().signal,
+      });
+      expect(verified.bytes).toEqual(encoder.encode("committed"));
+      expect(verified.stats.nlink).toBe(1);
     } finally {
       unlinkMock.mockRestore();
     }
@@ -2352,7 +2352,7 @@ describe("new-file parent publication", () => {
     const bytes = Uint8Array.of(0, 13, 10, 127, 128, 254, 255);
     const expectedMode = 0o777 & ~process.umask();
 
-    await publishNewFileWithParents({
+    const verified = await publishNewFileWithParents({
       plan,
       bytes,
       signal: new AbortController().signal,
@@ -2375,6 +2375,10 @@ describe("new-file parent publication", () => {
     const targetStats = await stat(plan.canonicalPath);
     expect(targetStats.isFile()).toBe(true);
     expect(targetStats.nlink).toBe(1);
+    expect(verified.bytes).toEqual(bytes);
+    expect(verified.stats.dev).toBe(targetStats.dev);
+    expect(verified.stats.ino).toBe(targetStats.ino);
+    expect(verified.stats.nlink).toBe(targetStats.nlink);
     expect((await readdir(plan.canonicalParent)).some((name) => name.includes(".hashline-"))).toBe(
       false,
     );
@@ -2792,7 +2796,7 @@ describe("new-file parent publication", () => {
             try {
               await realLstat(plan.canonicalPath);
               parentChecksAfterCommit += 1;
-              if (parentChecksAfterCommit === 2) throw syscallError("EIO");
+              if (parentChecksAfterCommit >= 2) throw syscallError("EIO");
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             }
@@ -2809,7 +2813,8 @@ describe("new-file parent publication", () => {
           signal: new AbortController().signal,
         });
         if (recoveredBoundaries.has(boundary)) {
-          await expect(publication).resolves.toBeUndefined();
+          const verified = await publication;
+          expect(verified.stats.nlink).toBe(1);
         } else {
           await expect(publication).rejects.toThrow("PARTIAL_PUBLICATION:");
         }

@@ -9,9 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added default-on managed LSP Error diagnostics with an explicit `false` opt-out, lazy frozen import of eligible scoped public `config.lsp` command entries, optional ID-based server overrides, process-free zero-route behavior, canonical-worktree persistent clients, immutable post-publication synchronization, one absolute deadline, and bounded transport/resource use. Failures and drift produce advisory non-retry warnings without rollback; diagnostics use extra host output headroom while native-alias metadata remains empty. The independent clients may duplicate host-LSP resources and deliberately provide no dynamic registration, watched-file notifications, formatting, navigation, code actions, arbitrary or server-directed command execution, or workspace edits. For `typescript-language-server` only, an advertised `typescript.tsserverRequest` command permits three fixed diagnostic-sync requests solely as a post-change freshness barrier; contradictory current push errors win, and malformed or unsupported command evidence never establishes a clean result.
+- Added the write-once retained schema-v11 deterministic result, preserving prior deterministic classifications and wire fixtures while adding production-composed managed LSP output/headroom fixtures.
+
 ### Changed
 
 ### Fixed
+
+- Folded Better Hashline guidance into OpenCode's leading system block instead of appending a second `system` message, preserving in-place hook semantics while supporting strict local chat templates such as Qwen.
 
 ## [0.8.1](https://github.com/makcimbx/opencode-better-hashline/compare/v0.8.0...v0.8.1) (2026-07-24)
 

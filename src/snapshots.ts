@@ -398,6 +398,11 @@ export class SnapshotStore {
     else this.#evict();
   }
 
+  invalidate(snapshot: Snapshot): void {
+    snapshot.invalid = true;
+    if (this.#snapshots.get(snapshot.id) === snapshot) this.#remove(snapshot.id);
+  }
+
   assertRangeIssued(snapshot: Snapshot, start: number, end: number): void {
     if (
       !Number.isSafeInteger(start) ||

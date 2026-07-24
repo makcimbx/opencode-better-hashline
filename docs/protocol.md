@@ -474,6 +474,11 @@ restrict mutation paths to the current worktree. While unbound or mismatched, na
 attested by `tool.execute.after`; edit admission then also requires the supplied snapshot to have been
 delivered. Live admission never fetches persisted history.
 
+Better Hashline mutates OpenCode's live system array in place and folds its guidance into the leading
+block, creating that block only when the array is empty. It does not append another wire-level
+`system` message or collapse blocks owned by other plugins. This preserves system-level instruction
+authority while avoiding the second-system-message shape rejected by strict local chat templates.
+
 Reads prepared for the same fingerprint and canonical worktree may reuse the current candidate authority. Preparing a differing identity retires active authority immediately. Only the current candidate delivered and attested by `tool.execute.after` can commit, and a snapshot's authority token must equal the active authority. Stale, reordered, and ABA completions therefore cannot bind or revive old IDs.
 
 Once bound to the current package/schema/host/worktree fingerprint, alias calls may overlap only when
@@ -517,10 +522,20 @@ For a text edit:
 11. At the approved publication's consume boundary, immediately before publication, invalidate every snapshot for this session/path; consumption remains final after partial or failed publication.
 12. Attempt one rename over the canonical target.
 13. Reread and verify the resulting bytes, staged inode identity, and single-link state.
-14. When text readback is requested by `readback:true` or either window field, retain those verified
-    bytes as a pending snapshot and render the one requested/default contiguous page.
-15. Issue only that page's refs after `tool.execute.after` attests the delivered output; otherwise
-    expose no successor ID and report `successor=unavailable`.
+14. When text readback is requested by `readback:true` or either window field, retain the verified
+    bytes as a pending successor snapshot before releasing the path lock, but do not render the page yet.
+15. Release the path lock. If the frozen managed-LSP configuration has a matching route, synchronize
+    those exact verified bytes and await bounded advisory diagnostics outside the mutation critical
+    section and under the operation's one absolute diagnostics deadline.
+16. If managed LSP work ran, stable-reread the target before exposing diagnostics or rendering the
+    successor. If bytes or identity changed during that wait, suppress diagnostics, invalidate the
+    successor, quarantine the managed binding, and report that the mutation succeeded but a fresh
+    `hashline_read` is required.
+17. Render the legacy receipt/readback under `maxOutputBytes`, then use safe additional host
+    `tool_output` headroom for the managed appendix. Optional diagnostics yield before legacy output;
+    a mandatory post-commit warning may reduce readback so its non-retry guidance survives. Issue only
+    a still-valid page's refs after `tool.execute.after` attests the complete delivered output.
+    Otherwise expose no successor ID and report `successor=unavailable`.
 
 For lifecycle `delete_file` or `move_file`:
 
@@ -582,6 +597,180 @@ state before issuing a fresh call. Partial errors omit canonical host paths, inv
 every planned mutation path, and unbind the native-alias live epoch; a fresh delivered
 `hashline_read` can then rebind in the same session, while old IDs remain unusable. `move_file` never
 creates parents.
+
+## Managed LSP Diagnostics
+
+`lspDiagnostics` is enabled by default. Omission, `true`, and an object all enable it; exactly `false`
+is the explicit opt-out and preserves byte-identical legacy output without accessing `PluginInput`.
+Invalid fields or bounds in a Better Hashline object use the existing fail-closed `CONFIG_INVALID`
+path. `true` and `{}` select the defaults with no plugin-local server overrides.
+
+At the first managed-LSP request, Better Hashline captures the scoped effective OpenCode configuration
+through the public `config` hook. If that hook has not supplied it, the plugin makes one public
+`client.config.get` request bounded by one second. From an object-valued `config.lsp`, it imports only
+entries with an explicit non-empty `command` array and `extensions` array. Disabled entries, IDs
+beginning with `.`, `_`, or `$`, and malformed or unroutable entries are skipped. Import is bounded to
+64 configured IDs and 256 KiB of normalized server data. Boolean `config.lsp`, including `true` for
+OpenCode's built-in private definitions, exposes no definitions that the plugin can clone; Better
+Hashline never reads the private host registry.
+
+The optional `lspDiagnostics.servers` array contributes at most 32 normalized definitions. Definitions
+are merged by `id`, with the Better Hashline entry replacing an imported public entry of the same ID,
+then sorted deterministically. An empty override list is valid. If the merged set is empty, or no
+definition routes a file, no manager process starts and clean output remains byte-identical with no
+managed warning or output-budget change.
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "command": ["bun", "x", "--no-install", "typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".tsx", ".js", ".jsx"],
+      "initialization": {
+        "tsserver": {
+          "path": "./node_modules/@typescript/old/lib/tsserver.js"
+        }
+      }
+    }
+  },
+  "plugin": [
+    [
+      "opencode-better-hashline",
+      {
+        "lspDiagnostics": {
+          "startupTimeoutMs": 15000,
+          "diagnosticsTimeoutMs": 5000,
+          "maxDiagnostics": 20,
+          "maxDiagnosticsBytes": 8192
+        }
+      }
+    ]
+  ]
+}
+```
+
+`bun x --no-install` intentionally refuses an implicit package install. The language server and its
+TypeScript dependency must already be available to the project. The shown `@typescript/old` path is
+appropriate only when a project deliberately installs a compatible TypeScript alias there; other
+projects must use their installed `tsserver` path or omit that initialization override.
+
+| Field | Default | Contract |
+| --- | ---: | --- |
+| `servers` | `[]` | `0..32` explicit additions or ID-based overrides of imported public entries |
+| `startupTimeoutMs` | 15,000 | `1,000..60,000` ms local startup ceiling |
+| `diagnosticsTimeoutMs` | 5,000 | `250..30,000` ms one absolute deadline per manager operation |
+| `maxDiagnostics` | 20 | `1..100` rendered severity-Error diagnostics |
+| `maxDiagnosticsBytes` | 8 KiB | `1..16` KiB managed appendix cap in extra safe host headroom |
+
+Each explicit server has a unique bounded ASCII `id`, a non-empty bounded `command` argument array,
+and one or more bounded extensions. Commands spawn directly with no shell in their canonical root;
+Better Hashline never installs a server. Optional traversal-free relative `rootMarkers` choose the
+nearest stable marked ancestor, with the canonical worktree as fallback. Optional bounded `env` and
+`initialization` objects provide process-environment additions and initialization JSON. Extensions
+gain a leading dot when omitted and compare case-insensitively on Windows. Multiple matching servers
+run concurrently and aggregate in stable server-ID order.
+
+The effective merged set and effective host `tool_output` limits freeze when the manager is first
+requested, even if no language-server process is needed. Later public `config` hook updates are ignored
+until the plugin or host restarts. Process creation remains lazy: the first matching read warmup or
+post-publication operation starts a client. A client persists under the immutable key `canonical root +
+server ID + normalized server-config digest`. Better Hashline clients never share OpenCode host-LSP
+processes, documents, or caches, so independent clients can duplicate host resources and cannot refresh
+host-LSP state.
+
+Routing admits only absolute canonical paths contained by the active canonical worktree. If OpenCode
+supplies `/` as its worktree sentinel, the plugin uses the active request `directory`; it never treats
+the filesystem root as the managed scope. External paths and symlink escapes never start or reuse a
+client. Read warmup skips them silently; a post-commit diagnostics-capable operation may return a
+bounded unavailable warning. Root-marker discovery and client identity remain confined to the same
+canonical worktree.
+
+Every warm, create/change, delete, and move manager call creates one absolute
+`diagnosticsTimeoutMs` deadline. Queue wait, route discovery, process acquisition, startup, document
+synchronization, lifecycle work, diagnostics, and all matching servers consume that same wall-clock
+deadline; it is never reset per server or phase. `startupTimeoutMs` is an additional local startup
+ceiling and cannot extend the operation deadline.
+
+A stable `hashline_read` may schedule best-effort warmup with its exact retained bytes. Warmup is not
+awaited and cannot affect read output, pending issuance, or native-alias binding. Mutation integration
+starts only after Better Hashline has verified publication and released the canonical path lock:
+
+- text edits and file creation synchronize the immutable committed URI and exact verified bytes;
+- deletion closes an owned document and verifies that the committed source remains absent;
+- movement closes the source, routes and opens the committed destination independently, and verifies
+  both final lifecycle states;
+- no managed synchronization runs after a prepublication rejection or `PARTIAL_PUBLICATION`;
+- no `workspace/didChangeWatchedFiles` notification is sent for create, delete, move, or external
+  filesystem activity.
+
+The manager never rereads a path to choose the URI or text sent to a server and never retargets a
+committed identity through a changed parent. Per-document revisions fence stale warmups and queued
+operations. After waiting for managed work, Better Hashline stable-rereads the current target, or
+proves lifecycle absence, before exposing diagnostics or a pending successor. Drift suppresses all
+diagnostics, invalidates the successor, quarantines affected bindings, and emits a mandatory warning.
+
+Managed work is post-commit and advisory. Startup failure, timeout, crash, cancellation, restart or
+resource exhaustion, malformed or oversized protocol data, unsupported synchronization, or lifecycle
+failure cannot roll back a verified mutation or turn it into a generic mutation error that invites a
+retry. The bounded warning uses normalized reason labels rather than raw stderr or environment data:
+
+```text
+LSP_DIAGNOSTICS_UNAVAILABLE: The mutation succeeded; diagnostics were incomplete or unavailable (<bounded reasons>). Do not retry the mutation. Inspect the file and use hashline_read before further editing.
+```
+
+Post-publication drift instead says that diagnostics were suppressed because the target changed again.
+Both forms make `mutationSucceeded: true` and `retryMutation: false` explicit in manager semantics.
+The warning is mandatory output priority: when host limits can hold it, Better Hashline may reduce or
+remove attached readback, or trim a long lifecycle receipt, rather than lose the non-retry instruction.
+
+For a stable current target, only diagnostics whose LSP severity is exactly `Error` (`1`) are rendered.
+Entries are deduplicated; sorted by relative path, one-based position, server ID, code, and message;
+stripped of ANSI, control, and format characters; and escaped so server text cannot forge protocol
+prefixes. A clean result appends nothing. A non-empty result uses this bounded advisory block:
+
+```text
+@better-hashline-lsp advisory=true errors=2 truncated=false
+LSP| src/example.ts:4:9 [typescript/2322] Type 'string' is not assignable to type 'number'.
+LSP| src/example.ts:8:3 [typescript/2304] Cannot find name 'missing'.
+```
+
+`maxDiagnosticsBytes` is additional to the legacy `maxOutputBytes` allowance, not a sub-budget of it.
+Better Hashline reads effective `tool_output.max_bytes` and `tool_output.max_lines`, defaulting to
+50 KiB and 2,000 lines and capping accepted host limits at 1 MiB and 100,000 lines. Safe final output
+is capped by `maxOutputBytes + maxDiagnosticsBytes`, remains inside those host limits, and reserves
+128 bytes plus one line against host truncation. The existing receipt/readback has priority over
+optional diagnostics, which are trimmed or dropped first. Mandatory unavailable/drift warnings reserve
+space before legacy rendering and may therefore reduce readback. The pending SHA-256 and
+`tool.execute.after` attest the complete final output; the after-hook never calls LSP.
+
+Native-alias renderer metadata remains byte-compatible with an exactly empty `diagnostics: {}` object.
+Managed diagnostics exist only in attested tool output and never become snapshot provenance, mutation
+authority, or semantic proof.
+
+The managed transport is bounded. JSON-RPC bodies are at most 8 MiB, headers 16 KiB, retained stderr
+64 KiB, pending client requests 64, inbound messages 128 under a 16 MiB queue-byte cap, active server
+requests 16, and pending ordinary/response writes 64/16. One document diagnostic result retains at
+most 4,096 entries and 1 MiB. A manager admits at most 64 persistent clients and 4,096 document
+bindings/queues, with depth 64 per document. Each client retains at most 64 open documents and 16 MiB
+of text. After initial startup, a failed client may restart at most twice in a rolling 60-second
+window. Shutdown is graceful when possible and otherwise performs bounded process-tree termination.
+
+The client advertises only static UTF-16 full/incremental synchronization and push/pull diagnostics.
+Dynamic registration is disabled and not implemented; watched-file notifications are not registered or
+sent. The client does not format, provide navigation, run code actions, rename symbols, accept
+`workspace/applyEdit`, or honor arbitrary or server-directed command execution. For
+`typescript-language-server` only, initialization feature-detects the exact advertised
+`typescript.tsserverRequest` command and issues fixed `syntacticDiagnosticsSync`,
+`semanticDiagnosticsSync`, and `suggestionDiagnosticsSync` requests solely as a post-change
+diagnostic-freshness barrier. Contradictory current push errors take precedence; malformed or
+unsupported command evidence never establishes a clean result. OpenCode's built-in `lsp` and
+formatter remain responsible for interactive capabilities and host state.
+
+Once configuration is frozen, changing the opt-out, imported `config.lsp`, Better Hashline overrides,
+limits, or host-output settings requires a plugin or host restart. Obtain a fresh delivered and
+attested `hashline_read` before further mutation. On native aliases that read binds the new live epoch;
+persisted history and old snapshot IDs cannot bind or revive it. Plugin disposal stops new admissions,
+drains active calls, closes persistent clients, and then clears provenance.
 
 ## Batch Semantics
 
@@ -732,9 +921,9 @@ are covered by runtime tests rather than that corpus. The schema-v8
 default-simplification result remains immutable historical 0.7.0-era evidence, and its stored values
 and earlier migration tables are not rewritten.
 
-The current schema-v10 contract adds mandatory cumulative coverage predictions to every header and
-explicit readback support for sole strict `replace_file`; omission still requests no successor, and
-only `delete_file` and `move_file` reject readback controls. The table below keeps the historical
+The historical schema-v10 contract added mandatory cumulative coverage predictions to every header
+and explicit readback support for sole strict `replace_file`; omission still requests no successor,
+and only `delete_file` and `move_file` reject readback controls. The table below keeps the historical
 normalized presentation fixture inputs, including synthetic package version `0.2.1` and host version
 `1.18.3`, so it isolates contract/schema byte changes. Its protocol fingerprint is not the runtime
 fingerprint of either released package version; package identity remains a live fingerprint input.
@@ -751,9 +940,14 @@ fingerprint of either released package version; package identity remains a live 
 | Provider schema SHA-256 | `cc27fd62d927605cec08729f858bdc8fc3bb5bc0c7a637b5e8d49843b0cc8279` | `9c0186692c14007dea77b96a929737a5174d1e85661fc7dd65b197c3007f8e88` |
 | Protocol fingerprint | `705a7542e0a2ca4abc4a9d7c53d3600f19f2659e1ad0e6fa22b99a594187214e` | `ce26359500cef74902fcdc64df947789aeddab245d459408b48ec4dc43f3004b` |
 
-The write-once deterministic result is retained at
+The historical schema-v10 write-once deterministic result is retained at
 [`2026-07-24-coverage-readback-ux-windows-x64.json`](../benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json).
-Schema-v5 through schema-v9 and pilot-v7 remain immutable.
+The current schema-v11 deterministic record is retained at
+[`2026-07-25-managed-lsp-diagnostics-windows-x64.json`](../benchmarks/results/2026-07-25-managed-lsp-diagnostics-windows-x64.json).
+It preserves schema v10's unchanged 29-case classifications and prior wire fixtures, then adds
+production-composed managed LSP output/headroom fixtures through the shared `lspLegacyLimits` and
+`buildLspOutput` paths. Those fixtures invoke no language server or model. Schema-v5 through
+schema-v10 and pilot-v7 remain immutable.
 
 ## Migration From 0.6.1
 

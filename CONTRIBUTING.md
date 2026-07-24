@@ -96,10 +96,11 @@ failures, retries, partial publications, and unintended changes rather than succ
 averages. Never rewrite retained evidence to cover a new schema, operation, task set, or adapter; add
 a new identity and result. Dry runs and model-free verifier evidence are not paid model evidence.
 Development runner output is not retained evidence until it is written once at a new final result
-path. Preserve schema-v5 through schema-v9 results and pilot-v7 scope unchanged. The current
-schema-v10 write-once retained result is
-`benchmarks/results/2026-07-24-coverage-readback-ux-windows-x64.json`; future runner or protocol
-revisions require another new result identity.
+path. Preserve schema-v5 through schema-v10 results and pilot-v7 scope unchanged. The current
+schema-v11 write-once retained result is
+`benchmarks/results/2026-07-25-managed-lsp-diagnostics-windows-x64.json`; it preserves prior
+deterministic classifications and wire fixtures, then adds production-composed managed LSP
+output/headroom fixtures. Future runner or protocol revisions require another new result identity.
 
 ## Commits
 

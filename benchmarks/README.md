@@ -11,20 +11,21 @@ The runner uses generated fixtures and Node SHA-256. No network, model, reposito
 
 When comparing results, use the raw JSON environment fields and source commit. Timing values are expected to vary; protocol classifications should not.
 
-The runner emits schema v10. Its write-once retained result keeps the 29-case corpus and the
-operation-aware omitted/default adapter, then adds wire fixtures for cumulative coverage headers and
-explicit `replace_file` readback. The unchanged classifications carried forward from schema v9 are
-strict `6/18/5/0`, explicit unique `11/18/0/0`, omitted/default `11/18/0/0`, exact search
-`10/13/1/5`, line numbers `7/1/0/21`, endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
-(`exact_apply/safe_reject/false_reject/unsafe_accept`). The retained schema-v10 wire sizes and hashes
+The runner emits schema v11. Its write-once retained result preserves schema v10's unchanged
+29-case corpus, operation-aware omitted/default adapter, and prior wire fixtures, then adds seven
+production-composed managed LSP output/headroom fixtures through the shared runtime composition path.
+The unchanged classifications carried forward from schema v10 are strict `6/18/5/0`, explicit unique
+`11/18/0/0`, omitted/default `11/18/0/0`, exact search `10/13/1/5`, line numbers `7/1/0/21`,
+endpoint-8 `7/12/4/6`, and endpoint-16 `7/13/4/5`
+(`exact_apply/safe_reject/false_reject/unsafe_accept`). The retained schema-v11 wire sizes and hashes
 are mechanical byte fixtures and must not be inferred from earlier fixtures; they are not token or
 model-quality claims. Strict-only defaults remain covered by runtime tests rather than this corpus.
 
-The current retained schema-v10 result is
+The current retained schema-v11 result is
+[`2026-07-25-managed-lsp-diagnostics-windows-x64.json`](results/2026-07-25-managed-lsp-diagnostics-windows-x64.json).
+The preceding immutable schema-v10 result is
 [`2026-07-24-coverage-readback-ux-windows-x64.json`](results/2026-07-24-coverage-readback-ux-windows-x64.json).
-The preceding immutable schema-v9 result is
-[`2026-07-23-operation-aware-rebase-default-windows-x64.json`](results/2026-07-23-operation-aware-rebase-default-windows-x64.json).
-The schema-v5 through schema-v9 records remain immutable.
+The schema-v5 through schema-v10 records remain immutable.
 
 Result paths are write-once unless `--force` is supplied explicitly. Never use `--force` on published evidence.
 

@@ -12,6 +12,7 @@ import {
   runDeterministicSuite,
   runEditProtocolUxCallWireSuite,
   runFileLifecycleCallWireSuite,
+  runManagedLspOutputWireSuite,
   runMicroSuite,
   runMoveCorridorWireSuite,
   runRenderingWireSuite,
@@ -124,6 +125,12 @@ const implementationSources = await Promise.all(
     "src/errors.ts",
     "src/filesystem.ts",
     "src/plugin.ts",
+    "src/lsp-client.ts",
+    "src/lsp-diagnostics.ts",
+    "src/lsp-jsonrpc.ts",
+    "src/lsp-manager.ts",
+    "src/lsp-output.ts",
+    "src/options.ts",
     "src/presentation.ts",
     "src/rebase.ts",
     "src/session-protocol.ts",
@@ -144,6 +151,7 @@ const editProtocolUxCallWireSize = runEditProtocolUxCallWireSuite();
 const replaceFileReadbackCallWireSize = runReplaceFileReadbackCallWireSuite();
 const transferCallWireSize = runTransferCallWireSuite();
 const moveCorridorWireSize = runMoveCorridorWireSuite();
+const managedLspOutputWireSize = runManagedLspOutputWireSuite();
 const micro = runMicroSuite();
 if (renderingWireSize.legacyIssued || !renderingWireSize.currentIssued) {
   throw new Error("Long-line rendering wire-size assertions failed.");
@@ -186,6 +194,116 @@ if (
 ) {
   throw new Error("replace_file readback call wire-size assertions failed.");
 }
+const expectedManagedLspOutputWireSize = [
+  {
+    scenario: "clean byte-identical output",
+    hostMaxBytes: 4096,
+    hostMaxLines: 100,
+    legacyLimitBytes: 1024,
+    legacyLimitLines: null,
+    legacyUtf8Bytes: 223,
+    outputUtf8Bytes: 223,
+    outputLines: 7,
+    outputSha256: "2dbe7d6e629b164c6a0f23d6539670eb02ade5207f8d4881760e789282829535",
+    legacyPreserved: true,
+    diagnosticsPresent: false,
+    diagnosticsTruncated: false,
+    warningPresent: false,
+  },
+  {
+    scenario: "error with unchanged legacy readback",
+    hostMaxBytes: 4096,
+    hostMaxLines: 100,
+    legacyLimitBytes: 1024,
+    legacyLimitLines: 99,
+    legacyUtf8Bytes: 223,
+    outputUtf8Bytes: 357,
+    outputLines: 9,
+    outputSha256: "87ae177493ab5da0e4e697df024bfce1798edea6bcba56e01337e300fe16de53",
+    legacyPreserved: true,
+    diagnosticsPresent: true,
+    diagnosticsTruncated: false,
+    warningPresent: false,
+  },
+  {
+    scenario: "byte-headroom truncation",
+    hostMaxBytes: 1400,
+    hostMaxLines: 100,
+    legacyLimitBytes: 1024,
+    legacyLimitLines: 99,
+    legacyUtf8Bytes: 1024,
+    outputUtf8Bytes: 1252,
+    outputLines: 7,
+    outputSha256: "b7493e3e2d446847035fa9f1b227bdaa45649b5c25c87c7613794537724ae101",
+    legacyPreserved: true,
+    diagnosticsPresent: true,
+    diagnosticsTruncated: true,
+    warningPresent: false,
+  },
+  {
+    scenario: "line-headroom truncation",
+    hostMaxBytes: 4096,
+    hostMaxLines: 8,
+    legacyLimitBytes: 1024,
+    legacyLimitLines: 7,
+    legacyUtf8Bytes: 223,
+    outputUtf8Bytes: 223,
+    outputLines: 7,
+    outputSha256: "2dbe7d6e629b164c6a0f23d6539670eb02ade5207f8d4881760e789282829535",
+    legacyPreserved: true,
+    diagnosticsPresent: false,
+    diagnosticsTruncated: false,
+    warningPresent: false,
+  },
+  {
+    scenario: "mandatory warning",
+    hostMaxBytes: 900,
+    hostMaxLines: 100,
+    legacyLimitBytes: 550,
+    legacyLimitLines: 98,
+    legacyUtf8Bytes: 1024,
+    outputUtf8Bytes: 772,
+    outputLines: 6,
+    outputSha256: "5c7e74af1ec7757fbeab6809683d2600bed7633b3c9bfa24d2d38498ef65555a",
+    legacyPreserved: false,
+    diagnosticsPresent: false,
+    diagnosticsTruncated: false,
+    warningPresent: true,
+  },
+  {
+    scenario: "drift warning",
+    hostMaxBytes: 4096,
+    hostMaxLines: 100,
+    legacyLimitBytes: 1024,
+    legacyLimitLines: 98,
+    legacyUtf8Bytes: 223,
+    outputUtf8Bytes: 446,
+    outputLines: 8,
+    outputSha256: "76e655682c3fc1522ef165cb4a8ee45ccdfbfc5f6fd6e771fbe48d429f526b98",
+    legacyPreserved: true,
+    diagnosticsPresent: false,
+    diagnosticsTruncated: false,
+    warningPresent: true,
+  },
+  {
+    scenario: "insufficient host budget",
+    hostMaxBytes: 128,
+    hostMaxLines: 1,
+    legacyLimitBytes: 0,
+    legacyLimitLines: 0,
+    legacyUtf8Bytes: 223,
+    outputUtf8Bytes: 0,
+    outputLines: 0,
+    outputSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    legacyPreserved: false,
+    diagnosticsPresent: false,
+    diagnosticsTruncated: false,
+    warningPresent: false,
+  },
+];
+if (JSON.stringify(managedLspOutputWireSize) !== JSON.stringify(expectedManagedLspOutputWireSize)) {
+  throw new Error("Managed LSP production-output wire-size assertions failed.");
+}
 const summary = new Map(deterministic.summary.map((row) => [row.adapter, row]));
 if (
   summary.get("better-hashline-strict")?.unsafe_accept !== 0 ||
@@ -201,7 +319,7 @@ if (
   throw new Error("Deterministic protocol safety assertions failed.");
 }
 const result = {
-  schemaVersion: 10,
+  schemaVersion: 11,
   generatedAt: new Date().toISOString(),
   provenance: {
     packageVersion: packageJson.version,
@@ -241,6 +359,8 @@ const result = {
       "Exact compact UTF-8 JSON bytes for copy/move calls versus equivalent model-supplied insert/replace payloads.",
     moveCorridorWireSize:
       "Exact UTF-8 hashline_read output bytes required to issue fixed near and far move corridors under the default page and output limits.",
+    managedLspOutputWireSize:
+      "Exact UTF-8 bytes, line counts, and output digests from the shared production lspLegacyLimits and buildLspOutput composition for clean output, Error diagnostics, byte and line headroom, mandatory manager and drift warnings, and an insufficient host envelope. No language server or model is invoked.",
     micro:
       "Five warmups, 100 measured runs below 10k lines and 30 otherwise; wall-clock timings are non-gating.",
   },
@@ -255,6 +375,7 @@ const result = {
   replaceFileReadbackCallWireSize,
   transferCallWireSize,
   moveCorridorWireSize,
+  managedLspOutputWireSize,
   micro,
 };
 
@@ -280,6 +401,8 @@ console.log("\nTransfer call wire-size change\n");
 console.table(transferCallWireSize);
 console.log("\nMove-corridor read wire size\n");
 console.table(moveCorridorWireSize);
+console.log("\nManaged LSP production output wire size\n");
+console.table(managedLspOutputWireSize);
 console.log("\nCore microbenchmarks (milliseconds)\n");
 console.table(
   micro.map(({ lineCount, bytes, sha256, decode, strictEditPlan }) => ({
