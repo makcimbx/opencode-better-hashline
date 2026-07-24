@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.7.0...v0.8.0) (2026-07-24)
+
+
+### Added
+
+* improve edit rebasing and coverage UX ([#40](https://github.com/makcimbx/opencode-better-hashline/issues/40)) ([1242a61](https://github.com/makcimbx/opencode-better-hashline/commit/1242a611835db7c2937d5ca2a5cc5fc5ee5f0f80))
+
 ## [Unreleased]
 
 ### Added
