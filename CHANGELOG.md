@@ -9,6 +9,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.8.0](https://github.com/makcimbx/opencode-better-hashline/compare/v0.7.0...v0.8.0) (2026-07-24)
+
+### Added
+
 - Added immutable schema-v9 model-free evidence for the incremental omitted-rebase adapter and updated edit-schema wire fixture; strict-only defaults remain covered by runtime tests rather than that corpus.
 - Added `coverage=partial|complete` to every `@hashline` header, computed from evidence issued at render time plus the candidate page: `complete` means those inputs are sufficient and remains monotonic for a valid attested candidate, while `partial` can become conservative after another page is delivered and attested; pending output and invalidated candidates issue nothing, and `partial=true` remains page-local.
 - Added the write-once retained schema-v10 deterministic result for cumulative coverage headers and explicit `replace_file` readback.
