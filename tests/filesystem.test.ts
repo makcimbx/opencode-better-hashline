@@ -21,11 +21,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolContext } from "@opencode-ai/plugin";
+import { HashlineError } from "../src/errors.js";
 import {
   assertTargetAbsent,
   authorizeEdit,
   authorizeExternal,
   authorizeRead,
+  canonicalizeRoot,
   MAX_NEW_FILE_MISSING_DIRECTORIES,
   pathsAlias,
   publishDeletedFile,
@@ -39,6 +41,7 @@ import {
   resolveNewFile,
   resolveNewFileParentPlan,
   revalidateNewFileParentPlan,
+  stabilizeNewFileParentPlan,
   throwIfAborted,
   withPathLock,
   withPathLocks,
@@ -131,13 +134,17 @@ describe("filesystem resolution and permissions", () => {
     await expect(readStableFile(resolved, 2, true)).rejects.toThrow("UNSUPPORTED_FILE:");
   });
 
-  test("requires a fresh delivered read after a stable-read race", async () => {
+  test("keeps a persistent stable-read race model-visible", async () => {
     const path = join(root, "raced-read");
     await writeFile(path, "old");
     const resolved = await resolveExistingFile(path, root);
     const realStat = fsPromises.stat;
+    let race = 0;
     const statMock = spyOn(fsPromises, "stat").mockImplementation((async (target: PathLike) => {
-      if (String(target) === resolved.canonicalPath) await writeFile(path, "changed");
+      if (String(target) === resolved.canonicalPath) {
+        race += 1;
+        await writeFile(path, "x".repeat(race + 3));
+      }
       return realStat(target);
     }) as typeof fsPromises.stat);
     try {
@@ -147,6 +154,177 @@ describe("filesystem resolution and permissions", () => {
     } finally {
       statMock.mockRestore();
     }
+  });
+
+  test("recovers when a read race settles within the bounded observation window", async () => {
+    const path = join(root, "settled-read");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const realStat = fsPromises.stat;
+    let injected = false;
+    const statMock = spyOn(fsPromises, "stat").mockImplementation((async (target: PathLike) => {
+      if (!injected && String(target) === resolved.canonicalPath) {
+        injected = true;
+        await writeFile(path, "settled");
+      }
+      return realStat(target);
+    }) as typeof fsPromises.stat);
+    try {
+      const stable = await readStableFile(resolved, 1024, true);
+      expect(new TextDecoder().decode(stable.bytes)).toBe("settled");
+    } finally {
+      statMock.mockRestore();
+    }
+  });
+
+  test("retries a transient close failure on the same stable-read handle", async () => {
+    const path = join(root, "close-retry-read.txt");
+    await writeFile(path, "content");
+    const resolved = await resolveExistingFile(path, root);
+    const realOpen = fsPromises.open;
+    let readOpens = 0;
+    let closeAttempts = 0;
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      const handle = await realOpen(target, flags, mode);
+      if (String(target) === resolved.canonicalPath && flags === "r") {
+        readOpens += 1;
+        const realClose = handle.close.bind(handle);
+        spyOn(handle, "close").mockImplementation((async () => {
+          closeAttempts += 1;
+          if (closeAttempts === 1) throw syscallError("EBUSY");
+          await realClose();
+        }) as typeof handle.close);
+      }
+      return handle;
+    });
+    try {
+      const stable = await readStableFile(resolved, 1024, true);
+      expect(new TextDecoder().decode(stable.bytes)).toBe("content");
+    } finally {
+      openMock.mockRestore();
+    }
+    expect(readOpens).toBe(1);
+    expect(closeAttempts).toBe(2);
+  });
+
+  test("cancels a bounded canonical-root retry while it is waiting", async () => {
+    const controller = new AbortController();
+    const reason = new Error("cancel canonical root");
+    const realRealpath = fsPromises.realpath;
+    let attempts = 0;
+    const realpathMock = spyOn(fsPromises, "realpath").mockImplementation((async (target) => {
+      if (String(target) === root) {
+        attempts += 1;
+        setTimeout(() => controller.abort(reason), 1);
+        throw syscallError("EBUSY");
+      }
+      return realRealpath(target);
+    }) as typeof fsPromises.realpath);
+    try {
+      await expect(canonicalizeRoot(root, controller.signal)).rejects.toBe(reason);
+    } finally {
+      realpathMock.mockRestore();
+    }
+    expect(attempts).toBe(1);
+  });
+
+  test("normalizes exhausted filesystem observations to a stable prepublication error", async () => {
+    const realRealpath = fsPromises.realpath;
+    let attempts = 0;
+    const realpathMock = spyOn(fsPromises, "realpath").mockImplementation((async (target) => {
+      if (String(target) === root) {
+        attempts += 1;
+        throw syscallError("EBUSY");
+      }
+      return realRealpath(target);
+    }) as typeof fsPromises.realpath);
+    try {
+      await expect(canonicalizeRoot(root)).rejects.toThrow(
+        "RACE_BEFORE_WRITE: A filesystem observation could not be completed safely. No publication occurred;",
+      );
+    } finally {
+      realpathMock.mockRestore();
+    }
+    expect(attempts).toBe(3);
+  });
+
+  test("preserves stable observation recovery during parent planning", async () => {
+    const unavailableParent = join(root, "unavailable-parent");
+    const realLstat = fsPromises.lstat;
+    let attempts = 0;
+    const lstatMock = spyOn(fsPromises, "lstat").mockImplementation((async (target) => {
+      if (String(target) === unavailableParent) {
+        attempts += 1;
+        throw syscallError("EBUSY");
+      }
+      return realLstat(target);
+    }) as typeof fsPromises.lstat);
+    try {
+      await expect(
+        resolveNewFileParentPlan(join(unavailableParent, "target.txt"), root),
+      ).rejects.toThrow(
+        "RACE_BEFORE_WRITE: A filesystem observation could not be completed safely. No publication occurred;",
+      );
+    } finally {
+      lstatMock.mockRestore();
+    }
+    expect(attempts).toBe(3);
+  });
+
+  test("rejects a non-directory parent chain without retrying as uncertainty", async () => {
+    const blocker = join(root, "parent-chain-blocker");
+    const blockedParent = join(blocker, "missing");
+    await writeFile(blocker, "not a directory");
+    const realLstat = fsPromises.lstat;
+    let inspections = 0;
+    const lstatMock = spyOn(fsPromises, "lstat").mockImplementation((async (target) => {
+      if (String(target) === blockedParent) {
+        inspections += 1;
+        throw syscallError("ENOTDIR");
+      }
+      return realLstat(target);
+    }) as typeof fsPromises.lstat);
+
+    try {
+      await expect(
+        resolveNewFileParentPlan(join(blockedParent, "target.txt"), root),
+      ).rejects.toThrow("UNSUPPORTED_FILE: A path in the target parent chain is not a directory.");
+    } finally {
+      lstatMock.mockRestore();
+    }
+    expect(inspections).toBe(1);
+  });
+
+  test("bounds persistent close pressure without reopening a stable read", async () => {
+    const path = join(root, "close-exhausted-read.txt");
+    await writeFile(path, "content");
+    const resolved = await resolveExistingFile(path, root);
+    const realOpen = fsPromises.open;
+    let readOpens = 0;
+    let closeAttempts = 0;
+    let cleanupClose: (() => Promise<void>) | undefined;
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      const handle = await realOpen(target, flags, mode);
+      if (String(target) === resolved.canonicalPath && flags === "r") {
+        readOpens += 1;
+        cleanupClose = handle.close.bind(handle);
+        spyOn(handle, "close").mockImplementation((async () => {
+          closeAttempts += 1;
+          throw syscallError("EBUSY");
+        }) as typeof handle.close);
+      }
+      return handle;
+    });
+    try {
+      await expect(readStableFile(resolved, 1024, true)).rejects.toThrow(
+        "RACE_BEFORE_WRITE: An internal file handle could not be closed safely.",
+      );
+    } finally {
+      openMock.mockRestore();
+      await cleanupClose?.();
+    }
+    expect(readOpens).toBe(1);
+    expect(closeAttempts).toBe(3);
   });
 
   test("requires a fresh delivered read when file size changes during the read", async () => {
@@ -480,6 +658,66 @@ describe("new-file parent planning", () => {
     await expect(lstat(join(secondAnchor, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("adopts an exact concurrently created directory prefix under the original locks", async () => {
+    const plan = await resolveNewFileParentPlan("shared/deeper/target", root);
+    const adopted = plan.missingDirectories[0];
+    const remaining = plan.missingDirectories[1];
+    if (!adopted || !remaining) throw new Error("Expected two planned directories.");
+    await mkdir(adopted.canonicalPath);
+
+    const stabilized = await stabilizeNewFileParentPlan(plan);
+    expect(stabilized.anchor.canonicalPath).toBe(adopted.canonicalPath);
+    expect(stabilized.missingDirectories.map((entry) => entry.canonicalPath)).toEqual([
+      remaining.canonicalPath,
+    ]);
+    expect(stabilized.mutationPaths).toEqual([remaining.canonicalPath, plan.canonicalPath]);
+    expect(stabilized.lockPaths).toEqual(plan.lockPaths);
+    expect(Object.isFrozen(stabilized)).toBe(true);
+
+    await publishNewFileWithParents({
+      plan: stabilized,
+      bytes: encoder.encode("content"),
+      signal: new AbortController().signal,
+    });
+    expect(await readFile(plan.canonicalPath, "utf8")).toBe("content");
+  });
+
+  test("rejects an inconsistent appeared parent prefix instead of adopting uncertainty", async () => {
+    if (process.platform === "win32") return;
+    const canonicalAnchor = join(root, "prefix-anchor");
+    const requestedAnchor = join(root, "prefix-alias");
+    await mkdir(canonicalAnchor);
+    await symlink(canonicalAnchor, requestedAnchor);
+    const plan = await resolveNewFileParentPlan(
+      join(requestedAnchor, "missing", "target.txt"),
+      root,
+    );
+    const appeared = plan.missingDirectories[0];
+    if (!appeared || appeared.requestedPath === appeared.canonicalPath) {
+      throw new Error("Expected distinct requested and canonical parent paths.");
+    }
+    await mkdir(appeared.canonicalPath);
+
+    const realLstat = fsPromises.lstat;
+    let requestedChecks = 0;
+    const lstatMock = spyOn(fsPromises, "lstat").mockImplementation((async (target) => {
+      if (String(target) === appeared.requestedPath) {
+        requestedChecks += 1;
+        throw syscallError("ENOENT");
+      }
+      return realLstat(target);
+    }) as typeof fsPromises.lstat);
+    try {
+      await expect(stabilizeNewFileParentPlan(plan)).rejects.toThrow(
+        "RACE_BEFORE_WRITE: A planned parent directory appeared inconsistently.",
+      );
+    } finally {
+      lstatMock.mockRestore();
+    }
+    expect(requestedChecks).toBe(1);
+    await expect(lstat(plan.canonicalPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("distinguishes preflight races from ambiguous mkdir publication", async () => {
     const initialPlan = await resolveNewFileParentPlan("initial/deeper/target", root);
     const initialDirectory = initialPlan.missingDirectories[0];
@@ -679,6 +917,86 @@ describe("filesystem publication", () => {
     expect(blockedProbeRan).toBe(true);
   });
 
+  test("fences queued overlapping mutations after partial publication", async () => {
+    const path = join(root, "partial-fence.txt");
+    let releaseFirst = () => {};
+    let markFirstStarted = () => {};
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withPathLock(path, async () => {
+      markFirstStarted();
+      await firstGate;
+      throw new HashlineError("PARTIAL_PUBLICATION", "The first publication is ambiguous.");
+    });
+    await firstStarted;
+
+    let queuedRan = false;
+    const queued = withPathLock(path, async () => {
+      queuedRan = true;
+    });
+    releaseFirst();
+    const [firstOutcome, queuedOutcome] = await Promise.allSettled([first, queued]);
+    expect(String((firstOutcome as PromiseRejectedResult).reason)).toContain(
+      "PARTIAL_PUBLICATION:",
+    );
+    expect(String((queuedOutcome as PromiseRejectedResult).reason)).toContain("RACE_BEFORE_WRITE:");
+    expect(queuedRan).toBe(false);
+
+    let freshRan = false;
+    await withPathLock(path, async () => {
+      freshRan = true;
+    });
+    expect(freshRan).toBe(true);
+  });
+
+  test("propagates a partial-publication fence across every reserved lock path", async () => {
+    const firstPath = join(root, "partial-fence-a");
+    const secondPath = join(root, "partial-fence-b");
+    const unrelatedPath = join(root, "partial-fence-c");
+    let releaseFirst = () => {};
+    let markFirstStarted = () => {};
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withPathLocks([firstPath, secondPath], async () => {
+      markFirstStarted();
+      await firstGate;
+      throw new HashlineError("PARTIAL_PUBLICATION", "The first publication is ambiguous.");
+    });
+    await firstStarted;
+
+    let firstQueuedRan = false;
+    let secondQueuedRan = false;
+    const firstQueued = withPathLock(firstPath, async () => {
+      firstQueuedRan = true;
+    });
+    const secondQueued = withPathLock(secondPath, async () => {
+      secondQueuedRan = true;
+    });
+    await expect(withPathLock(unrelatedPath, async () => "unrelated")).resolves.toBe("unrelated");
+
+    releaseFirst();
+    const outcomes = await Promise.allSettled([first, firstQueued, secondQueued]);
+    expect(String((outcomes[0] as PromiseRejectedResult).reason)).toContain("PARTIAL_PUBLICATION:");
+    expect(String((outcomes[1] as PromiseRejectedResult).reason)).toContain("RACE_BEFORE_WRITE:");
+    expect(String((outcomes[2] as PromiseRejectedResult).reason)).toContain("RACE_BEFORE_WRITE:");
+    expect(firstQueuedRan).toBe(false);
+    expect(secondQueuedRan).toBe(false);
+
+    let freshRan = false;
+    await withPathLocks([firstPath, secondPath], async () => {
+      freshRan = true;
+    });
+    expect(freshRan).toBe(true);
+  });
+
   test("deletes one exact regular file and rejects stale publication", async () => {
     const path = join(root, "delete.txt");
     await writeFile(path, "content");
@@ -717,6 +1035,47 @@ describe("filesystem publication", () => {
     expect(await readFile(path, "utf8")).toBe("changed");
   });
 
+  test("recovers a transient final absence observation after delete", async () => {
+    const path = join(root, "delete-observation.txt");
+    await writeFile(path, "content");
+    const resolved = await resolveMutableFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    const realLstat = stringPathFs.lstat;
+    let consumed = false;
+    let injected = false;
+    const lstatMock = spyOn(stringPathFs, "lstat").mockImplementation(async (target) => {
+      try {
+        return await realLstat(target);
+      } catch (error) {
+        if (
+          consumed &&
+          !injected &&
+          String(target) === resolved.canonicalPath &&
+          (error as NodeJS.ErrnoException).code === "ENOENT"
+        ) {
+          injected = true;
+          throw syscallError("EBUSY");
+        }
+        throw error;
+      }
+    });
+    try {
+      await publishDeletedFile({
+        resolved,
+        expected,
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        consume() {
+          consumed = true;
+        },
+      });
+    } finally {
+      lstatMock.mockRestore();
+    }
+    expect(injected).toBe(true);
+    await expect(readFile(path)).rejects.toThrow();
+  });
+
   test("consumes delete provenance after a failed publication attempt", async () => {
     const path = join(root, "blocked-delete.txt");
     await writeFile(path, "content");
@@ -739,7 +1098,11 @@ describe("filesystem publication", () => {
         }),
       ).rejects.toThrow("UNSUPPORTED_FILE: The filesystem could not delete the file.");
     } finally {
-      unlinkMock.mockRestore();
+      try {
+        expect(unlinkMock).toHaveBeenCalledTimes(1);
+      } finally {
+        unlinkMock.mockRestore();
+      }
     }
     expect(consumed).toBe(true);
     expect(await readFile(path, "utf8")).toBe("content");
@@ -781,7 +1144,11 @@ describe("filesystem publication", () => {
           }),
         ).rejects.toThrow(message);
       } finally {
-        unlinkMock.mockRestore();
+        try {
+          expect(unlinkMock).toHaveBeenCalledTimes(1);
+        } finally {
+          unlinkMock.mockRestore();
+        }
       }
       expect(consumed).toBe(true);
       expect(await readFile(path, "utf8")).toBe("content");
@@ -863,6 +1230,51 @@ describe("filesystem publication", () => {
     expect(await readFile(destinationPath, "utf8")).toBe("existing");
   });
 
+  test("recovers a transient final source observation after move", async () => {
+    const sourcePath = join(root, "move-observation-source.txt");
+    const destinationPath = join(root, "move-observation-destination.txt");
+    await writeFile(sourcePath, "content");
+    const source = await resolveMutableFile(sourcePath, root);
+    const destination = await resolveNewFile(destinationPath, root);
+    const expected = await readStableFile(source, 1024, true);
+    const realLstat = stringPathFs.lstat;
+    let consumed = false;
+    let injected = false;
+    const lstatMock = spyOn(stringPathFs, "lstat").mockImplementation(async (target) => {
+      try {
+        return await realLstat(target);
+      } catch (error) {
+        if (
+          consumed &&
+          !injected &&
+          String(target) === source.canonicalPath &&
+          (error as NodeJS.ErrnoException).code === "ENOENT"
+        ) {
+          injected = true;
+          throw syscallError("EBUSY");
+        }
+        throw error;
+      }
+    });
+    try {
+      await publishMovedFile({
+        source,
+        destination,
+        expected,
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        consume() {
+          consumed = true;
+        },
+      });
+    } finally {
+      lstatMock.mockRestore();
+    }
+    expect(injected).toBe(true);
+    await expect(readFile(sourcePath)).rejects.toThrow();
+    expect(await readFile(destinationPath, "utf8")).toBe("content");
+  });
+
   test("rejects cross-filesystem moves before publication", async () => {
     const sourcePath = join(root, "cross-device-source.txt");
     const destinationPath = join(root, "cross-device-destination.txt");
@@ -917,7 +1329,11 @@ describe("filesystem publication", () => {
         "TARGET_EXISTS: The move destination appeared before no-replace publication. No move link was published, but the source snapshot was consumed; inspect the destination, choose an absent path, and take a fresh source read before retrying.",
       );
     } finally {
-      linkMock.mockRestore();
+      try {
+        expect(linkMock).toHaveBeenCalledTimes(1);
+      } finally {
+        linkMock.mockRestore();
+      }
     }
     expect(consumed).toBe(true);
     expect(await readFile(sourcePath, "utf8")).toBe("content");
@@ -950,7 +1366,11 @@ describe("filesystem publication", () => {
         }),
       ).rejects.toThrow("PARTIAL_PUBLICATION:");
     } finally {
-      unlinkMock.mockRestore();
+      try {
+        expect(unlinkMock).toHaveBeenCalledTimes(1);
+      } finally {
+        unlinkMock.mockRestore();
+      }
     }
     expect(await readFile(sourcePath, "utf8")).toBe("content");
     expect(await readFile(destinationPath, "utf8")).toBe("content");
@@ -995,7 +1415,11 @@ describe("filesystem publication", () => {
           }),
         ).rejects.toThrow(message);
       } finally {
-        linkMock.mockRestore();
+        try {
+          expect(linkMock).toHaveBeenCalledTimes(1);
+        } finally {
+          linkMock.mockRestore();
+        }
       }
       expect(consumed).toBe(true);
       expect(await readFile(sourcePath, "utf8")).toBe("content");
@@ -1024,6 +1448,65 @@ describe("filesystem publication", () => {
     expect(new TextDecoder().decode(verified.bytes)).toBe("new\n");
     expect(await readFile(path, "utf8")).toBe("new\n");
     if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o751);
+  });
+
+  test("does not publish a replacement canceled after its final proof", async () => {
+    const path = join(root, "cancel-before-rename.txt");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    const controller = new AbortController();
+    const reason = new Error("cancel before rename");
+    const realOpen = fsPromises.open;
+    const realRename = fsPromises.rename;
+    let targetReadOpens = 0;
+    let injected = false;
+    let renameCalls = 0;
+    let consumed = false;
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      const handle = await realOpen(target, flags, mode);
+      if (flags === "r" && String(target) === resolved.canonicalPath) {
+        targetReadOpens += 1;
+        if (targetReadOpens === 2) {
+          const realClose = handle.close.bind(handle);
+          spyOn(handle, "close").mockImplementation((async () => {
+            await realClose();
+            injected = true;
+            controller.abort(reason);
+          }) as typeof handle.close);
+        }
+      }
+      return handle;
+    });
+    const renameMock = spyOn(fsPromises, "rename").mockImplementation(
+      async (source, destination) => {
+        renameCalls += 1;
+        await realRename(source, destination);
+      },
+    );
+    try {
+      await expect(
+        publishReplacement({
+          resolved,
+          expected,
+          replacement: encoder.encode("new"),
+          maxBytes: 1024,
+          signal: controller.signal,
+          consume() {
+            consumed = true;
+          },
+        }),
+      ).rejects.toBe(reason);
+    } finally {
+      renameMock.mockRestore();
+      openMock.mockRestore();
+    }
+    expect(injected).toBe(true);
+    expect(targetReadOpens).toBe(2);
+    expect(consumed).toBe(false);
+    expect(renameCalls).toBe(0);
+    expect(await readFile(path, "utf8")).toBe("old");
+    expect((await readdir(root)).some((entry) => entry.includes(".hashline-"))).toBe(false);
   });
 
   test("normalizes every post-rename verification failure as RACE_AFTER_WRITE", async () => {
@@ -1085,6 +1568,46 @@ describe("filesystem publication", () => {
     }
   });
 
+  test("recovers a transient exact proof failure after replacement", async () => {
+    const path = join(root, "replacement-observation.txt");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    const realRename = fsPromises.rename;
+    const realOpen = fsPromises.open;
+    let published = false;
+    let injected = false;
+    const renameMock = spyOn(fsPromises, "rename").mockImplementation(
+      async (source, destination) => {
+        await realRename(source, destination);
+        published = true;
+      },
+    );
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      if (published && !injected && flags === "r" && String(target) === resolved.canonicalPath) {
+        injected = true;
+        throw syscallError("EBUSY");
+      }
+      return realOpen(target, flags, mode);
+    });
+    try {
+      const verified = await publishReplacement({
+        resolved,
+        expected,
+        replacement: encoder.encode("new"),
+        maxBytes: 1024,
+        signal: new AbortController().signal,
+        consume() {},
+      });
+      expect(new TextDecoder().decode(verified.bytes)).toBe("new");
+    } finally {
+      openMock.mockRestore();
+      renameMock.mockRestore();
+    }
+    expect(injected).toBe(true);
+    expect(await readFile(path, "utf8")).toBe("new");
+  });
+
   test("preserves the primary replacement error when staging cleanup also fails", async () => {
     const path = join(root, "replacement-cleanup-failure.txt");
     await writeFile(path, "old");
@@ -1093,10 +1616,10 @@ describe("filesystem publication", () => {
     const renameMock = spyOn(fsPromises, "rename").mockImplementation(async () => {
       throw syscallError("EPERM");
     });
-    const realRm = fsPromises.rm;
-    const rmMock = spyOn(fsPromises, "rm").mockImplementation(async (target, options) => {
+    const realUnlink = fsPromises.unlink;
+    const unlinkMock = spyOn(fsPromises, "unlink").mockImplementation(async (target) => {
       if (String(target).includes(".hashline-")) throw syscallError("EBUSY");
-      return realRm(target, options);
+      return realUnlink(target);
     });
     try {
       await expect(
@@ -1109,10 +1632,10 @@ describe("filesystem publication", () => {
           consume() {},
         }),
       ).rejects.toThrow(
-        "UNSUPPORTED_FILE: The filesystem could not atomically replace the target. No replacement was published, but the snapshot was consumed; take a fresh read before choosing another workflow. Staging cleanup also failed; an internal temporary file may remain.",
+        "UNSUPPORTED_FILE: The filesystem could not atomically replace the target. No replacement was published, but the snapshot was consumed; take a fresh read before choosing another workflow. Staging cleanup also failed; an owned internal temporary file may remain.",
       );
     } finally {
-      rmMock.mockRestore();
+      unlinkMock.mockRestore();
       renameMock.mockRestore();
     }
     expect(await readFile(path, "utf8")).toBe("old");
@@ -1121,6 +1644,39 @@ describe("filesystem publication", () => {
     await rm(join(root, staging[0] as string), { force: true });
   });
 
+  test("preserves stable observation recovery during writability checks", async () => {
+    const path = join(root, "writability-pressure.txt");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    let attempts = 0;
+    let consumed = false;
+    const accessMock = spyOn(fsPromises, "access").mockImplementation(async () => {
+      attempts += 1;
+      throw syscallError("EBUSY");
+    });
+    try {
+      await expect(
+        publishReplacement({
+          resolved,
+          expected,
+          replacement: encoder.encode("new"),
+          maxBytes: 1024,
+          signal: new AbortController().signal,
+          consume() {
+            consumed = true;
+          },
+        }),
+      ).rejects.toThrow(
+        "RACE_BEFORE_WRITE: A filesystem observation could not be completed safely. No publication occurred;",
+      );
+    } finally {
+      accessMock.mockRestore();
+    }
+    expect(attempts).toBe(3);
+    expect(consumed).toBe(false);
+    expect(await readFile(path, "utf8")).toBe("old");
+  });
   test("rejects stale, read-only, and aborted replacements before publication", async () => {
     const path = join(root, "file");
     await writeFile(path, "old");
@@ -1212,6 +1768,352 @@ describe("filesystem publication", () => {
     expect(["one", "two"]).toContain(await readFile(concurrent.canonicalPath, "utf8"));
   });
 
+  test("bounds exclusive staging-name collisions before publication", async () => {
+    const resolved = await resolveNewFile("staging-collisions.txt", root);
+    const realOpen = fsPromises.open;
+    let collisions = 0;
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      if (String(target).includes(".hashline-") && flags === "wx") {
+        collisions += 1;
+        throw syscallError("EEXIST");
+      }
+      return realOpen(target, flags, mode);
+    });
+    try {
+      await expect(
+        publishNewFile({
+          resolved,
+          bytes: encoder.encode("created"),
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow("RACE_BEFORE_WRITE: Internal staging names were already occupied.");
+    } finally {
+      openMock.mockRestore();
+    }
+    expect(collisions).toBe(3);
+    await expect(readFile(resolved.canonicalPath)).rejects.toThrow();
+  });
+
+  test("reports an opened staging path whose identity cannot be proved", async () => {
+    const resolved = await resolveNewFile("staging-unproved.txt", root);
+    const realOpen = fsPromises.open;
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      const handle = await realOpen(target, flags, mode);
+      if (String(target).includes(".hashline-") && flags === "wx") {
+        spyOn(handle, "stat").mockRejectedValue(syscallError("EIO"));
+      }
+      return handle;
+    });
+    try {
+      await expect(
+        publishNewFile({
+          resolved,
+          bytes: encoder.encode("created"),
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow(
+        "RACE_BEFORE_WRITE: A filesystem observation could not be completed safely. No publication occurred; wait for transient filesystem pressure to settle or restore path access before retrying. Staging ownership could not be proved, so an internal temporary path may remain.",
+      );
+    } finally {
+      openMock.mockRestore();
+    }
+    await expect(readFile(resolved.canonicalPath)).rejects.toThrow();
+    expect((await readdir(root)).filter((entry) => entry.includes(".hashline-"))).toHaveLength(1);
+  });
+
+  test("bounds persistent owned-staging cleanup observations", async () => {
+    const path = join(root, "staging-cleanup-observation.txt");
+    await writeFile(path, "old");
+    const resolved = await resolveExistingFile(path, root);
+    const expected = await readStableFile(resolved, 1024, true);
+    const realOpen = fsPromises.open;
+    const realLstat = stringPathFs.lstat;
+    let cleanupObservations = 0;
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      const handle = await realOpen(target, flags, mode);
+      if (String(target).includes(".hashline-") && flags === "wx") {
+        spyOn(handle, "writeFile").mockRejectedValue(syscallError("EIO"));
+      }
+      return handle;
+    });
+    const lstatMock = spyOn(stringPathFs, "lstat").mockImplementation(async (target) => {
+      if (String(target).includes(".hashline-")) {
+        cleanupObservations += 1;
+        throw syscallError("EBUSY");
+      }
+      return realLstat(target);
+    });
+    try {
+      await expect(
+        publishReplacement({
+          resolved,
+          expected,
+          replacement: encoder.encode("new"),
+          maxBytes: 1024,
+          signal: new AbortController().signal,
+          consume() {},
+        }),
+      ).rejects.toThrow(
+        "RACE_BEFORE_WRITE: Replacement preparation failed before publication. No publication occurred; wait for transient filesystem pressure to settle or restore filesystem access before retrying. Staging cleanup also failed; an owned internal temporary file may remain.",
+      );
+    } finally {
+      lstatMock.mockRestore();
+      openMock.mockRestore();
+    }
+    expect(cleanupObservations).toBe(3);
+    expect(await readFile(path, "utf8")).toBe("old");
+    expect((await readdir(root)).filter((entry) => entry.includes(".hashline-"))).toHaveLength(1);
+  });
+
+  test("reports persistent staging handle cleanup failures", async () => {
+    for (const kind of ["replacement", "create"] as const) {
+      const path = join(root, `staging-handle-cleanup-${kind}.txt`);
+      if (kind === "replacement") await writeFile(path, "old");
+      const realOpen = fsPromises.open;
+      let closeAttempts = 0;
+      let releaseStagingHandle: (() => Promise<void>) | undefined;
+      const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+        const handle = await realOpen(target, flags, mode);
+        if (String(target).includes(".hashline-") && flags === "wx") {
+          releaseStagingHandle = handle.close.bind(handle);
+          spyOn(handle, "writeFile").mockRejectedValue(syscallError("EIO"));
+          spyOn(handle, "close").mockImplementation((async () => {
+            closeAttempts += 1;
+            throw syscallError("EBUSY");
+          }) as typeof handle.close);
+        }
+        return handle;
+      });
+      try {
+        const publication =
+          kind === "replacement"
+            ? (async () => {
+                const resolved = await resolveExistingFile(path, root);
+                const expected = await readStableFile(resolved, 1024, true);
+                await publishReplacement({
+                  resolved,
+                  expected,
+                  replacement: encoder.encode("new"),
+                  maxBytes: 1024,
+                  signal: new AbortController().signal,
+                  consume() {},
+                });
+              })()
+            : publishNewFile({
+                resolved: await resolveNewFile(path, root),
+                bytes: encoder.encode("new"),
+                signal: new AbortController().signal,
+              });
+        await expect(publication).rejects.toThrow(
+          "Staging handle cleanup also failed; an internal file descriptor may remain open.",
+        );
+      } finally {
+        openMock.mockRestore();
+        await releaseStagingHandle?.();
+      }
+      expect(closeAttempts).toBe(3);
+      if (kind === "replacement") {
+        expect(await readFile(path, "utf8")).toBe("old");
+      } else {
+        await expect(readFile(path)).rejects.toThrow();
+      }
+      for (const entry of await readdir(root)) {
+        if (entry.includes(".hashline-")) await rm(join(root, entry), { force: true });
+      }
+    }
+  });
+
+  test("preserves readonly cancellation errors while reporting handle cleanup", async () => {
+    for (const kind of ["replacement", "create"] as const) {
+      const path = join(root, `readonly-abort-cleanup-${kind}.txt`);
+      if (kind === "replacement") await writeFile(path, "old");
+      const controller = new AbortController();
+      const realOpen = fsPromises.open;
+      const realLstat = stringPathFs.lstat;
+      let closeAttempts = 0;
+      let cleanupObservations = 0;
+      let releaseStagingHandle: (() => Promise<void>) | undefined;
+      const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+        const handle = await realOpen(target, flags, mode);
+        if (String(target).includes(".hashline-") && flags === "wx") {
+          releaseStagingHandle = handle.close.bind(handle);
+          spyOn(handle, "writeFile").mockImplementation(async () => {
+            controller.abort();
+            throw controller.signal.reason;
+          });
+          spyOn(handle, "close").mockImplementation((async () => {
+            closeAttempts += 1;
+            throw syscallError("EBUSY");
+          }) as typeof handle.close);
+        }
+        return handle;
+      });
+      const lstatMock = spyOn(stringPathFs, "lstat").mockImplementation(async (target) => {
+        if (String(target).includes(".hashline-")) cleanupObservations += 1;
+        return realLstat(target);
+      });
+      let publicationError: unknown;
+      try {
+        const publication =
+          kind === "replacement"
+            ? (async () => {
+                const resolved = await resolveExistingFile(path, root);
+                const expected = await readStableFile(resolved, 1024, true);
+                await publishReplacement({
+                  resolved,
+                  expected,
+                  replacement: encoder.encode("new"),
+                  maxBytes: 1024,
+                  signal: controller.signal,
+                  consume() {},
+                });
+              })()
+            : publishNewFile({
+                resolved: await resolveNewFile(path, root),
+                bytes: encoder.encode("new"),
+                signal: controller.signal,
+              });
+        await publication;
+      } catch (error) {
+        publicationError = error;
+      } finally {
+        lstatMock.mockRestore();
+        openMock.mockRestore();
+        await releaseStagingHandle?.();
+      }
+      expect(publicationError).toBeInstanceOf(Error);
+      expect((publicationError as Error).message).toContain(
+        "Staging handle cleanup also failed; an internal file descriptor may remain open.",
+      );
+      expect((publicationError as Error).message).not.toContain("TypeError");
+      expect(closeAttempts).toBe(3);
+      expect(cleanupObservations).toBeGreaterThan(0);
+      if (kind === "replacement") {
+        expect(await readFile(path, "utf8")).toBe("old");
+      } else {
+        await expect(readFile(path)).rejects.toThrow();
+      }
+      for (const entry of await readdir(root)) {
+        if (entry.includes(".hashline-")) await rm(join(root, entry), { force: true });
+      }
+    }
+  });
+
+  test("retries a transient staging close on the same owned handle", async () => {
+    const resolved = await resolveNewFile("staging-close-retry.txt", root);
+    const realOpen = fsPromises.open;
+    let stagingOpens = 0;
+    let closeAttempts = 0;
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      const handle = await realOpen(target, flags, mode);
+      if (String(target).includes(".hashline-") && flags === "wx") {
+        stagingOpens += 1;
+        const realClose = handle.close.bind(handle);
+        spyOn(handle, "close").mockImplementation((async () => {
+          closeAttempts += 1;
+          if (closeAttempts === 1) throw syscallError("EBUSY");
+          await realClose();
+        }) as typeof handle.close);
+      }
+      return handle;
+    });
+    try {
+      await publishNewFile({
+        resolved,
+        bytes: encoder.encode("created"),
+        signal: new AbortController().signal,
+      });
+    } finally {
+      openMock.mockRestore();
+    }
+    expect(stagingOpens).toBe(1);
+    expect(closeAttempts).toBe(2);
+    expect(await readFile(resolved.canonicalPath, "utf8")).toBe("created");
+    expect((await readdir(root)).some((entry) => entry.includes(".hashline-"))).toBe(false);
+  });
+
+  test("classifies staged growth as a pre-publication race", async () => {
+    for (const kind of ["replacement", "create"] as const) {
+      const path = join(root, `staging-growth-${kind}.txt`);
+      if (kind === "replacement") await writeFile(path, "old");
+      const realOpen = fsPromises.open;
+      let grew = false;
+      const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+        if (!grew && String(target).includes(".hashline-") && flags === "r") {
+          grew = true;
+          await fsPromises.appendFile(target, "!");
+        }
+        return realOpen(target, flags, mode);
+      });
+      try {
+        if (kind === "replacement") {
+          const resolved = await resolveExistingFile(path, root);
+          const expected = await readStableFile(resolved, 1024, true);
+          let consumed = false;
+          await expect(
+            publishReplacement({
+              resolved,
+              expected,
+              replacement: encoder.encode("new"),
+              maxBytes: 1024,
+              signal: new AbortController().signal,
+              consume() {
+                consumed = true;
+              },
+            }),
+          ).rejects.toThrow("RACE_BEFORE_WRITE:");
+          expect(consumed).toBe(false);
+          expect(await readFile(path, "utf8")).toBe("old");
+        } else {
+          const resolved = await resolveNewFile(path, root);
+          await expect(
+            publishNewFile({
+              resolved,
+              bytes: encoder.encode("new"),
+              signal: new AbortController().signal,
+            }),
+          ).rejects.toThrow("RACE_BEFORE_WRITE:");
+          await expect(readFile(path)).rejects.toThrow();
+        }
+      } finally {
+        openMock.mockRestore();
+      }
+      expect(grew).toBe(true);
+      expect((await readdir(root)).some((entry) => entry.includes(".hashline-"))).toBe(false);
+    }
+  });
+
+  test("recovers a transient exact proof failure after create", async () => {
+    const resolved = await resolveNewFile("create-observation.txt", root);
+    const realLink = fsPromises.link;
+    const realOpen = fsPromises.open;
+    let published = false;
+    let injected = false;
+    const linkMock = spyOn(fsPromises, "link").mockImplementation(async (source, destination) => {
+      await realLink(source, destination);
+      if (String(destination) === resolved.canonicalPath) published = true;
+    });
+    const openMock = spyOn(fsPromises, "open").mockImplementation(async (target, flags, mode) => {
+      if (published && !injected && flags === "r" && String(target) === resolved.canonicalPath) {
+        injected = true;
+        throw syscallError("EBUSY");
+      }
+      return realOpen(target, flags, mode);
+    });
+    try {
+      await publishNewFile({
+        resolved,
+        bytes: encoder.encode("created"),
+        signal: new AbortController().signal,
+      });
+    } finally {
+      openMock.mockRestore();
+      linkMock.mockRestore();
+    }
+    expect(injected).toBe(true);
+    expect(await readFile(resolved.canonicalPath, "utf8")).toBe("created");
+  });
+
   test("maps unsupported replacement and create publication errors", async () => {
     for (const code of ["EPERM", "EACCES", "EBUSY"]) {
       const path = join(root, `replace-${code}`);
@@ -1233,7 +2135,11 @@ describe("filesystem publication", () => {
           }),
         ).rejects.toThrow("UNSUPPORTED_FILE:");
       } finally {
-        mock.mockRestore();
+        try {
+          expect(mock).toHaveBeenCalledTimes(1);
+        } finally {
+          mock.mockRestore();
+        }
       }
       expect(await readFile(path, "utf8")).toBe("old");
     }
@@ -1252,7 +2158,11 @@ describe("filesystem publication", () => {
           }),
         ).rejects.toThrow("UNSUPPORTED_FILE:");
       } finally {
-        mock.mockRestore();
+        try {
+          expect(mock).toHaveBeenCalledTimes(1);
+        } finally {
+          mock.mockRestore();
+        }
       }
       await expect(assertTargetAbsent(resolved)).resolves.toBeUndefined();
     }
@@ -1284,7 +2194,11 @@ describe("filesystem publication", () => {
         "RACE_AFTER_WRITE: Replacement publication returned an unexpected filesystem error. Publication may have occurred; inspect the target and take a fresh read before replanning. Do not blindly retry.",
       );
     } finally {
-      renameMock.mockRestore();
+      try {
+        expect(renameMock).toHaveBeenCalledTimes(1);
+      } finally {
+        renameMock.mockRestore();
+      }
     }
     expect(consumed).toBe(true);
     expect(await readFile(replacementPath, "utf8")).toBe("old");
@@ -1304,7 +2218,11 @@ describe("filesystem publication", () => {
         "RACE_AFTER_WRITE: The target link operation returned an unexpected filesystem error. The target file may already be committed; inspect it before retrying. If it exists, take a fresh hashline_read before editing; if it is absent, rebuild the creation plan. Do not blindly retry.",
       );
     } finally {
-      linkMock.mockRestore();
+      try {
+        expect(linkMock).toHaveBeenCalledTimes(1);
+      } finally {
+        linkMock.mockRestore();
+      }
     }
     await expect(assertTargetAbsent(createResolved)).resolves.toBeUndefined();
     expect((await readdir(root)).some((entry) => entry.includes(".hashline-"))).toBe(false);
@@ -1372,7 +2290,7 @@ describe("filesystem publication", () => {
     expect((await stat(aliased.canonicalPath)).nlink).toBe(2);
   });
 
-  test("reports cancellation and cleanup failures after create commit", async () => {
+  test("reports cancellation but recovers transient cleanup failures after create commit", async () => {
     const realLink = fsPromises.link;
     const cancelled = await resolveNewFile("cancelled-after-link", root);
     const controller = new AbortController();
@@ -1394,14 +2312,14 @@ describe("filesystem publication", () => {
     expect(await readFile(cancelled.canonicalPath, "utf8")).toBe("committed");
 
     const cleanupFailure = await resolveNewFile("cleanup-failed-after-link", root);
-    const realRm = fsPromises.rm;
+    const realUnlink = fsPromises.unlink;
     let injected = false;
-    const rmMock = spyOn(fsPromises, "rm").mockImplementation(async (path, options) => {
+    const unlinkMock = spyOn(fsPromises, "unlink").mockImplementation(async (path) => {
       if (!injected && String(path).includes(".hashline-")) {
         injected = true;
         throw Object.assign(new Error("raw EBUSY"), { code: "EBUSY" });
       }
-      return realRm(path, options);
+      return realUnlink(path);
     });
     try {
       await expect(
@@ -1410,9 +2328,9 @@ describe("filesystem publication", () => {
           bytes: encoder.encode("committed"),
           signal: new AbortController().signal,
         }),
-      ).rejects.toThrow("RACE_AFTER_WRITE:");
+      ).resolves.toBeUndefined();
     } finally {
-      rmMock.mockRestore();
+      unlinkMock.mockRestore();
     }
     expect(await readFile(cleanupFailure.canonicalPath, "utf8")).toBe("committed");
   });
@@ -1508,7 +2426,11 @@ describe("new-file parent publication", () => {
         }),
       ).rejects.toThrow("UNSUPPORTED_FILE:");
     } finally {
-      mkdirMock.mockRestore();
+      try {
+        expect(mkdirMock).toHaveBeenCalledTimes(1);
+      } finally {
+        mkdirMock.mockRestore();
+      }
     }
     await expect(stat(deniedPlan.missingDirectories[0]?.canonicalPath ?? "")).rejects.toMatchObject(
       { code: "ENOENT" },
@@ -1534,7 +2456,11 @@ describe("new-file parent publication", () => {
     } catch (error) {
       message = String(error);
     } finally {
-      mkdirMock.mockRestore();
+      try {
+        expect(mkdirMock).toHaveBeenCalledTimes(1);
+      } finally {
+        mkdirMock.mockRestore();
+      }
     }
 
     expect(message).toContain("PARTIAL_PUBLICATION:");
@@ -1691,6 +2617,7 @@ describe("new-file parent publication", () => {
     const boundaryRoot = join(root, "handle-boundaries");
     await mkdir(boundaryRoot);
     const boundaries = ["writeFile", "sync", "stat", "close"] as const;
+    const recoveredBoundaries = new Set(["stat"]);
 
     for (const boundary of boundaries) {
       const plan = await resolveNewFileParentPlan(
@@ -1699,6 +2626,7 @@ describe("new-file parent publication", () => {
       );
       const directory = plan.missingDirectories[0];
       if (!directory) throw new Error("Expected a planned directory.");
+      let statInjected = false;
       const realOpen = fsPromises.open;
       const openMock = spyOn(fsPromises, "open").mockImplementation(async (path, flags, mode) => {
         const handle = await realOpen(path, flags, mode);
@@ -1712,9 +2640,14 @@ describe("new-file parent publication", () => {
             throw syscallError("EIO");
           });
         } else if (boundary === "stat") {
-          spyOn(handle, "stat").mockImplementation(async () => {
-            throw syscallError("EIO");
-          });
+          const realStat = handle.stat.bind(handle);
+          spyOn(handle, "stat").mockImplementation((async () => {
+            if (!statInjected) {
+              statInjected = true;
+              throw syscallError("EBUSY");
+            }
+            return realStat();
+          }) as typeof handle.stat);
         } else {
           const realClose = handle.close.bind(handle);
           let injected = false;
@@ -1730,18 +2663,27 @@ describe("new-file parent publication", () => {
         return handle;
       });
       try {
-        await expect(
-          publishNewFileWithParents({
-            plan,
-            bytes: encoder.encode("content"),
-            signal: new AbortController().signal,
-          }),
-        ).rejects.toThrow("PARTIAL_PUBLICATION:");
+        const publication = publishNewFileWithParents({
+          plan,
+          bytes: encoder.encode("content"),
+          signal: new AbortController().signal,
+        });
+        if (recoveredBoundaries.has(boundary)) {
+          await publication.catch((error) => {
+            throw new Error(`Expected ${boundary} to recover: ${String(error)}`);
+          });
+        } else {
+          await expect(publication).rejects.toThrow("PARTIAL_PUBLICATION:");
+        }
       } finally {
         openMock.mockRestore();
       }
       expect((await lstat(directory.canonicalPath)).isDirectory()).toBe(true);
-      await expect(lstat(plan.canonicalPath)).rejects.toMatchObject({ code: "ENOENT" });
+      if (recoveredBoundaries.has(boundary)) {
+        expect(await readFile(plan.canonicalPath, "utf8")).toBe("content");
+      } else {
+        await expect(lstat(plan.canonicalPath)).rejects.toMatchObject({ code: "ENOENT" });
+      }
       expect(
         (await readdir(directory.canonicalPath)).some((name) => name.includes(".hashline-")),
       ).toBe(false);
@@ -1763,6 +2705,7 @@ describe("new-file parent publication", () => {
       "final-chain",
     ] as const;
     const committedBoundaries = new Set(["post-link-lstat", "cleanup", "readback", "final-chain"]);
+    const recoveredBoundaries = new Set(["cleanup"]);
 
     for (const boundary of boundaries) {
       const plan = await resolveNewFileParentPlan(
@@ -1820,14 +2763,14 @@ describe("new-file parent publication", () => {
         });
         restore = () => mock.mockRestore();
       } else if (boundary === "cleanup") {
-        const realRm = fsPromises.rm;
+        const realUnlink = fsPromises.unlink;
         let injected = false;
-        const mock = spyOn(fsPromises, "rm").mockImplementation(async (path, options) => {
+        const mock = spyOn(fsPromises, "unlink").mockImplementation(async (path) => {
           if (!injected && String(path).includes(".hashline-")) {
             injected = true;
             throw syscallError("EBUSY");
           }
-          return realRm(path, options);
+          return realUnlink(path);
         });
         restore = () => mock.mockRestore();
       } else if (boundary === "readback") {
@@ -1860,13 +2803,16 @@ describe("new-file parent publication", () => {
       }
 
       try {
-        await expect(
-          publishNewFileWithParents({
-            plan,
-            bytes: encoder.encode("content"),
-            signal: new AbortController().signal,
-          }),
-        ).rejects.toThrow("PARTIAL_PUBLICATION:");
+        const publication = publishNewFileWithParents({
+          plan,
+          bytes: encoder.encode("content"),
+          signal: new AbortController().signal,
+        });
+        if (recoveredBoundaries.has(boundary)) {
+          await expect(publication).resolves.toBeUndefined();
+        } else {
+          await expect(publication).rejects.toThrow("PARTIAL_PUBLICATION:");
+        }
       } finally {
         restore();
       }

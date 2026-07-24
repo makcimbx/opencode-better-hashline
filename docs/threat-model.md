@@ -99,12 +99,13 @@ Snapshot bytes and IDs live in process memory. Code executing in the same proces
 | Target identity | Canonical path plus stable metadata; lifecycle also requires direct terminal and parent binding |
 | Relocation | Exact textual selected-base evidence, agreement across successful bounded contexts, and ambiguity rejection at copied edges; no semantic or history-causality claim |
 | Text-batch validation | One immutable pre-batch file, declared read/write effects checked before mutation, stable conflict codes with deterministic zero-based pair evidence |
-| Permission binding | Exact planned patch and complete source/destination or parent-chain path set before approval |
-| New file safety | Strict `filePath`/`content` schema, one fixed zero-to-64-parent plan, staged exclusive temporary file, no-replace hard-link publication, and post-publication identity/byte checks |
-| Parent creation safety | Automatic fixed missing-directory plan, all-path authorization/locks, exclusive root-to-leaf creation, and no rollback after a directory exists or creation becomes ambiguous; a partial outcome invalidates affected snapshots and unbinds the alias epoch |
-| Delete safety | Direct regular single-link source revalidated before exact unlink and absence verification |
-| Move safety | Existing stable parents, same filesystem, absent destination, no-clobber hard link, exact inode/byte/link-count verification, then source unlink |
-| Partial move safety | No destructive rollback; affected snapshots invalidated, explicit `PARTIAL_PUBLICATION`, and alias epoch unbound until inspection/repair plus a fresh delivered same-session read; old IDs stay unusable |
+| Permission binding | Exact final patch and mutation path set before approval; create reservations authorize and retain locks for the complete original parent envelope even when the pre-approval mutation suffix contracts |
+| Observation stabilization | At most three coherent read-only attempts with short abort-aware delays; no retry of target publication syscalls, fuzzy matching, path substitution, or post-approval replanning |
+| New file safety | Strict `filePath`/`content` schema, immutable zero-to-64-parent reservation, exact pre-approval contiguous-prefix adoption, pinned staging identity, no-replace hard-link publication, and exact final inode/link-count/byte checks |
+| Parent creation safety | All-reservation authorization/locks, exclusive remaining root-to-leaf creation, no rollback after this call creates a directory or creation becomes ambiguous, and generation fencing of already queued overlapping calls |
+| Delete safety | Same-envelope identity refresh before approval, then direct regular single-link source revalidation before one exact unlink and bounded absence proof |
+| Move safety | Same-envelope identity refresh before approval, existing stable parents, same filesystem, absent destination, one no-clobber hard link, exact inode/byte/link-count verification, then one source unlink |
+| Partial move safety | No destructive rollback; queued overlapping calls fenced, affected snapshots invalidated, explicit `PARTIAL_PUBLICATION`, and alias epoch unbound until inspection/repair plus a fresh delivered same-session read; old IDs stay unusable |
 | Memory bounds | Global, session, path, byte, and TTL limits |
 | Offline alias history | Bounded v2 completed/rejected-call validation with exact operation and source/destination metadata correlation; never live admission |
 | Alias concurrency | Mutation rejected before delivered-read binding; after binding, only complete disjoint path sets may overlap and deterministic locks serialize every overlap |
@@ -140,15 +141,20 @@ mutation to the current worktree. Authorized external paths require the unique h
 alias admission never broadens filesystem authorization.
 
 `hashline_write` parent creation is separate from lifecycle movement. Its strict schema accepts only
-`filePath` and `content` and rejects the obsolete `createParents` field. Every call fixes the deepest
-existing ancestor, zero to 64 missing directories, and the target before permission; it authorizes and
-locks every planned path, then uses exclusive root-to-leaf creation before staged no-clobber
-publication. A zero-directory plan publishes the file without `mkdir`. Once the first directory
-exists, or a failed `mkdir` leaves its outcome ambiguous, a failure is reported as
-`PARTIAL_PUBLICATION` with no automatic rollback; the target file may also be committed. The error
-omits requested and canonical host roots and unbinds the native-alias live epoch. Inspect and
-reconcile directories and target before retrying; a fresh delivered `hashline_read` can then rebind
-in the same session, while old snapshot IDs remain unusable. `move_file` never creates parents.
+`filePath` and `content` and rejects the obsolete `createParents` field. Every call pins the deepest
+existing ancestor for path-identity verification and fixes a complete reservation containing zero to
+64 initially missing directories plus the target, then authorizes and locks every reservation path.
+Under those original locks and before edit permission, it may adopt only an exact, reverified
+contiguous root-side prefix created by another call; this contracts the mutation suffix without adding
+or substituting any path. Successful reuse is reported as information, not failure.
+
+Remaining directories use exclusive root-to-leaf creation before staged no-clobber publication. Once
+this call creates its first directory, or a failed `mkdir` leaves its outcome ambiguous, a failure is
+reported as `PARTIAL_PUBLICATION` with no automatic rollback; the target may also be committed. The
+partial result fences calls already queued on overlapping paths, invalidates affected snapshots, and
+unbinds the native-alias live epoch. Inspect and reconcile directories and target before a fresh call;
+a delivered `hashline_read` can then rebind in the same session, while old IDs remain unusable.
+`move_file` never creates parents.
 
 ## Metadata
 

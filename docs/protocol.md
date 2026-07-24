@@ -49,6 +49,7 @@ before live-epoch admission, permission, or filesystem work.
 | Lifetime | Creation/access time, TTL, pin state, and cache accounting |
 
 Snapshots cannot cross sessions, worktrees, or canonical paths. An ID is not accepted merely because its digest or visible text matches.
+Snapshot TTL is checked when an operation admits and pins an ID. Once admitted, that exact pinned object may finish waiting for locks or permission after its idle TTL; it still must remain mapped and non-invalidated, and publication still rereads exact bytes and identity. Expiry therefore rejects new admission without turning queue latency into a needless retry for an already active call.
 
 The header exposes only a 12-hex SHA-256 preview for diagnostics. Freshness never depends on that preview.
 
@@ -95,6 +96,7 @@ Output grammar:
 `offset` is one-based and defaults to 1. Requested `limit` accepts `1..100,000` and defaults to 1,000. `maxOutputBytes` is the authoritative page bound: it defaults to 40 KiB and is configurable only up to 45 KiB. Rendering can therefore stop before the requested line count. `@more` means the cursor stopped before EOF; `@eof` means it reached EOF. `partial=true` may accompany either footer when the page lacks complete editable BOF-to-EOF evidence.
 
 `hashline_read` first prepares a pending snapshot. `N|` lines become editable only after `tool.execute.after` confirms that OpenCode delivered the result without generic truncation or mutation; only then does the valid candidate issue its refs. A line is rendered as preview-only `N!|` when its complete annotated form cannot fit in one configured output page; preview-only lines never become issued, and pagination cannot make such a line editable. Raise `maxOutputBytes` within its cap when safe, or stop for a configuration change or manual file restructuring without treating the preview as source content. Marker loss, host truncation, output mutation, or candidate invalidation issues no new refs; previously issued refs on a reused snapshot remain valid unless that snapshot is invalidated. Cache eviction and publication still invalidate affected snapshots rather than guessing what the model received.
+Edit readback attestation uses the actual tool family and immutable pending-call state, not mutable after-hook arguments. If another hook removes the pending marker while any successor `@hashline` header remains, Better Hashline removes the unissued reference and reports the result as unavailable or unattestable rather than exposing an apparently usable ID.
 
 ## Edit
 
@@ -502,8 +504,8 @@ it does not plan deletion or movement of filesystem entries.
 
 For a text edit:
 
-1. Resolve the lexical path and canonical target.
-2. Pin and validate snapshot scope, path, and operation-specific issued provenance.
+1. Pin and validate snapshot scope, path, and operation-specific issued provenance.
+2. Resolve the lexical path and canonical target inside the admitted call.
 3. Request `external_directory` when the canonical target is outside the allowed roots. On POSIX, parents containing literal `*` or `?` can be approved once but are not persisted as wildcard rules; Windows rejects those invalid filename characters before permission.
 4. Acquire the process-global canonical-path lock.
 5. Reread bytes and file identity; revalidate symlink target and supported metadata.
@@ -514,7 +516,7 @@ For a text edit:
 10. Reread the destination and recheck exact bytes, identity, and alias target after the permission wait.
 11. At the approved publication's consume boundary, immediately before publication, invalidate every snapshot for this session/path; consumption remains final after partial or failed publication.
 12. Attempt one rename over the canonical target.
-13. Reread and verify the resulting bytes.
+13. Reread and verify the resulting bytes, staged inode identity, and single-link state.
 14. When text readback is requested by `readback:true` or either window field, retain those verified
     bytes as a pending snapshot and render the one requested/default contiguous page.
 15. Issue only that page's refs after `tool.execute.after` attests the delivered output; otherwise
@@ -525,8 +527,8 @@ For lifecycle `delete_file` or `move_file`:
 1. Validate the sole operation, strict rebase, absence of requested readback, snapshot scope, canonical source path, and complete issued BOF-to-EOF provenance.
 2. Resolve a direct mutable source and, for move, an absent destination under an existing canonical parent; authorize every external source or destination path.
 3. Acquire deterministic process-global locks sequentially for the sorted canonical source/destination path set; cancellation while queued releases acquired locks before later paths are reserved.
-4. Reread the source as the exact regular, single-link UTF-8 snapshot file; revalidate direct terminal and parent identity, and for move verify destination absence and same-filesystem identity.
-5. Freeze one immutable lifecycle plan containing the operation, canonical paths, stable source and parent identities, and exact delete/move patch and metadata.
+4. While holding the original canonical lock envelope, refresh source and destination identities only when their requested and canonical path strings are unchanged; reread the source as the exact regular, single-link UTF-8 snapshot file, then verify destination absence and same-filesystem identity.
+5. Freeze one immutable lifecycle plan containing the operation, unchanged canonical paths, refreshed stable identities, and exact delete/move patch and metadata.
 6. Request standard `edit` permission for the complete source/destination path set and that exact patch.
 7. Reread and revalidate the approved source, terminal binding, parent identities, destination absence, and same-filesystem constraint without replanning or changing metadata.
 8. At the approved publication's consume boundary, immediately before publication, invalidate every relevant source/destination snapshot; consumption remains final after partial or failed publication.
@@ -537,34 +539,49 @@ No rebase, destination substitution, patch change, metadata change, or lifecycle
 permission approval. If approved state changed while permission was pending, publication rejects.
 Lifecycle `delete_file` and `move_file` never create a readback successor.
 
+Across read, text-edit, lifecycle, and create flows, transient read-only filesystem observations use at most three complete attempts with short abort-aware delays. A coherent settled result continues inside the same tool call; exhausted pressure, persistent path drift, or exact identity/byte mismatch remains model-visible. Publication syscalls such as target `rename`, `link`, `unlink`, and parent `mkdir` are never retried because their outcome can be ambiguous. Only cleanup of an exactly pinned, plugin-owned staging inode and closure of its known handle may retry boundedly; cleanup rechecks ownership and never intentionally removes a changed identity.
+
 For a new file, `hashline_write` is create-only and its strict schema accepts exactly `filePath` and
 `content`. Unknown fields, including the obsolete `createParents`, are rejected before mutation.
 Every call locates and pins the deepest existing requested and canonical directory ancestor, rejects
-more than 64 missing directories, and freezes one immutable plan containing zero to 64 root-to-leaf
-directory entries plus the target. It authorizes every planned directory and target, acquires
-deterministic locks for all of them, revalidates the exact absence and identity plan without
-replanning, and requests one edit permission for the complete diff and path set.
+more than 64 missing directories, and freezes an immutable reservation envelope containing zero to
+64 root-to-leaf directory entries plus the target. It externally authorizes and deterministically
+locks that complete envelope.
 
-Publication creates each missing directory with exclusive non-recursive `mkdir`, verifying every
-directory and immediate parent. It then writes and flushes an exclusive same-directory temporary file
-and publishes it with a no-replace hard link, verifying staged and published identity, link count,
-exact bytes, and parent identity. With zero missing directories, no `mkdir` runs and the same plan
-delegates directly to that staged no-clobber file publication. The tool never overwrites a file,
-directory, or symlink. Filesystems that cannot provide the required local hard-link semantics reject
-the operation.
+While holding every original lock and before requesting edit permission, the call may contract only
+the missing-directory portion of the plan. It adopts a contiguous root-side prefix only when each
+requested and canonical name appeared as the exact same direct ordinary directory with verified
+parent identity. It re-verifies the adopted prefix, retains the complete original lock envelope, and
+never adds, substitutes, retargets, or skips a non-prefix path. Any mismatch still fails closed. Edit
+permission then covers the target and only the remaining directory suffix that this call can create.
+A successful adoption is not an error: output reports the verified reuse and metadata exposes the
+display paths as `reusedDirectories`; `createdDirectories` continues to name only directories made by
+this call.
 
-Failures before the first directory exists or a `mkdir` outcome becomes ambiguous retain their
-ordinary code and leave no planned directory state. With zero missing directories, a failure after
-the hard link succeeds can leave the new file committed; the plugin reports `RACE_AFTER_WRITE`,
-requires target inspection instead of a blind retry, and never risks deleting a newer writer's file.
-Once any planned directory exists, or an attempted `mkdir` reports failure but a planned name
-appeared, every later cancellation, race, staging, linking, or final-verification failure returns
-`PARTIAL_PUBLICATION`. Created directories and any committed file are intentionally retained and
-never rolled back. Partial errors omit canonical host paths, invalidate snapshots for every planned
-mutation path, and unbind the native-alias live epoch. Inspect every planned directory and the target,
-reconcile them to one intended state before retrying, then use a fresh delivered `hashline_read` to
-rebind in the same session. Old snapshot IDs remain unusable. `move_file` does not use this path and
-never creates parents.
+Publication creates each remaining directory with exclusive non-recursive `mkdir`, verifying every
+directory and immediate parent. It then writes and flushes an exclusive same-directory temporary
+file, proves its pinned inode, exact bytes, size, and link count, and publishes it with one no-replace
+hard link. Bounded fresh names handle definite staging-name collisions. Final proof requires the
+same published inode, one link, exact bytes, and stable parent identity. With zero remaining
+directories, no `mkdir` runs. The tool never overwrites a file, directory, or symlink. Filesystems
+that cannot provide the required local hard-link semantics reject the operation.
+
+Failures before this call creates its first remaining directory, or before a `mkdir` outcome becomes
+ambiguous, retain their ordinary code and leave no directory state created by this call. With zero
+remaining directories, a failure after the hard link succeeds can leave the new file committed; the
+plugin reports `RACE_AFTER_WRITE`, requires target inspection instead of a blind retry, and never
+risks deleting a newer writer's file. Once this call creates a directory, or an attempted `mkdir`
+reports failure but its planned name appeared, every later cancellation, race, staging, linking, or
+final-verification failure returns `PARTIAL_PUBLICATION`. Created directories and any committed file
+are intentionally retained and never rolled back.
+
+A `PARTIAL_PUBLICATION` advances a generation fence for every locked path. Calls already queued on
+an overlapping path are rejected before their operation runs, so they cannot adopt or build beneath
+an ambiguous result. Inspect every planned directory and target and reconcile them to one intended
+state before issuing a fresh call. Partial errors omit canonical host paths, invalidate snapshots for
+every planned mutation path, and unbind the native-alias live epoch; a fresh delivered
+`hashline_read` can then rebind in the same session, while old IDs remain unusable. `move_file` never
+creates parents.
 
 ## Batch Semantics
 
@@ -643,9 +660,9 @@ Errors are rendered as `CODE: message`. Current codes include:
 | `INSERTION_BOUNDARY_CONFLICT` | Multiple insertion-like effects share one destination boundary |
 | `DISPLAY_PREFIX_REJECTED` | A payload begins with a model-facing annotation; native aliases persist this failure as a completed non-mutating terminal result |
 | `PERMISSION_DENIED` | OpenCode rejected a required permission |
-| `RACE_BEFORE_WRITE` | State changed during a stable read or after approval but before publication; the message identifies whether the unchanged snapshot can be retried or a fresh read/replan is required |
-| `RACE_AFTER_WRITE` | Publication may have occurred; inspect affected paths, take a fresh read, and replan instead of blindly retrying |
-| `PARTIAL_PUBLICATION` | A move or write after automatic parent creation may have left multiple planned names; reconcile all affected paths before retrying, then restart/reread as instructed |
+| `RACE_BEFORE_WRITE` | Bounded stabilization was exhausted, exact pre-publication state changed, or an overlapping queued plan was fenced after partial publication; this call published nothing, and the message identifies the safe next action |
+| `RACE_AFTER_WRITE` | Publication may have occurred and exact final proof could not be established after bounded observation; inspect affected paths, take a fresh read, and replan instead of blindly retrying |
+| `PARTIAL_PUBLICATION` | A move or write after this call started parent creation may have left multiple planned names; queued overlapping calls are fenced, and callers must reconcile all affected paths before a fresh call |
 | `UNSUPPORTED_FILE` | File type, metadata, encoding, size, filesystem relation, or policy is unsupported |
 
 Consumers must treat every `CODE: message` as failure. The native-alias `DISPLAY_PREFIX_REJECTED` result is completed only at the host transport layer so its offline attestation persists; it never reports `Applied`, requests permission, changes a file, or establishes a live epoch.
