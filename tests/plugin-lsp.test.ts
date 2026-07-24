@@ -297,8 +297,7 @@ async function actAfterFakeEvent(
   }
 }
 
-async function fakeEventOffset(log: string, event: string): Promise<number> {
-  await actAfterFakeEvent(log, event, () => Promise.resolve());
+async function fakeEventOffset(log: string): Promise<number> {
   return (await events(log)).length;
 }
 
@@ -670,7 +669,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "drift.ts");
-    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const diagnosticOffset = await fakeEventOffset(log);
     const drift = actAfterFakeEvent(
       log,
       "diagnostic",
@@ -710,7 +709,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "same-byte-drift.ts");
-    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const diagnosticOffset = await fakeEventOffset(log);
     let identityObservable = false;
     const drift = actAfterFakeEvent(
       log,
@@ -758,7 +757,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "nlink-drift.ts");
-    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const diagnosticOffset = await fakeEventOffset(log);
     let linkCountObservable = false;
     const drift = actAfterFakeEvent(
       log,
@@ -805,7 +804,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context();
     const snapshot = await issueSnapshot(value, toolContext, "move-drift.ts");
-    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const diagnosticOffset = await fakeEventOffset(log);
     const recreate = actAfterFakeEvent(
       log,
       "diagnostic",
@@ -851,14 +850,27 @@ describe("managed LSP plugin integration", () => {
 
   test("notifies delete and move lifecycle after publication", async () => {
     const deleteFile = join(root, "delete.ts");
-    await writeFile(deleteFile, "delete\n");
+    await writeFile(deleteFile, "before\n");
     const deletePlugin = await lspHooks("pull-full", {
       config: { diagnosticsTimeoutMs: 1_000 },
       name: "delete-lifecycle",
     });
     const deleteContext = context({ sessionID: "delete-session" });
+    const deleteBindingSnapshot = await issueSnapshot(
+      deletePlugin.value,
+      deleteContext,
+      "delete.ts",
+    );
+    await registry(deletePlugin.value).hashlineEdit.execute(
+      {
+        filePath: "delete.ts",
+        snapshotId: String(deleteBindingSnapshot.metadata.snapshotId),
+        operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["delete"] }],
+      },
+      deleteContext,
+    );
     const deleteSnapshot = await issueSnapshot(deletePlugin.value, deleteContext, "delete.ts");
-    await actAfterFakeEvent(deletePlugin.log, "open", () => Promise.resolve());
+    const deleteEventOffset = await fakeEventOffset(deletePlugin.log);
     const deleted = structured(
       await registry(deletePlugin.value).hashlineEdit.execute(
         {
@@ -869,6 +881,7 @@ describe("managed LSP plugin integration", () => {
         deleteContext,
       ),
     );
+    await actAfterFakeEvent(deletePlugin.log, "close", () => Promise.resolve(), deleteEventOffset);
     expect(deleted.output).not.toContain("@better-hashline-lsp");
     expect(deleted.output).not.toContain("LSP_DIAGNOSTICS_UNAVAILABLE");
     await expect(readFile(deleteFile, "utf8")).rejects.toThrow();
@@ -876,14 +889,23 @@ describe("managed LSP plugin integration", () => {
     expect(deleteEvents.at(-1)?.event).toBe("close");
 
     const moveFile = join(root, "move.ts");
-    await writeFile(moveFile, "move\n");
+    await writeFile(moveFile, "before\n");
     const movePlugin = await lspHooks("pull-full", {
       config: { diagnosticsTimeoutMs: 1_000 },
       name: "move-lifecycle",
     });
     const moveContext = context({ sessionID: "move-session" });
+    const moveBindingSnapshot = await issueSnapshot(movePlugin.value, moveContext, "move.ts");
+    await registry(movePlugin.value).hashlineEdit.execute(
+      {
+        filePath: "move.ts",
+        snapshotId: String(moveBindingSnapshot.metadata.snapshotId),
+        operations: [{ op: "replace", startLine: 1, endLine: 1, lines: ["move"] }],
+      },
+      moveContext,
+    );
     const moveSnapshot = await issueSnapshot(movePlugin.value, moveContext, "move.ts");
-    await actAfterFakeEvent(movePlugin.log, "open", () => Promise.resolve());
+    const moveEventOffset = await fakeEventOffset(movePlugin.log);
     const moved = structured(
       await registry(movePlugin.value).hashlineEdit.execute(
         {
@@ -894,6 +916,7 @@ describe("managed LSP plugin integration", () => {
         moveContext,
       ),
     );
+    await actAfterFakeEvent(movePlugin.log, "open", () => Promise.resolve(), moveEventOffset);
     expect(moved.output).toContain("LSP| moved.ts:1:1 [typescript] typescript:move\\n");
     expect(await readFile(join(root, "moved.ts"), "utf8")).toBe("move\n");
     const moveEvents = await events(movePlugin.log);
@@ -1452,7 +1475,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context({ sessionID: "newer-successor" });
     const firstSnapshot = await issueSnapshot(value, toolContext, "newer-successor.ts");
-    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const diagnosticOffset = await fakeEventOffset(log);
     const firstPending = registry(value).hashlineEdit.execute(
       {
         filePath: "newer-successor.ts",
@@ -1505,7 +1528,7 @@ describe("managed LSP plugin integration", () => {
     });
     const toolContext = context({ sessionID: "active-plugin-dispose" });
     const snapshot = await issueSnapshot(value, toolContext, "active-plugin-dispose.ts");
-    const diagnosticOffset = await fakeEventOffset(log, "open");
+    const diagnosticOffset = await fakeEventOffset(log);
     const pending = registry(value).hashlineEdit.execute(
       {
         filePath: "active-plugin-dispose.ts",

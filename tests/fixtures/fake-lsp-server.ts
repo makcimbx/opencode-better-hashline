@@ -27,10 +27,23 @@ const timers = new Set<ReturnType<typeof setTimeout>>();
 let diagnosticResult = 0;
 let reopenOpenCount = 0;
 let reopenClosedVersion: number | undefined;
+let documentSync = Promise.resolve();
 
 function log(event: string, detail: Record<string, unknown> = {}): void {
   if (!logPath) return;
   appendFileSync(logPath, `${JSON.stringify({ event, serverId, pid: process.pid, ...detail })}\n`);
+}
+
+function enqueueDocumentSync(action: () => void | Promise<void>): Promise<void> {
+  const operation = documentSync.then(action);
+  documentSync = operation.catch((error: unknown) => {
+    try {
+      log("document-sync-error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } catch {}
+  });
+  return documentSync;
 }
 
 function diagnostic(text: string): Diagnostic {
@@ -202,86 +215,95 @@ if (mode === "oversized-frame") {
     });
   });
 
-  peer.onNotification("textDocument/didOpen", (params) => {
-    const document = record(record(params).textDocument);
-    const uri = String(document.uri ?? "");
-    const text = String(document.text ?? "");
-    const version = Number(document.version ?? 0);
-    documents.set(uri, { text, version });
-    log("open", { uri, text, version, languageId: document.languageId });
-    if (mode === "push-reopen-stale") {
-      reopenOpenCount += 1;
-      if (reopenOpenCount === 1) {
-        sendPublication({ uri, version, diagnostics: [diagnostic(text)] });
-      } else {
-        if (reopenClosedVersion !== undefined) {
-          sendPublication({
-            uri,
-            version: reopenClosedVersion,
-            diagnostics: [diagnostic("stale-binding")],
+  peer.onNotification("textDocument/didOpen", (params) =>
+    enqueueDocumentSync(() => {
+      const document = record(record(params).textDocument);
+      const uri = String(document.uri ?? "");
+      const text = String(document.text ?? "");
+      const version = Number(document.version ?? 0);
+      documents.set(uri, { text, version });
+      log("open", { uri, text, version, languageId: document.languageId });
+      if (mode === "push-reopen-stale") {
+        reopenOpenCount += 1;
+        if (reopenOpenCount === 1) {
+          sendPublication({ uri, version, diagnostics: [diagnostic(text)] });
+        } else {
+          if (reopenClosedVersion !== undefined) {
+            sendPublication({
+              uri,
+              version: reopenClosedVersion,
+              diagnostics: [diagnostic("stale-binding")],
+            });
+          }
+          schedule(50, () => {
+            sendPublication({ uri, version, diagnostics: [diagnostic(text)] });
           });
         }
-        schedule(50, () => {
-          sendPublication({ uri, version, diagnostics: [diagnostic(text)] });
-        });
+        return;
       }
-      return;
-    }
-    if (
-      mode.startsWith("push") ||
-      mode.startsWith("typescript-sync") ||
-      mode === "requests" ||
-      mode === "save" ||
-      mode === "child"
-    ) {
-      publish(uri, version, text);
-    }
-  });
+      if (
+        mode.startsWith("push") ||
+        mode.startsWith("typescript-sync") ||
+        mode === "requests" ||
+        mode === "save" ||
+        mode === "child"
+      ) {
+        publish(uri, version, text);
+      }
+    }),
+  );
 
-  peer.onNotification("textDocument/didChange", (params) => {
-    const value = record(params);
-    const textDocument = record(value.textDocument);
-    const changes = Array.isArray(value.contentChanges) ? value.contentChanges : [];
-    const change = record(changes.at(-1));
-    const uri = String(textDocument.uri ?? "");
-    const text = String(change.text ?? "");
-    const version = Number(textDocument.version ?? 0);
-    documents.set(uri, { text, version });
-    log("change", {
-      uri,
-      text,
-      version,
-      range: change.range,
-      rangeLength: change.rangeLength,
-    });
-    if (
-      mode.startsWith("push") ||
-      mode.startsWith("typescript-sync") ||
-      mode === "open-close-false" ||
-      mode === "requests" ||
-      mode === "save" ||
-      mode === "child"
-    ) {
-      publish(uri, version, text);
-    }
-  });
+  peer.onNotification("textDocument/didChange", (params) =>
+    enqueueDocumentSync(() => {
+      const value = record(params);
+      const textDocument = record(value.textDocument);
+      const changes = Array.isArray(value.contentChanges) ? value.contentChanges : [];
+      const change = record(changes.at(-1));
+      const uri = String(textDocument.uri ?? "");
+      const text = String(change.text ?? "");
+      const version = Number(textDocument.version ?? 0);
+      documents.set(uri, { text, version });
+      log("change", {
+        uri,
+        text,
+        version,
+        range: change.range,
+        rangeLength: change.rangeLength,
+      });
+      if (
+        mode.startsWith("push") ||
+        mode.startsWith("typescript-sync") ||
+        mode === "open-close-false" ||
+        mode === "requests" ||
+        mode === "save" ||
+        mode === "child"
+      ) {
+        publish(uri, version, text);
+      }
+    }),
+  );
 
-  peer.onNotification("textDocument/didSave", (params) => {
-    const value = record(params);
-    log("save", { uri: record(value.textDocument).uri, text: value.text });
-  });
+  peer.onNotification("textDocument/didSave", (params) =>
+    enqueueDocumentSync(() => {
+      const value = record(params);
+      log("save", { uri: record(value.textDocument).uri, text: value.text });
+    }),
+  );
 
-  peer.onNotification("textDocument/didClose", (params) => {
-    const uri = String(record(record(params).textDocument).uri ?? "");
-    const document = documents.get(uri);
-    if (mode === "push-reopen-stale" && reopenOpenCount === 1 && document) {
-      reopenClosedVersion = document.version;
-    }
-    documents.delete(uri);
-    log("close", { uri });
-  });
+  peer.onNotification("textDocument/didClose", (params) =>
+    enqueueDocumentSync(() => {
+      const uri = String(record(record(params).textDocument).uri ?? "");
+      const document = documents.get(uri);
+      if (mode === "push-reopen-stale" && reopenOpenCount === 1 && document) {
+        reopenClosedVersion = document.version;
+      }
+      documents.delete(uri);
+      log("close", { uri });
+    }),
+  );
 
   peer.onRequest("textDocument/diagnostic", async (params, context) => {
+    await documentSync;
     const value = record(params);
     const uri = String(record(value.textDocument).uri ?? "");
     log("diagnostic", {
@@ -323,7 +345,8 @@ if (mode === "oversized-frame") {
   });
 
   if (mode.startsWith("typescript-sync")) {
-    peer.onRequest("workspace/executeCommand", (params) => {
+    peer.onRequest("workspace/executeCommand", async (params) => {
+      await documentSync;
       const value = record(params);
       const argumentsValue = Array.isArray(value.arguments) ? value.arguments : [];
       const command = String(argumentsValue[0] ?? "");

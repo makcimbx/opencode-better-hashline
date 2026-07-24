@@ -2796,7 +2796,7 @@ describe("new-file parent publication", () => {
             try {
               await realLstat(plan.canonicalPath);
               parentChecksAfterCommit += 1;
-              if (parentChecksAfterCommit === 2) throw syscallError("EIO");
+              if (parentChecksAfterCommit >= 2) throw syscallError("EIO");
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
             }

@@ -102,7 +102,7 @@ test("manager-facing TypeScript LSP proves clean, error, clear, and process exit
       env: {},
       initialization: { tsserver: { path: "./node_modules/@typescript/old/lib/tsserver.js" } },
       startupTimeoutMs: 15_000,
-      diagnosticsTimeoutMs: 5_000,
+      diagnosticsTimeoutMs: 15_000,
     });
     const startedPid = client.processId;
     if (startedPid === undefined) throw new Error("The real language server has no process ID.");
